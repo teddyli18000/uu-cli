@@ -120,9 +120,11 @@
 ### 4.2 字段与消息类型
 
 - **确认**：终止请求 = `TERM` 帧 type 11，channel=0，JSON `{"session_id":<int>}`。
-- **确认**：终止应答 = `TERM` 帧 type 12，JSON `{"code":<int>,"message":<string>}`；客户端只按 type 12 + `code` 匹配，不校验 channel。
+- **确认**：终止应答 = `TERM` 帧 type 12，JSON `{"code":<int>,"message":<string>}`；成功为 `{"code":0,"message":"ok"}`；错误时 `message` 为 `session_not_found`（`code=404`）或 `invalid_kill_session_request`。客户端只按 type 12 + `code` 匹配，不校验 channel。
 - **确认**：`TerminalSessionChanged` 是 `gv_pb.Message` 的 oneof 字段 28，消息体为空，没有 `session_id`，因此它只能表示“有变化，请刷新”。
-- **推断**：受控端在终止成功后先发 type 12，再发 `TerminalSessionChanged`；客户端收到空通知后发 `list_sessions_req`，用 `list_sessions_resp` 更新列表。
+- **确认**：受控端的处理顺序是先发送 type 12，再触发 `TerminalSessionChanged` 推送；推送是异步的，到达顺序不保证。
+- **确认**：type 12 应答本身不携带会话清单，不能清除列表；只回 type 12 而不推送 `TerminalSessionChanged`，列表不会消失。
+- **推断**：客户端收到空通知后发 `list_sessions_req`，用 `list_sessions_resp` 更新列表。
 - **待确认**：如果只发 `TerminalSessionChanged` 而不发 type 12，主控端是否会完成终止请求；建议两者都发，顺序如上。
 
 ### 4.3 路由条件
@@ -167,7 +169,9 @@ message CheckEnvResp {
 5. 如果走的是解锁路径，则记录 `source=unlock_response`，不再重复环境检测。
 
 **确认**：`check_env` 是 RPC，不是新连接；它发生在会话绑定之前。
+**确认**：受控端只有在 `CheckEnvResp.code == 0` 且 `message == "ok"` 时才授予访问；授权按连接保存，最后一次成功会覆盖前一次。
 **推断**：复用桌面连接时，如果该连接已经完成过环境检测/授权，主控端会跳过 `check_env`；只有新建终端通道才重新发送。这是“车端没有看到新的 check_env”的最可能原因。
+**推断**：桌面与终端共享连接时，授权槽可能已由桌面连接填充；终端复用同一连接时不需要新的 `check_env`，因此受控端看不到新请求。
 **推断**：如果受控端只在会话 id 存在后才记录请求，也会看不到 `check_env`，因为它发生在会话绑定之前。
 
 ### 5.3 失败路径
@@ -246,7 +250,8 @@ uuyc-cli term -d DEVICE kill NAME
 | 帧类型 1–16 与名称 | 确认 |
 | kill 请求 type 11 / 响应 type 12 / JSON 字段 | 确认 |
 | kill 响应不刷新列表 | 确认 |
-| `TerminalSessionChanged` 为空信号，需重新拉列表 | 确认（消息定义）；触发顺序为推断 |
+| `TerminalSessionChanged` 为空信号，需重新拉列表 | 确认（消息定义与发送）；客户端重拉为推断 |
+| 终止处理先发 type 12 再触发通知 | 确认（发送顺序）；到达顺序不保证 |
 | `CheckEnvReq` 空 / `CheckEnvResp{code,message}` / request_id 关联 | 确认 |
 | 复用桌面连接时跳过 `check_env` | 推断 |
 | 长度前缀精确布局、连接句柄传输方式 | 待确认 |
