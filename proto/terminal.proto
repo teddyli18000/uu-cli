@@ -1,0 +1,144 @@
+// terminal.proto — UU Remote (NetEase GameViewer) terminal subsystem wire schema.
+//
+// Interoperability schema for the official Windows client 4.43.x. The terminal
+// messages are a focused subset of the gv_pb package; field numbers keep their
+// original values, and gaps are documented rather than renumbered.
+//
+// Confidence markers used below:
+//   // confirmed  = field name, number, type and label present in the official
+//                   client's protocol schema
+//   // inferred   = not present in the schema; derived from observed behavior or
+//                   cross-message usage. Treat as a hypothesis.
+//
+// Scope: only the messages that the terminal feature actually uses. The full
+// gv_pb package has 15 files; this file is a focused subset, so the oneof
+// blocks below are sparse (field numbers keep their original values and the
+// gaps are documented, not renumbered).
+
+syntax = "proto3";
+
+package gv_pb;
+
+// ---------------------------------------------------------------------------
+// RPC envelope (rpc_main.proto)
+// ---------------------------------------------------------------------------
+
+// confirmed: rpc_main.proto, message RequestHeader, single field.
+message RequestHeader {
+  int64 request_id = 1; // confirmed
+}
+
+// confirmed: rpc_main.proto, message ResponseHeader, single field.
+message ResponseHeader {
+  int64 request_id = 1; // confirmed
+}
+
+// confirmed: rpc_main.proto. Original message has oneof fields 2..27 for the
+// other subsystems (capture/fps/quality/cursor/resolution/private-screen/
+// file-transfer/clipboard/mouse/virtual-display/plugin/draw/...). Only the
+// terminal members are reproduced here.
+message RpcRequest {
+  RequestHeader request_header = 1;                 // confirmed
+
+  // ... original fields 2..27 belong to other subsystems, omitted ...
+
+  CheckEnvReq terminal_check_env_req = 28;           // confirmed
+  RenameSessionReq terminal_rename_session_req = 29; // confirmed
+}
+
+// confirmed: rpc_main.proto. Field 25 is absent in the descriptor — a gap, not
+// a renumbering; it was either removed or reserved upstream.
+message RpcResponse {
+  ResponseHeader response_header = 1;                // confirmed
+
+  // ... original fields 2..23 belong to other subsystems, omitted ...
+
+  CheckEnvResp terminal_check_env_resp = 24;          // confirmed
+  // field 25: not defined in the descriptor (gap, purpose unknown)
+  RenameSessionResp terminal_rename_session_resp = 26; // confirmed
+}
+
+// ---------------------------------------------------------------------------
+// Terminal messages (rpc_message.proto)
+// ---------------------------------------------------------------------------
+
+// confirmed: rpc_message.proto, message CheckEnvReq — declared with no fields.
+// Sending it is a pure "is the terminal subsystem reachable/authorized" probe;
+// the correlation key lives in RequestHeader.request_id.
+message CheckEnvReq {
+}
+
+// confirmed: rpc_message.proto.
+message CheckEnvResp {
+  int32 code = 1;    // confirmed; 0 == success (inferred from CLI success path)
+  string message = 2; // confirmed
+}
+
+// confirmed: rpc_message.proto.
+message RenameSessionReq {
+  uint32 session_id = 1; // confirmed
+  string name = 2;       // confirmed
+}
+
+// confirmed: rpc_message.proto.
+message RenameSessionResp {
+  uint32 session_id = 1; // confirmed
+  int32 code = 2;        // confirmed
+  string message = 3;    // confirmed
+}
+
+// confirmed: rpc_message.proto, shared error detail used by many responses.
+message Error {
+  int32 error_code = 1;     // confirmed
+  string error_message = 2; // confirmed
+  string error_detail = 3;  // confirmed
+}
+
+// ---------------------------------------------------------------------------
+// Session notification (general.proto)
+// ---------------------------------------------------------------------------
+
+// confirmed: general.proto, message TerminalSessionChanged — declared with no
+// fields. It is a signal only: the receiver re-queries state instead of
+// reading a payload. Carries no session id, so it must be treated as a
+// "something changed, refresh" event.
+message TerminalSessionChanged {
+}
+
+// ---------------------------------------------------------------------------
+// Frame envelope (main.proto) — the transport-level Message wrapper
+// ---------------------------------------------------------------------------
+
+// confirmed: main.proto, message Message.
+//
+// seq/timestamp sit outside the oneof, so every frame is self-describing and
+// ordered. The oneof selects exactly one payload. Original oneof members 3..27
+// cover the other subsystems; only the terminal-relevant ones are reproduced.
+message Message {
+  int64 seq = 1;       // confirmed — monotonic frame sequence
+  int64 timestamp = 2; // confirmed — sender clock, epoch ms (inferred unit)
+
+  oneof payload {
+    RpcRequest rpc_request = 21;                    // confirmed
+    RpcResponse rpc_response = 22;                  // confirmed
+    TerminalSessionChanged terminal_session_changed = 28; // confirmed
+    // original members 3..20 and 23..27: other subsystems, omitted
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NOT a protobuf message — documented here because it is part of the same
+// feature surface. The terminal session object is carried as JSON on the
+// terminal frame channel, not as a gv_pb message. There is no
+// `TerminalSession` message anywhere in the 15 embedded descriptors of either
+// binary. Shape below is inferred from CLI validation strings.
+// ---------------------------------------------------------------------------
+//
+// {
+//   "session_id":     <uint32, must be non-zero>,
+//   "name":           <string, must be non-empty>,
+//   "state":          "running" | "detached" | "exited",
+//   "last_active_ms": <int64>,
+//   "created_at_ms":  <int64>,
+//   "attachable":     <bool>
+// }
