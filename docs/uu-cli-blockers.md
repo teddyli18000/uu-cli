@@ -15,7 +15,7 @@
 
 ### 1.1 结论
 
-**能建立“管理/查询”连接，但不能在没有交互终端或 GUI 本地宿主的情况下直接 `term new`。**
+**能建立管理/查询连接；`term new` 的交互终端 guard 可由 ConPTY 满足，真正的 GUI 依赖是“本地宿主绑定”，不是控制台本身。**
 
 - **Observed**：主程序未运行时，`uuyc-cli` 的 `version` / `status` / `echo` / `device list` 全部返回 `Main application is not running`。
 - **Observed**：主程序运行后，安装目录下的 `uuyc-cli term -d <local-device> ls --json` 在**没有 GUI 终端会话**时成功，返回 CLI 本地包装：
@@ -24,7 +24,7 @@
   ```
   这说明查询/管理路径不依赖 GUI 终端窗口。
 - **Observed**：`term new/attach` 在非交互 stdin/stdout 下直接报 `Error: term new/attach requires an interactive terminal`。
-- **Observed**：用伪终端（ConPTY）驱动 `term new` 时，CLI 进程退出码出现过 7/259，但没有捕获到终端输出；无法据此证明会话建立成功。
+- **Observed/Inferred**：ConPTY 满足 `term new/attach requires an interactive terminal` 的 guard；259 是 helper 在超时后读到 `STILL_ACTIVE`，不是 CLI 退出码；空输出是 helper 在读取完成前 `ClosePseudoConsole` 的 draining bug，不是 CLI 行为。无 GUI 下能否完成本地宿主绑定仍未测。
 - **Observed（关键）**：用户 GUI 的“终端远控”窗口实际启动了一个 CLI 进程，命令行形如：
   ```text
   uuyc-cli.exe term -d <local-device> new
@@ -35,20 +35,27 @@
   ```
   这说明 GUI 额外做的是**本地终端宿主绑定**：生成本地 host token、声明 host kind 为 `windows_terminal`、绑定窗口/会话名，然后在 Windows Terminal/控制台里启动 CLI。
 
+- **Confirmed（静态）**：本地宿主绑定字段出现在 attach 请求中：`local_host_token`、`local_host_kind`、`local_window_name`、`local_session_name`、`local_process_id`、`local_window_handle`、`local_session_id`；CLI 侧对应 `--local-host-token`、`--local-host-kind`、`--local-window-name`、`--local-session-name`、`--local-session-id`。
+- **Inferred**：没有绑定本地宿主时，attach 请求缺少 token/window 身份，主程序的 `cli_foreground_handoff ... stage=peer_identity` 无法完成，`terminal_access source=environment_check` 不会触发；这与 stale session + code 105 的现象一致。
+
 ### 1.2 本地调用/IPC 路径
 
 - **Confirmed（字符串/静态）**：CLI 与主程序使用全局命名管道：
   - `\\.\pipe\Global\GAMEVIEWER-IPC-SERVER-8C83A13E-D2C4-450C-B69E-6427B73FBD7B`
   - `\\.\pipe\Global\GAMEVIEWER-IPC-SERVER-INIT-KEY-E59D03D6-1522-430B-8EEA-35904D724BC7`
+  - `Global\Session-390E1176-E8F4-4474-A211-B8BC0511F864`、`Global\SessionEventGameViewerCad...`
+  - 终端控制管道族 `uuyc-terminal-control-<n>`
 - **Confirmed（字符串/静态）**：CLI 的本地命令语法是 `cmd:...` / `resp:...`，日志标签 `cli_ipc`、`cli_connect_ipc`；命令如 `cmd:echo:%1`、`cmd:device_connect:%1`、`cmd:connect:%1:%2`。
-- **Observed**：复制到其它目录的 `uuyc-cli.exe` 会报 `Main application is not running`；安装目录下的同一版本可连接。说明 CLI 按自身安装根目录/注册表发现主程序，不能简单复制单文件使用。
-- **Inferred**：`INIT-KEY` 管道用于主程序/启动器初始化本地 IPC；本次观察时该管道未出现，但安装版 CLI 仍能工作，说明它可能是首次启动/特定启动方式的初始化，而不是每次查询的硬前提。
+- **Observed/Inferred**：复制到其它目录的 `uuyc-cli.exe` 会报 `Main application is not running`；安装目录下的同一版本可连接。管道 GUID 是编译期常量、副本字节一致，所以失败点不是管道名，而是 **identity/install-root 校验**（`final_channel_source=identity_dll`、`existence_check_failed`）。单文件复制不可用。
+- **Observed**：`INIT-KEY` 管道在本次观察时未出现，而 SERVER 管道在监听、`term ls` 仍可工作 → 它不是稳态查询的硬前提；更像启动器/前台握手按需创建。
+- **Not tested**：主程序是否接受非官方 peer 连接 SERVER 管道（`peer_identity` 判据）。这是 `uu-cli` 直接实现 `cmd:`/`resp:` 的关键未知；宿主安全要求下未测。
 
 ### 1.3 对 uu-cli 的含义
 
 - 只做 `ls` / `has` / `kill` 等管理操作：可以走官方 CLI，不需要 GUI 终端窗口。
-- 要做 `term new/attach`：需要**交互终端**，并且要提供 GUI 同款的本地宿主参数（`--local-host-token`、`--local-host-kind windows_terminal`、`--local-window-name`、`--local-session-name`）。没有这些参数时，CLI 不能完成本地宿主绑定。
+- 要做 `term new/attach`：交互终端 guard 可由 ConPTY 满足；真正的依赖是 **本地宿主绑定**（`--local-host-token`、`--local-host-kind windows_terminal`、`--local-window-name`、`--local-session-name`）。没有绑定，attach 缺少 peer identity，环境检测/授权不会完成。
 - **Not tested**：本地程序自行生成合法 `local-host-token` 并由无 GUI 进程完成绑定；宿主安全要求下未继续尝试。
+- **Not tested（关键）**：主程序是否接受非官方 peer 连接 SERVER 管道。如果接受，`uu-cli` 可以直接实现 `cmd:`/`resp:`，不必依赖官方 CLI；如果不接受，token/peer identity 就是核心问题。
 
 ---
 
@@ -84,7 +91,7 @@
 - **Observed**：测试创建的 `probe*` 会话在 CLI 进程退出后不再出现在列表中（`No changes: session not found`）；没有留下长期运行的 probe 会话。
 - **Not tested**：受控端主动 detach 后会话是否保持 running；controller 进程退出后会话保留多久；网络断线/重连；多会话上限。
 - **Confirmed（静态）**：服务端有 `terminal detach`、`terminal close`、`terminal session termination`、`replaced_connections`、`session_limit` 等路径；close/detach 由客户端发起、服务端按 connection handle 校验。
-- **Inferred**：code 105 的根因是 `check_env` RPC 在已有连接上等待 20 秒超时；中止 attach 后旧连接未及时清理，导致后续命令复用/等待同一连接。这与“车端没有看到新的 check_env”一致：请求不是新连接，而是既有连接上的 RPC。
+- **Inferred**：code 105 的根因是 `check_env` RPC 在已有连接上等待 20 秒超时；中止 attach 后旧连接未及时清理，导致后续命令复用/等待同一连接。更具体地说，缺少本地宿主绑定/peer identity 时 attach 无法完成授权，留下 stale session；这与“车端没有看到新的 check_env”一致：请求不是新连接，而是既有连接上的 RPC。
 
 ### 2.3 并发边界
 
@@ -111,7 +118,7 @@
 ### 3.3 Type 6 exit 与退出码
 
 - **Confirmed（静态）**：type 6 载荷键为 `exit_code`，即 `{"exit_code": <int>}`；服务端从真实子进程退出状态取得该值。
-- **Observed**：在 WSL 临时设备的 bash 中发送 `exit 7`，CLI 进程退出码为 **7**（伪终端助手记录 `[CLI_EXIT]=7`）。这说明**远端 shell 的退出码会传播到 CLI 进程退出码**。
+- **Observed（有限）**：在 WSL 临时设备的 bash 中发送 `exit 7`，CLI 进程退出码为 **7**（伪终端助手记录 `[CLI_EXIT]=7`），且文件型测试证明命令确实执行。这说明远端 shell 的退出码很可能传播到 CLI 进程退出码；但终端流未被 helper 捕获，重复验证未做。`259` 是 helper 的 `STILL_ACTIVE`，不是 CLI 退出码。
 - **Inferred**：`uu-cli` 可以直接把 CLI 退出码作为远端命令退出码返回；不需要额外解析 type 6 载荷。
 - **Not tested**：`exit 5` 的重复验证、非零错误码的边界、CLI 是否在正常 shell 退出时打印提示。
 
@@ -131,7 +138,7 @@
 
 ### 4.2 实测状态
 
-- **Not tested（结论性）**：一次延迟发送 `0x03` 的 `sleep 60` 测试中，CLI 退出码为 259（仍在运行），没有生成预期的 AFTER 文件；无法判断 Ctrl-C 是否生效。宿主安全要求下未继续。
+- **Not tested（结论性）**：一次延迟发送 `0x03` 的 `sleep 60` 测试中，helper 读到 259（`STILL_ACTIVE`，进程仍在运行），没有生成预期的 AFTER 文件；由于 helper 的 draining bug，无法判断 Ctrl-C 是否生效。宿主安全要求下未继续。
 - **Observed（旁证）**：中止 attach 会导致 code 105 的 stale 窗口，说明会话/连接清理对信号和断开很敏感。
 
 ### 4.3 Linux 端映射建议
@@ -148,7 +155,7 @@
 
 1. **管理面**：v1 直接用官方 `uuyc-cli` 的 `term ls/has/kill/rename`；这些命令不需要 GUI 终端，解析其本地包装 `{success,data:{items,total},error,timestamp}`。
 2. **会话标识**：用户面用 `name`，内部保留远端 `session_id`；不要把 CLI 本地列表当成远端裸数组。
-3. **创建/附着**：`term new/attach` 需要交互终端；要无 GUI 运行，必须解决本地宿主绑定（`--local-host-token`/`--local-host-kind`/窗口名）或直接实现远端 `open` 帧。当前证据不足以证明可以完全绕过 GUI 宿主。
+3. **创建/附着**：`term new/attach` 的交互终端 guard 可由 ConPTY 满足；要无 GUI 运行，必须解决本地宿主绑定（`--local-host-token`/`--local-host-kind`/窗口名）或直接实现远端 `open` 帧。当前证据不足以证明可以完全绕过 GUI 宿主；关键未知是非官方 peer 是否被 SERVER 管道接受。
 4. **退出码**：优先使用 CLI 进程退出码；它已观察到与远端 `exit 7` 一致。
 5. **Ctrl-C**：优先按 raw `0x03` 设计；显式中断再用 type 7 `{"sig":"SIGINT"}`。Linux 端按 §4.3 映射。
 6. **数据流**：按单一合流、无标签的字节流处理；不要假设能区分 stdout/stderr。
@@ -163,10 +170,11 @@
 | 安装版 CLI 可无 GUI 终端执行 `term ls --json` | Observed |
 | 复制版 CLI 因安装根目录发现失败 | Observed |
 | GUI 通过 `--local-host-token/--local-host-kind windows_terminal/--local-window-name/--local-session-name` 启动 CLI | Observed |
-| `term new/attach` 需要交互终端 | Observed |
+| `term new/attach` 交互 guard；ConPTY 可满足 | Observed/Confirmed |
+| GUI 依赖是本地宿主绑定，不是控制台 | Observed/Inferred |
 | `term ls --json` 本地包装与 item 字段（无 session_id） | Observed |
 | 中止 attach 后 code 105 stale 窗口约 10s | Observed |
-| 远端 `exit 7` 传播为 CLI 退出码 7 | Observed |
+| 远端 `exit 7` 传播为 CLI 退出码 7 | Observed（有限） |
 | 远端 stdout/stderr 合流、无标签 | Confirmed（结构）/ Inferred（行为） |
 | 输入回显来自远端 PTY | Inferred |
 | type 6 载荷 `{"exit_code":N}` | Confirmed |
@@ -174,4 +182,5 @@
 | Ctrl-C 走 raw 0x03 stdin | Inferred |
 | Linux PTY/前台进程组映射 | Inferred（无 Windows 参考实现） |
 | 无 GUI 完全绕过本地宿主创建会话 | Not tested |
+| 非官方 peer 连接 SERVER 管道（peer_identity） | Not tested |
 | 多会话上限/网络重连/完整 detach 生命周期 | Not tested |
