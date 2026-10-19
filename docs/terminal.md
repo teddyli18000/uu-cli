@@ -127,6 +127,8 @@
 - **推断**：客户端收到空通知后发 `list_sessions_req`，用 `list_sessions_resp` 更新列表。
 - **待确认**：如果只发 `TerminalSessionChanged` 而不发 type 12，主控端是否会完成终止请求；建议两者都发，顺序如上。
 
+> 对当前现象的直接结论：type 12 的 JSON 应答格式本身是对的；列表不消失的原因是缺少 `TerminalSessionChanged` 推送，而不是 `code`/`message` 字段写错。
+
 ### 4.3 路由条件
 
 - 应答必须使用与请求相同的管理通道编号（channel）。客户端侧的 kill 等待器不比较 channel，但服务端按连接句柄路由；不同通道的应答可能被丢弃或归错会话。
