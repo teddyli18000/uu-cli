@@ -79,6 +79,8 @@
 - **Observed**：CLI 本地列表**不暴露 `session_id`**；`term attach/has/kill/rename` 都以 **session name** 作为参数。
 - **Confirmed（远端协议）**：`list_sessions_resp`（type 10）的裸数组 item 含 `session_id`、`name`、`state`、`shell`、`last_active_ms`、`created_at_ms`；`kill_session_req` 用 `session_id`。
 - **Inferred**：对 `uu-cli` 的用户面标识应使用 **name**（稳定、可读、CLI 已按 name 操作）；`session_id` 只作为远端协议内部路由/终止字段，不暴露给 agent 用户。
+- **Confirmed（静态）**：`session_id` 由服务端分配（`terminal session allocation result=assigned session_id=`），CLI 只消费；远端帧头 0x08 为 u32 LE session_id；CLI 本地 wrapper 丢弃 `session_id`，映射为 `name/deviceId/deviceName/shell/state/createdAt/attachable`，`createdAt` 来自 `created_at_ms`。
+- **Inferred（高）**：`session_id` 是服务端 map key，分配一次、resume 复用；会话 exited 后重建才新分配。`close`/`detach` 只解绑连接，session 保留 id/name/createdAt 且仍 attachable；只有 `kill` 销毁会话对象。
 
 ### 2.2 已观察到的生命周期
 
@@ -91,13 +93,17 @@
 - **Observed**：测试创建的 `probe*` 会话在 CLI 进程退出后不再出现在列表中（`No changes: session not found`）；没有留下长期运行的 probe 会话。
 - **Not tested**：受控端主动 detach 后会话是否保持 running；controller 进程退出后会话保留多久；网络断线/重连；多会话上限。
 - **Confirmed（静态）**：服务端有 `terminal detach`、`terminal close`、`terminal session termination`、`replaced_connections`、`session_limit` 等路径；close/detach 由客户端发起、服务端按 connection handle 校验。
-- **Inferred**：code 105 的根因是 `check_env` RPC 在已有连接上等待 20 秒超时；中止 attach 后旧连接未及时清理，导致后续命令复用/等待同一连接。更具体地说，缺少本地宿主绑定/peer identity 时 attach 无法完成授权，留下 stale session；这与“车端没有看到新的 check_env”一致：请求不是新连接，而是既有连接上的 RPC。
+- **Confirmed（静态）**：code 105（`0x69`）来自 `check_env` 等待循环，deadline 为 20 秒；105 对应三条消息：`Timeout waiting for terminal environment check`、`terminal disconnected while checking environment`、`invalid terminal environment response`。发送失败是另一个码 **102**（`0x66`，`failed to send terminal environment check`）。等待是 poll loop，按 `request_id` 过滤，mismatch 直接丢弃。
+- **Inferred（高）**：中止 attach 会留下迟到的 `check_env` 响应和 stale connection generation；CLI 丢弃所有不匹配包并耗完 20 秒 deadline，直到旧连接被拆除、generation 重新注册才恢复。观察到的 ~10 秒窗口更符合“连接先断”的 105 变体，而不是更短的超时。
+- **Confirmed（静态）**：`close`/`detach` 由客户端发起、服务端按 connection handle 校验；两者只解绑连接并排队 `TerminalSessionChanged`，不销毁会话；`kill_session_req` 才销毁。服务端不向 peer 回 close/detach 帧。
+- **Not tested**：真实 detach→re-attach 的 id 是否完全一致、硬杀 CLI 后会话是 running 还是 detached、清理延迟、105 的实际变体与持续时间。
 
 ### 2.3 并发边界
 
 - **Observed**：GUI 同时存在 detached/running 两个会话。
 - **Confirmed（静态）**：存在 `session_limit`、`session_limit_reached`、`replaced_connections`（连接被重新绑定到不同 session id 的计数）。
-- **Not tested**：具体上限数值、达到上限时的错误码/提示、并发创建时的竞争行为。
+- **Confirmed（静态）**：拒绝路径包括 410 `session_limit` / `terminal_session_limit_reached`、503 `open_in_progress`、`session_name_conflict`、`invalid_session_name`、`terminal session already exists`；`replaced_connections` 是服务端 rebind，不触发 peer close。
+- **Unverified**：具体会话上限数值（服务端策略，无字面量）；`not tested`：并发创建/上限行为。
 
 ---
 
