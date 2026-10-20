@@ -160,16 +160,7 @@ impl TermPty {
             )));
         }
 
-        let text = String::from_utf8(output).map_err(|error| {
-            JobRunError::Completed(anyhow!("remote pwd output is not valid UTF-8: {error}"))
-        })?;
-        let path = text.trim_end_matches(['\r', '\n']);
-        if path.is_empty() {
-            return Err(JobRunError::Completed(anyhow!(
-                "remote pwd returned an empty path"
-            )));
-        }
-        Ok(path.to_owned())
+        crate::job::decode_pwd_output(&output).map_err(JobRunError::Completed)
     }
 }
 
