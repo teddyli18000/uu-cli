@@ -9,10 +9,10 @@ Local Workspace
       ↓
 Remote Binding = device identity + remote root
       ↓
-Terminal Worker Pool
+Device-level Terminal Worker Pool
 ```
 
-对 Codex 来说，唯一稳定概念是当前本地 workspace。设备身份、session name/id、worker 调度都隐藏在 CLI 后面。
+对 Codex 来说，唯一稳定概念是当前本地 workspace。设备 identity、session name/id、worker 调度都隐藏在 CLI 后面。
 
 ## 2. Workspace
 
@@ -32,9 +32,11 @@ local_root
 - binding 存在用户侧，不向 repo 写 `.uu` 等项目文件；
 - v1 暂不处理一个 workspace 同时操作两台远端设备。
 
+同一 remote device 可以绑定多个 local workspace。它们共享设备级 worker pool，但每个 job 都使用自己的 `remote_root`，因此不会因为共享 Terminal 而混淆项目目录。
+
 ## 3. Remote device
 
-设备是 Terminal pool 的隔离边界。
+设备是 Terminal pool 的硬隔离边界：
 
 ```text
 device A → workers A1 A2 A3
@@ -43,9 +45,7 @@ device B → workers B1 B2
 
 不同设备的 worker 绝不能混用。
 
-如果首次绑定时同时发现多个设备已经打开 Terminal，应由用户通过简短 PowerShell 选择器选择一次。UI 使用友好设备名和必要的区分信息，内部再保存经过验证的稳定 identity。
-
-Codex 不直接选择 deviceId。
+首次绑定时如果多台设备都有可用 Terminal，只让用户通过简短 PowerShell 选择一次 friendly name；内部保存经过验证的稳定 identity。Codex 不直接选择 deviceId。
 
 ## 4. Terminal worker pool
 
@@ -60,6 +60,7 @@ device A
 
 规则：
 
+- pool 属于 device，不属于某个 workspace；
 - 一个 worker 同时只属于一个正在运行的 job；
 - 长任务持续占用原 worker，并持续把输出返回给调用方；
 - 其他命令可调度到其他 idle worker；
@@ -67,46 +68,92 @@ device A
 - 不抢占、不串流、不跨设备；
 - worker/session 的内部名字不要求用户记忆。
 
-## 5. 新 Terminal 的发现和归属
+## 5. Terminal 发现与人类授权
 
-用户手动打开新官方 Terminal 后，`uu-cli` 应尽快自动发现。
+用户打开新官方 Terminal 后，`uu-cli` 应尽快自动发现，但**发现不等于可以静默接管**。
 
-处理原则：
+### 5.1 有请求正在等待
 
-- 如果一个 `uu` 请求正在等待 Terminal，而且新 Terminal 显然属于该请求的目标设备，可以直接继续；
-- 如果归属完全明确，可以无提示加入对应 pool；
-- 如果存在多个设备、多个可能 workspace，或者无法判断用户是否愿意把这个 Terminal 交给 uu-cli，弹一个极短的 PowerShell 选择窗口；
-- 选择应支持默认项、数字键和 Enter，避免要求用户输入内部 ID；
-- 已确认过的同一 Terminal/binding 不重复提示；
-- 用户明确跳过的 Terminal 不得被使用。
+如果某个 `uu` 请求正在等待一个明确目标设备的 worker，而用户此时从官方 UU 打开该设备 Terminal，这个动作本身已经构成足够强的上下文：新 Terminal 可以直接用于满足这个等待请求，避免再弹第二轮确认。
 
-不依赖修改官方 session 名称来完成归属。实现者应优先使用对 UU 干扰最小的本地识别方式。
+如果 workspace 尚未绑定，而用户被提示“打开你想使用设备的 Terminal”，等待期间唯一新出现的 Terminal 可以同时完成：
 
-## 6. Shell context
+```text
+identify device
+→ authorize worker for this pending request
+→ collect/confirm remote root
+→ continue original command
+```
 
-Terminal 不是 workspace 的长期 shell 状态容器。
+不要让用户重新运行原命令。
 
-不同 `uu` 调用之间不保证复用同一个 worker，因此不保证继承：
+### 5.2 没有请求正在等待
+
+如果设备已经设置“新 Terminal 自动加入”，直接加入 pool。
+
+否则弹一个短 PowerShell 交互：
+
+```text
+AIC-Car-1 新终端已打开
+[Enter] 交给 uu-cli   [N] 不使用   [A] 此设备以后自动加入
+```
+
+`N` 只表示该 session 不交给 uu-cli；之后不得偷偷调度。`A` 是 device-level 偏好，因为 worker pool 本来就属于 device。
+
+多个 Terminal 短时间出现时应合并提示，不连续开多个窗口。
+
+### 5.3 不存在“同设备多个 workspace 的 Terminal 归属问题”
+
+同设备多个 workspace 共享同一 worker pool，job 自己携带 `remote_root`。因此新 Terminal 不需要再问“属于哪个 workspace”。这能显著减少交互和错误分支。
+
+## 6. Interaction channel
+
+人类配置/授权和远端命令数据流必须分离。
+
+```text
+Codex / shell ── uu stdin/stdout ── remote job
+                       │
+                       └── human decision → short separate pwsh when required
+```
+
+要求：
+
+- 正常 `uu` stdout 不混入选择菜单；
+- 工具诊断走 stderr；
+- PowerShell 选择器不能消费原命令 stdin；
+- 被 pipe/Agent 调用时，也不能因为需要人选择而把菜单文本伪装成远端输出；
+- 当前环境无法安全展示交互时，不猜选择结果。
+
+## 7. Shell-state isolation
+
+Terminal 是复用的 worker，但不是持久 workspace context。
+
+不同 `uu` 调用之间不能依赖：
 
 - `cd`；
 - `export`；
 - `source` / virtualenv；
 - alias；
+- shell option；
 - 其他 shell-local 状态。
 
-普通 job 从 workspace 的 `remote_root` 开始。
+普通 job 概念上应当：
 
-因此：
-
-```powershell
-uu "cd src && source .venv/bin/activate && python main.py"
+```text
+enter isolated shell scope
+→ cd remote_root
+→ execute user command
+→ collect exit status
+→ leave scope
 ```
 
-是正确模型，而不是依赖前一条 `uu cd src`。
+这样上一条命令的 `cd/export/source/exit/exec` 不应成为下一条 job 的隐式输入。
 
-持续交互/长任务在自己的生命周期内保持同一个 worker；job 结束后不承诺留下的 shell-local 状态会被下一条命令使用。
+具体用 subshell、fresh shell 或其他机制由实现者根据真实 PTY/交互行为决定。
 
-## 7. Job
+持续交互/长任务在自己的生命周期内保持同一个 worker；job 结束后不把其 shell-local 状态作为下一条命令的契约。
+
+## 8. Job
 
 一次 `uu <command>` 对应一次 job。
 
@@ -114,8 +161,8 @@ uu "cd src && source .venv/bin/activate && python main.py"
 
 ```text
 resolve workspace binding
-→ choose one idle worker on the bound device
-→ run from remote_root
+→ choose one idle worker on bound device
+→ enter job-local shell scope at remote_root
 → stream output in real time
 → determine completion + exit status
 → release worker
@@ -124,20 +171,40 @@ resolve workspace binding
 关键安全语义：
 
 - 命令一旦已经发送到远端，不因为连接异常自动换 worker 重跑；
-- 如果无法确认结果，明确报告 unknown/may still be running；
-- 不使用 shell prompt 文本作为唯一的命令完成判断；
-- PTY 本身 stdout/stderr 合流时保持事实，不虚构分离。
+- 如果无法确认结果，明确报告 unknown / may still be running；
+- 不使用 shell prompt 文本作为唯一命令完成判断；
+- PTY stdout/stderr 合流时保持事实，不虚构分离。
 
-具体 completion marker、PTY attachment、恢复协议等属于实现细节。
+## 9. Crash / recovery
 
-## 8. 文件传输
+“后台进程重启后把所有 session 当 idle”是不安全的。
 
-`put/get` 绑定到当前 workspace 的远端设备和路径上下文：
+如果 worker 在后台组件崩溃前可能有 job 正在运行：
+
+```text
+worker → unknown / quarantined
+```
+
+只有当实现能够可靠证明旧 job 已经结束时，才重新放回 idle pool。
+
+不能证明时，允许：
+
+- 等待可证明的完成信号；
+- 让用户关闭/重新打开该 Terminal；
+- 使用其他新 worker。
+
+但不能向一个可能仍在运行旧命令的 PTY 注入新命令，也不能重新发送旧命令。
+
+## 10. File transfer
+
+`put/get` 绑定到当前 workspace 的 remote device 和 remote root：
 
 ```powershell
 uu put <local> <remote>
 uu get <remote> <local>
 ```
+
+远端相对路径相对于 `remote_root`；绝对路径保持绝对语义。若支持 `~`，必须按远端用户环境稳定解析，不能落到本地 Windows 语义。
 
 文件通道不要求与 Terminal 共用同一种内部机制，但必须：
 
@@ -146,7 +213,7 @@ uu get <remote> <local>
 - 不完整不能报告成功；
 - 不暴露底层协议给用户或 Agent。
 
-## 9. 自动可用与低占用
+## 11. 自动可用与低占用
 
 产品要求：
 
@@ -165,10 +232,12 @@ uu get <remote> <local>
 - 不永久高频 polling/spawn 官方组件；
 - 不需要时不保持昂贵连接；
 - 无 tray、额外 GUI 或常驻可见 console；
-- 需要用户决定时可以弹短 PowerShell 交互；
+- 需要用户决定时可以弹短 PowerShell；
 - 后台能力失效后，下一次 `uu` 可以恢复或给出明确错误。
 
-## 10. Official UU isolation
+“随 UU 一起可用”是产品语义，不要求通过 hook/patch 强行让两个进程严格同生共死。
+
+## 12. Official UU isolation
 
 `uu-cli` 必须把官方 UU 当作外部事实来源，而不是需要改造的宿主。
 
@@ -180,26 +249,43 @@ uu get <remote> <local>
 - 不 kill/rename/close 用户未授权的 session；
 - 不改变用户正在手工操作的 Terminal；
 - 不让自己的崩溃/卸载影响官方 UU；
-- 如果某种 attach/reuse 会影响官方 UI，应换安全路径或只使用专门提供给 uu-cli 的 Terminal。
+- 如果某种 attach/reuse 会影响官方 UI，只能用于用户已经明确交给 uu-cli 的专用 Terminal，或者换更安全路径。
 
-## 11. Portability
+## 13. Portability
 
 架构不能依赖开发机偶然状态。
 
 应当允许：
 
 ```text
-另一台正常 Windows 电脑
-+ 官方 UU Remote 已安装、可登录、可开 Terminal
+另一台官方 UU 正常支持的 Windows 电脑
++ 官方 UU Remote 已安装
 + 安装 uu-cli
 → 直接完成首次 binding 并使用
 ```
 
-因此设备身份、安装路径、用户目录、盘符、session 名、UU 版本差异都必须通过运行时发现/兼容性逻辑处理，而不是写死在代码里。
+因此设备 identity、安装路径、用户目录、盘符、session 名、UU 版本差异都必须通过运行时发现/兼容性逻辑处理，而不是写死在代码里。
 
 安装后不应要求 Python/Rust/Node/WSL 等开发运行时。
 
-## 12. User-visible surface
+## 14. Validation architecture
+
+验证也遵循分层：
+
+```text
+pure logic / packaging / clean install
+        ↓ GitHub-hosted Windows CI
+official UU install/discovery smoke
+        ↓ CI when environment supports it
+real login / real Terminal / real remote device
+        ↓ minimal real-machine integration test
+```
+
+CI 不应伪装成真实登录后的 UU 环境；真实环境也不应承担本可以交给 CI 的反复构建、安装、卸载和故障注入。
+
+详见 `TESTING.md`。
+
+## 15. User-visible surface
 
 日常：
 
@@ -230,7 +316,7 @@ Workers    3
 
 这里 worker 名称只用于诊断，不构成 Agent API。
 
-## 13. v1 非目标
+## 16. v1 非目标
 
 - 一个 workspace 同时驱动多台设备；
 - 用户手工管理 session id；
