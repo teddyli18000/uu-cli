@@ -52,7 +52,7 @@ function Test-NetEaseHost([string]$url) {
 function Get-AbsoluteUrls([string]$text, [Uri]$relativeTo) {
     $set = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
     foreach ($match in [regex]::Matches($text, '(?i)https?://[^\s\"''<>]+')) {
-        $raw = $match.Value.TrimEnd(')', ']', '}', ',', ';', '\\')
+        $raw = $match.Value.TrimEnd(')', ']', '}', ',', ';')
         try {
             $uri = [Uri]::new($relativeTo, $raw)
             if ($uri.Scheme -in @('http', 'https')) {
