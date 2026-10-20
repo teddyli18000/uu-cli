@@ -378,21 +378,33 @@ fn run_git_bash_attached_terminal(identity: AttachIdentity) -> Result<u8, Box<dy
     let _input_relay = thread::Builder::new()
         .name("fake-uuyc-git-bash-input".to_owned())
         .spawn(move || {
-            if let Err(error) = forward_conpty_input(io::stdin(), child_stdin, identity) {
+            if let Err(error) = forward_conpty_input(io::stdin(), child_stdin, identity.clone()) {
                 eprintln!("fake-uuyc: Git Bash input relay failed: {error}");
             }
         })?;
+    let stdout_identity = identity.clone();
     let stdout_relay = thread::Builder::new()
         .name("fake-uuyc-git-bash-stdout".to_owned())
         .spawn(move || {
-            if let Err(error) = relay_bash_output(child_stdout, io::stdout()) {
+            if let Err(error) = relay_bash_output(
+                child_stdout,
+                io::stdout(),
+                stdout_identity,
+                "stdout",
+            ) {
                 eprintln!("fake-uuyc: Git Bash stdout relay failed: {error}");
             }
         })?;
+    let stderr_identity = identity.clone();
     let stderr_relay = thread::Builder::new()
         .name("fake-uuyc-git-bash-stderr".to_owned())
         .spawn(move || {
-            if let Err(error) = relay_bash_output(child_stderr, io::stderr()) {
+            if let Err(error) = relay_bash_output(
+                child_stderr,
+                io::stderr(),
+                stderr_identity,
+                "stderr",
+            ) {
                 eprintln!("fake-uuyc: Git Bash stderr relay failed: {error}");
             }
         })?;
@@ -408,9 +420,31 @@ fn run_git_bash_attached_terminal(identity: AttachIdentity) -> Result<u8, Box<dy
         .unwrap_or(1))
 }
 
-fn relay_bash_output<R: Read, W: Write>(mut input: R, mut output: W) -> io::Result<()> {
-    io::copy(&mut input, &mut output)?;
-    output.flush()
+fn relay_bash_output<R: Read, W: Write>(
+    mut input: R,
+    mut output: W,
+    identity: AttachIdentity,
+    stream: &str,
+) -> Result<(), Box<dyn Error>> {
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let bytes_read = input.read(&mut buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        output.write_all(&buffer[..bytes_read])?;
+        output.flush()?;
+        record_fixture_diagnostic(json!({
+            "event": "bash_output",
+            "deviceId": &identity.device_id,
+            "sessionName": &identity.session_name,
+            "createdAt": &identity.created_at,
+            "stream": stream,
+            "hex": hex_encode(&buffer[..bytes_read])
+        }))?;
+    }
+    output.flush()?;
+    Ok(())
 }
 fn forward_conpty_input<R: Read, W: Write>(
     mut input: R,
@@ -498,6 +532,18 @@ fn dispatch_bash_line<W: Write>(
         output.write_all(b"\n")?;
     }
     output.flush()?;
+    let mut forwarded = line.clone();
+    if terminated {
+        forwarded.push(b'\n');
+    }
+    record_fixture_diagnostic(json!({
+        "event": "terminal_input",
+        "deviceId": &identity.device_id,
+        "sessionName": &identity.session_name,
+        "createdAt": &identity.created_at,
+        "hex": hex_encode(&forwarded),
+        "terminated": terminated
+    }))?;
     if !line.is_empty() && is_terminal_wrapper(line) {
         record_event(json!({
             "event": "dispatch",
@@ -527,6 +573,23 @@ fn record_dispatch(wrapper: &str, identity: &AttachIdentity) -> Result<(), Box<d
         "result": "sent",
         "wrapper": wrapper
     }))
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn record_fixture_diagnostic(record: Value) -> Result<(), Box<dyn Error>> {
+    let Some(path) = env::var_os("UU_TEST_FIXTURE_EVENTS") else {
+        return Ok(());
+    };
+    append_fixture_event(std::path::Path::new(&path), record)
 }
 
 fn record_event(record: Value) -> Result<(), Box<dyn Error>> {
