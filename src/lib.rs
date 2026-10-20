@@ -10,4 +10,5 @@ pub mod scheduler;
 #[cfg(windows)]
 pub mod transport;
 pub mod uuyc;
+pub mod worker_lease;
 pub mod workspace;
