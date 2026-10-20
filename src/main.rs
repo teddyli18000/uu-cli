@@ -294,7 +294,8 @@ fn run_remote(config: &Config, cwd: &Path, argv: Vec<OsString>) -> Result<u8> {
 
     #[cfg(windows)]
     {
-        let cli = OfficialCli::locate().context("official UU Remote is required for remote execution")?;
+        let cli =
+            OfficialCli::locate().context("official UU Remote is required for remote execution")?;
         let snapshot = discover_inventory(&cli)?;
         let device = snapshot
             .devices
@@ -311,7 +312,10 @@ fn run_remote(config: &Config, cwd: &Path, argv: Vec<OsString>) -> Result<u8> {
             bail!("bound target {} is offline", binding.device_name);
         }
         if let Some(error) = &device.session_error {
-            bail!("cannot query terminal workers on {}: {error}", binding.device_name);
+            bail!(
+                "cannot query terminal workers on {}: {error}",
+                binding.device_name
+            );
         }
 
         let workers: Vec<&SessionInfo> = device
@@ -346,7 +350,10 @@ fn run_remote(config: &Config, cwd: &Path, argv: Vec<OsString>) -> Result<u8> {
             match transport.run_job(&mut output, &binding.remote_root, &shell_command) {
                 Ok(result) => {
                     return u8::try_from(result.exit_code).with_context(|| {
-                        format!("remote shell returned invalid exit code {}", result.exit_code)
+                        format!(
+                            "remote shell returned invalid exit code {}",
+                            result.exit_code
+                        )
                     });
                 }
                 Err(error) if error.is_unknown() => {
