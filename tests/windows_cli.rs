@@ -138,6 +138,13 @@ fn collect_pipe(receiver: Receiver<Result<Vec<u8>, String>>, pid: u32, stream: &
 }
 
 fn run_bounded(command: &mut Command, timeout: Duration, description: &str) -> Output {
+    let test_log_path = command.get_envs().find_map(|(key, value)| {
+        if key == std::ffi::OsStr::new("UU_TEST_LOG") {
+            value.map(PathBuf::from)
+        } else {
+            None
+        }
+    });
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -171,8 +178,22 @@ fn run_bounded(command: &mut Command, timeout: Duration, description: &str) -> O
     let stdout = collect_pipe(stdout, pid, "stdout");
     let stderr = collect_pipe(stderr, pid, "stderr");
     if timed_out {
+        let log_contents = match test_log_path.as_deref() {
+            Some(path) => match fs::read(path) {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    "<missing>".to_owned()
+                },
+                Err(error) => format!("<could not read: {error}>"),
+            },
+            None => "<UU_TEST_LOG not set on command>".to_owned(),
+        };
+        let log_path = test_log_path
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<unset>".to_owned());
         panic!(
-            "{description} exceeded {timeout:?}; stdout={} stderr={}",
+            "{description} exceeded {timeout:?}; stdout={}\nstderr={}\nUU_TEST_LOG ({log_path}):\n{log_contents}",
             String::from_utf8_lossy(&stdout),
             String::from_utf8_lossy(&stderr)
         );
@@ -323,6 +344,9 @@ fn read_dispatches(path: &Path) -> Vec<Value> {
         .expect("fake official CLI should record a dispatch")
         .lines()
         .map(|line| serde_json::from_str(line).expect("parse dispatch record"))
+        .filter(|record: &Value| {
+            record.get("event").and_then(Value::as_str) == Some("dispatch")
+        })
         .collect()
 }
 
