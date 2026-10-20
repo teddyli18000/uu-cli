@@ -14,7 +14,7 @@
 - 在新的 Windows runner 上安装构建出来的 installer；
 - 验证 PATH、文件位置、启动项/后台组件、重复安装/升级、卸载和残留；
 - 验证程序在没有 UU、UU 未运行、找不到兼容组件时能给出正确诊断，而不是崩溃；
-- 使用 fake/fixture session provider 做多设备、多 worker、busy/idle、断线、未知状态、并发和 no-replay 测试。
+- 使用 fake/fixture session provider 做多设备、多 workspace、多 worker、busy/idle、断线、未知状态、并发和 no-replay 测试。
 
 不要因为开发机上“已经能跑”就跳过 CI 中的 clean-state 测试。
 
@@ -32,6 +32,8 @@
 - 官方下载入口发生变化时，优先更新发现逻辑/测试，不硬编码开发机上的安装包路径。
 
 可以设置 scheduled/manual compatibility workflow，定期使用当前官方客户端做“下载 → 签名检查 → 安装 → uu-cli 发现/兼容性诊断 → 卸载”烟雾测试，从而尽早发现 UU 更新造成的变化。
+
+如果 GitHub-hosted Windows 的 OS/SKU 本身不受官方 UU 支持，这类官方客户端安装 smoke 可以 non-gating/manual，并把原因写清楚；不能为了 CI 绿色伪造“真实 UU 已验证”。
 
 ## 3. GitHub-hosted runner 能证明什么
 
@@ -58,7 +60,7 @@ GitHub-hosted runner **不能被当作真实 UU 端到端环境的替代品**。
 - 多个真实 UU Terminal 的并发；
 - UU 重启、远端网络异常、真实 session 消失；
 - 原生文件通道的真实 round-trip；
-- 新 Terminal 打开后的人类 PowerShell 交互体验。
+- 新 Terminal 打开后的人类交互体验。
 
 CI 做不到时要明确标记 `requires-real-uu`，不能通过 mock 以后声称端到端已经验证。
 
@@ -84,20 +86,25 @@ workspace: bound / unbound
 UU: absent / installed-stopped / running
 worker: none / idle / all-busy / disappears
 remote devices: one / multiple
-human decision: accept / skip / auto-accept-device
+new terminal: waiting-request / unsolicited
+human decision: accept / reject / cancel-close
 job: not-sent / running / finished / connection-unknown
 ```
 
 关键行为必须固定：
 
 - 没有歧义就不要问；
-- 真有歧义才弹短 PowerShell；
+- 真有歧义才弹短人类选择；
 - 弹窗不能污染 `uu` 的 stdout，也不能偷走命令 stdin；
-- 一个等待中的 `uu` 请求明确需要某设备 Terminal 时，用户刚打开的合适 Terminal 应直接满足该请求，避免连续弹两次确认；
-- 多个新 Terminal 短时间出现时尽量合并处理，不连续弹多个窗口；
-- 用户 skip 的 Terminal 不得随后被自动调度；
+- 一个等待中的 `uu` 请求在提示中明确说明“新打开的匹配 Terminal 将用于本次请求”，随后用户打开它时不得再弹第二个重复授权；
+- 没有等待请求时，新 Terminal 必须经过一次授权；N/Esc/关闭/取消都表示不使用；
+- v1 不存在“设备以后所有新 Terminal 自动接管”的持久设置；
+- 多个新 Terminal 短时间出现时尽量在一个交互窗口处理，不连续抢焦点；
+- 同一设备多个 workspace 不构成 Terminal 归属歧义；
+- 用户未授权的 Terminal 不得随后被自动调度；
 - 已绑定 workspace 不因为其他设备上线而静默切换；
-- 已经发送的命令绝不因为恢复/重连自动重复执行。
+- 已经发送的命令绝不因为恢复/重连自动重复执行；
+- 交互实现不能要求 PowerShell 7 预装，fallback 也必须测试。
 
 ## 7. Shell-state isolation tests
 
@@ -114,9 +121,11 @@ job B 应从 workspace `remote_root` 开始，并且实现应尽可能隔离 job
 
 `exit`、`exec`、失败命令、管道、重定向、带引号路径、Unicode 路径也应纳入命令包装测试。
 
+还要覆盖 CLI 保留词 escape：远端命令名为 `put/get/bind/list` 时，`uu -- ...` 必须强制按远端命令处理。
+
 ## 8. Crash / recovery safety
 
-Broker/后台组件崩溃或 CLI 客户端异常退出后，不允许把“可能仍在运行旧 job”的 Terminal 立即当 idle 使用。
+后台组件崩溃或 CLI 客户端异常退出后，不允许把“可能仍在运行旧 job”的 Terminal 立即当 idle 使用。
 
 实现者可以设计恢复协议，但必须满足：
 
@@ -125,13 +134,25 @@ Broker/后台组件崩溃或 CLI 客户端异常退出后，不允许把“可�
 - 无法证明时宁可要求用户开新的 Terminal 或显式处理，也不能向可能繁忙的 PTY 注入新命令；
 - 任何恢复流程都不得重放已经发送过的命令。
 
-## 9. Release gate
+## 9. File-path semantics tests
+
+`put/get` 至少验证：
+
+- remote relative path 相对于 workspace `remote_root`；
+- remote absolute path 不被改写成本地语义；
+- 若支持 `~`，按远端用户 home 解析；
+- Windows 本地 Unicode/空格路径；
+- 远端 Unicode/空格路径；
+- 0-byte、小文件、大文件、随机二进制；
+- 失败/中断时不报告成功。
+
+## 10. Release gate
 
 一个 release candidate 至少应具备：
 
 1. CI build/tests 全通过；
 2. installer 在全新 hosted Windows job 中完成安装/基础诊断/卸载；
-3. 如果 CI 环境允许，当前官方 UU 客户端下载、签名与组件发现 smoke test 通过；
+3. 如果 CI 环境允许，当前官方 UU 客户端下载、签名与组件发现 smoke test 通过；如果环境不支持，清楚标记而不是伪造通过；
 4. 真实 Windows + 已登录官方 UU + 真实远端设备完成 shell、多 worker、长任务、异常恢复、`put/get` 验收；
 5. 非开发机或干净 Windows 环境完成至少一次从安装到首次 binding 的完整体验验证。
 
