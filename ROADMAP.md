@@ -33,6 +33,12 @@ uu bind
 uu list
 ```
 
+保留词冲突：
+
+```powershell
+uu -- <remote command...>
+```
+
 ## Phase 0 — Terminal research — CLOSED for v1
 
 已经确认到足够支持实现：
@@ -64,7 +70,7 @@ uu list
 - workspace root 识别正确；
 - 多设备不会误绑；
 - Codex 不需要 deviceId/session；
-- 等待中的 `uu` 在用户打开合适 Terminal 后继续原请求，不要求重跑；
+- 等待中的 `uu` 明确告诉用户新开 Terminal 会用于本次请求；用户打开后继续原请求，不要求重跑，也不重复确认；
 - 人类选择不污染 job stdin/stdout；
 - 普通命令只需增加 `uu` 前缀；
 - 每个 job 从 remote root 开始，并尽量隔离 shell-local 变化；
@@ -81,9 +87,10 @@ uu list
 验收：
 
 - 新 Terminal 自动发现；
-- 有等待请求时能直接满足，不重复确认；
-- 没等待请求时只在必要时弹短 PowerShell：Enter=使用、N=跳过、A=设备以后自动；
-- 多个新 Terminal 尽量合并提示；
+- 有等待请求时按 Phase 1 语义直接满足，不重复确认；
+- 没有等待请求时弹一次短授权：Enter=交给 uu-cli，N/Esc/关闭=保留手动使用；
+- v1 不提供永久自动接管某设备后续新 Terminal 的开关；
+- 多个新 Terminal 尽量在同一交互窗口处理；
 - 一个 worker 同时只执行一个 job；
 - 多个 `uu` 调用能够并发；
 - worker 全忙时安全等待；
@@ -127,7 +134,8 @@ uu get remote/file.bin .\roundtrip.bin
 - 无 tray、额外 GUI、常驻可见 console；
 - 后台组件异常后 `uu` 可自动恢复或给出清楚错误；
 - unknown/quarantined worker 不会被误复用；
-- 不影响官方 UU 的启动、退出、升级。
+- 不影响官方 UU 的启动、退出、升级；
+- 不要求用户安装 PowerShell 7 或其他额外运行时。
 
 内部是否使用 broker/watcher/event/lazy process 由实现者决定。
 
@@ -141,7 +149,7 @@ CI-first：凡是能在 GitHub-hosted Windows 上做的构建、故障注入、c
 
 - 自动发现官方 UU 安装和所需组件；
 - 不硬编码开发机路径、盘符、用户名、deviceId、session 名；
-- 不要求 Python/Rust/Node/WSL 等开发环境；
+- 不要求 Python/Rust/Node/PowerShell 7/WSL 等开发环境；
 - 尽量 user-scope，不无故要求管理员；
 - PATH、升级、卸载行为正确；
 - 卸载不影响官方 UU 或登录状态；
@@ -150,6 +158,7 @@ CI-first：凡是能在 GitHub-hosted Windows 上做的构建、故障注入、c
 - 需要官方 UU installer 的 smoke test 只从官方公开来源临时下载，并验证 Authenticode/版本/hash；
 - 可以通过 scheduled/manual workflow 定期检测最新版官方 UU 的安装/组件发现兼容性；
 - CI 不保存真实 UU 登录凭据；
+- 如果 hosted runner 的 OS/SKU 不受官方 UU 支持，UU 安装 smoke 可以 non-gating/manual，但其他 clean-state CI 仍必须 gating；
 - 至少一个真实非开发/干净环境，从安装到首次 binding 再到真实执行完整通过。
 
 GitHub-hosted runner 不能替代真实登录后的 UU 端到端测试；只把真实 Terminal/远端设备必须验证的最后一小段留给实机。
@@ -188,6 +197,7 @@ uu list
 - 首次绑定交互短、明确；
 - 多设备不会误绑；
 - 等待中的 `uu` + 新 Terminal 无重复确认；
+- 没有等待请求时未授权 Terminal 不被接管；
 - 同设备多 workspace 不串目录；
 - 多 Terminal 可安全并发；
 - 长任务输出实时可见；
