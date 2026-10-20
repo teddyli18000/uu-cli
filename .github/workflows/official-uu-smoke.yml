@@ -9,6 +9,11 @@ on:
       - 'scripts/official-uu-smoke.ps1'
       - 'scripts/inspect-official-uu.ps1'
       - 'scripts/install-official-uu-smoke.ps1'
+      - 'src/discovery.rs'
+      - 'src/uuyc.rs'
+      - 'src/main.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
   workflow_dispatch:
 
 permissions:
@@ -17,9 +22,13 @@ permissions:
 jobs:
   probe-official-download:
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build uu-cli release candidate
+        shell: pwsh
+        run: cargo build --release --locked
       - name: Discover and verify official Windows installer
         id: probe
         shell: pwsh
@@ -27,8 +36,10 @@ jobs:
       - name: Inspect verified package and embedded CLI
         shell: pwsh
         run: ./scripts/inspect-official-uu.ps1
-      - name: Clean install, CLI probe, and uninstall on disposable runner
+      - name: Clean install, uu-cli discovery probe, and uninstall on disposable runner
         shell: pwsh
+        env:
+          UU_CLI_UNDER_TEST: ${{ github.workspace }}\target\release\uu.exe
         run: ./scripts/install-official-uu-smoke.ps1
       - name: Summary
         if: always()
