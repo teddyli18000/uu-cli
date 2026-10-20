@@ -89,7 +89,9 @@ pub fn discover_inventory(provider: &impl InventoryProvider) -> Result<Inventory
         discovered.push(inventory);
     }
 
-    Ok(InventorySnapshot { devices: discovered })
+    Ok(InventorySnapshot {
+        devices: discovered,
+    })
 }
 
 pub fn is_eligible_session(session: &SessionInfo) -> bool {
