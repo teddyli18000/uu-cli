@@ -64,7 +64,6 @@ pub fn wrap_pwd_probe(nonce: &str) -> Result<String> {
     ))
 }
 
-
 pub fn shell_quote(text: &str) -> String {
     if text.is_empty() {
         return "''".into();
@@ -200,7 +199,6 @@ fn longest_suffix_prefix(bytes: &[u8], prefix: &[u8]) -> usize {
     0
 }
 
-
 fn validate_nonce(nonce: &str) -> Result<()> {
     if nonce.is_empty() || !nonce.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
         bail!("job nonce must be non-empty ASCII alphanumeric text");
@@ -272,13 +270,10 @@ mod tests {
     #[test]
     fn decoder_streams_short_output_without_waiting_for_marker_window() {
         let mut decoder = CompletionDecoder::new("nonce").unwrap();
-        decoder
-            .push(b"\x1b]7770;UUCLI;nonce;BEGIN\x07")
-            .unwrap();
+        decoder.push(b"\x1b]7770;UUCLI;nonce;BEGIN\x07").unwrap();
         assert_eq!(decoder.push(b"short").unwrap(), b"short");
         assert_eq!(decoder.completed(), None);
     }
-
 
     #[test]
     fn decoder_drops_echo_and_handles_markers_split_across_frames() {

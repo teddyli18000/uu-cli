@@ -11,7 +11,7 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::mpsc::Receiver;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 struct TermPty {
     child: Box<dyn Child + Send + Sync>,
@@ -44,22 +44,42 @@ impl TermPty {
         let mut child = slave
             .spawn_command(command)
             .with_context(|| format!("failed to start {} in ConPTY", cli_path.display()))?;
-        let mut reader = master
+        let raw_reader = master
             .try_clone_reader()
             .context("failed to open UU terminal PTY reader")?;
         let writer = master
             .take_writer()
             .context("failed to open UU terminal PTY writer")?;
         drop(slave);
+        let mut reader = ReadPump::spawn(raw_reader);
 
         // Catch argument/ownership failures before command bytes can be sent.
         thread::sleep(Duration::from_millis(250));
-        if let Some(status) = child
-            .try_wait()
-            .context("failed to inspect official UU terminal process")?
-        {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.kill();
+                drop(writer);
+                drop(master);
+                reader.shutdown_and_join();
+                return Err(error).context("failed to inspect official UU terminal process");
+            }
+        };
+        if let Some(status) = status {
             let mut diagnostic = Vec::new();
-            let _ = reader.read_to_end(&mut diagnostic);
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while Instant::now() < deadline {
+                match reader.read_event_timeout(Duration::from_millis(25)) {
+                    Ok(crate::runner::PumpRead::Data(bytes)) => {
+                        diagnostic.extend_from_slice(&bytes);
+                    }
+                    Ok(crate::runner::PumpRead::Eof) | Err(_) => break,
+                    Ok(crate::runner::PumpRead::Timeout) => {}
+                }
+            }
+            drop(writer);
+            drop(master);
+            reader.shutdown_and_join();
             let text = String::from_utf8_lossy(&diagnostic);
             let text = text.trim();
             if text.is_empty() {
@@ -67,8 +87,6 @@ impl TermPty {
             }
             bail!("official UU {operation} exited immediately ({status:?}): {text}");
         }
-
-        let reader = ReadPump::spawn(reader);
         Ok(Self {
             child,
             master: Some(master),
@@ -77,7 +95,7 @@ impl TermPty {
         })
     }
 
-    fn run_job<O: Write>(
+    :
         &mut self,
         output: &mut O,
         remote_root: &str,
@@ -92,12 +110,12 @@ impl TermPty {
         )
     }
 
-    fn run_job_with_input<O: Write>(
+    :
         &mut self,
         output: &mut O,
         remote_root: &str,
         shell_command: &str,
-        input: Receiver<JobInput>,
+        input: &Receiver<JobInput>,
     ) -> Result<JobResult, JobRunError> {
         run_framed_job_with_input(
             &mut self.reader,
@@ -137,9 +155,12 @@ impl Drop for TermPty {
         if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();
         }
-        let _ = self.child.wait();
-        // Release all ConPTY handles before joining the blocked reader.
-        drop(std::mem::replace(&mut self.writer, Box::new(std::io::sink())));
+        // Releasing ConPTY handles unblocks the reader. Its join is bounded so
+        // shutdown cannot hang if an underlying Windows read ignores closure.
+        drop(std::mem::replace(
+            &mut self.writer,
+            Box::new(std::io::sink()),
+        ));
         self.master.take();
         self.reader.shutdown_and_join();
     }
@@ -169,7 +190,7 @@ impl OfficialAttachPty {
         self.inner.child.try_wait().map(|status| status.is_some())
     }
 
-    pub fn run_job<O: Write>(
+    pub :
         &mut self,
         output: &mut O,
         remote_root: &str,
@@ -178,12 +199,12 @@ impl OfficialAttachPty {
         self.inner.run_job(output, remote_root, shell_command)
     }
 
-    pub fn run_job_with_input<O: Write>(
+    pub :
         &mut self,
         output: &mut O,
         remote_root: &str,
         shell_command: &str,
-        input: Receiver<JobInput>,
+        input: &Receiver<JobInput>,
     ) -> Result<JobResult, JobRunError> {
         self.inner
             .run_job_with_input(output, remote_root, shell_command, input)
@@ -215,7 +236,8 @@ fn attach_args(device_identity: &str, session_name: &str) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use portable_pty::{Child, CommandBuilder};
+    use crate::runner::PumpRead;
+    use portable_pty::CommandBuilder;
     use std::io::{Read, Write};
     use std::time::{Duration, Instant};
 
@@ -263,7 +285,7 @@ mod tests {
         command.args(["conpty_child_writes_osc", "--nocapture"]);
         command.env("UUCLI_CONPTY_OSC_CHILD", "1");
         let mut child = slave.spawn_command(command).unwrap();
-        let mut writer = master.take_writer().unwrap();
+        let writer = master.take_writer().unwrap();
         let reader = master.try_clone_reader().unwrap();
         drop(slave);
         let mut reader = ReadPump::spawn(reader);
@@ -290,7 +312,6 @@ mod tests {
         if matches!(child.try_wait(), Ok(None)) {
             let _ = child.kill();
         }
-        let _ = child.wait();
         drop(writer);
         drop(master);
         reader.shutdown_and_join();

@@ -2,12 +2,11 @@ use crate::job::{wrap_job, wrap_pwd_probe, CompletionDecoder};
 use anyhow::{anyhow, Context};
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -38,7 +37,9 @@ impl fmt::Display for JobRunError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Preparation(error) => write!(f, "cannot prepare remote job: {error:#}"),
-            Self::Completed(error) => write!(f, "remote operation completed with an error: {error:#}"),
+            Self::Completed(error) => {
+                write!(f, "remote operation completed with an error: {error:#}")
+            }
             Self::Unknown(error) => write!(f, "remote job state is unknown: {error:#}"),
         }
     }
@@ -56,7 +57,7 @@ pub fn run_framed_job<R, W, O>(
 where
     R: Read,
     W: Write,
-    O: Write,
+    O: Write + ?Sized,
 {
     let nonce = next_nonce();
     run_framed_job_with_nonce(reader, writer, output, remote_root, shell_command, &nonce)
@@ -73,7 +74,7 @@ pub fn run_framed_job_with_nonce<R, W, O>(
 where
     R: Read,
     W: Write,
-    O: Write,
+    O: Write + ?Sized,
 {
     let wrapped = wrap_job(remote_root, shell_command, nonce).map_err(JobRunError::Preparation)?;
     run_prepared_job(reader, writer, output, &wrapped, nonce)
@@ -89,7 +90,7 @@ pub fn run_framed_pwd_probe<R, W, O>(
 where
     R: Read,
     W: Write,
-    O: Write,
+    O: Write + ?Sized,
 {
     let nonce = next_nonce();
     let wrapped = wrap_pwd_probe(&nonce).map_err(JobRunError::Preparation)?;
@@ -106,7 +107,7 @@ fn run_prepared_job<R, W, O>(
 where
     R: Read,
     W: Write,
-    O: Write,
+    O: Write + ?Sized,
 {
     let mut decoder = CompletionDecoder::new(nonce).map_err(JobRunError::Preparation)?;
 
@@ -162,11 +163,11 @@ pub fn run_framed_job_with_input<W, O>(
     output: &mut O,
     remote_root: &str,
     shell_command: &str,
-    input: Receiver<JobInput>,
+    input: &Receiver<JobInput>,
 ) -> Result<JobResult, JobRunError>
 where
     W: Write,
-    O: Write,
+    O: Write + ?Sized,
 {
     let nonce = next_nonce();
     run_framed_job_with_input_and_nonce(
@@ -187,11 +188,11 @@ pub(crate) fn run_framed_job_with_input_and_nonce<W, O>(
     remote_root: &str,
     shell_command: &str,
     nonce: &str,
-    input: Receiver<JobInput>,
+    input: &Receiver<JobInput>,
 ) -> Result<JobResult, JobRunError>
 where
     W: Write,
-    O: Write,
+    O: Write + ?Sized,
 {
     let wrapped = wrap_job(remote_root, shell_command, nonce).map_err(JobRunError::Preparation)?;
     let mut decoder = CompletionDecoder::new(nonce).map_err(JobRunError::Preparation)?;
@@ -202,27 +203,36 @@ where
         .context("failed while sending the framed command")
         .map_err(JobRunError::Unknown)?;
 
-    let mut input_closed = false;
+    let mut stdin_eof = false;
+    let mut input_disconnected = false;
     loop {
-        if decoder.started() && !input_closed {
+        if decoder.started() && !input_disconnected {
             match input.recv_timeout(INPUT_POLL) {
-                Ok(event) => {
-                    let (bytes, close_input): (&[u8], bool) = match &event {
-                        JobInput::Bytes(bytes) => (bytes, false),
-                        JobInput::Interrupt => (b"\x03", false),
-                        JobInput::Eof => (b"\x04", true),
-                    };
-                    if !bytes.is_empty() {
-                        writer
-                            .write_all(bytes)
-                            .and_then(|_| writer.flush())
-                            .context("failed while forwarding terminal input")
-                            .map_err(JobRunError::Unknown)?;
-                    }
-                    input_closed = close_input;
+                Ok(JobInput::Interrupt) => {
+                    writer
+                        .write_all(b"\x03")
+                        .and_then(|_| writer.flush())
+                        .context("failed while forwarding terminal interrupt")
+                        .map_err(JobRunError::Unknown)?;
                 }
+                Ok(JobInput::Bytes(bytes)) if !stdin_eof => {
+                    writer
+                        .write_all(&bytes)
+                        .and_then(|_| writer.flush())
+                        .context("failed while forwarding terminal input")
+                        .map_err(JobRunError::Unknown)?;
+                }
+                Ok(JobInput::Eof) if !stdin_eof => {
+                    writer
+                        .write_all(b"\x04")
+                        .and_then(|_| writer.flush())
+                        .context("failed while forwarding terminal EOF")
+                        .map_err(JobRunError::Unknown)?;
+                    stdin_eof = true;
+                }
+                Ok(JobInput::Bytes(_) | JobInput::Eof) => {}
                 Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => input_closed = true,
+                Err(RecvTimeoutError::Disconnected) => input_disconnected = true,
             }
         }
 
@@ -253,7 +263,7 @@ where
     }
 }
 
-fn write_visible<O: Write>(
+fn write_visible<O: Write + ?Sized>(
     output: &mut O,
     visible: &[u8],
     error_context: &str,
@@ -280,11 +290,13 @@ pub(crate) enum PumpRead {
 
 /// A single, demand-driven PTY reader. It reads at most one chunk per request,
 /// allowing a completed job to reuse the same terminal without a blocked
-/// per-job thread. Shutdown is performed after the owning local CLI is stopped.
+/// per-job thread. Shutdown is bounded in case an underlying reader ignores
+/// closure of its PTY handles.
 pub(crate) struct ReadPump {
     request_tx: Option<SyncSender<()>>,
     response_rx: Option<Receiver<io::Result<Option<Vec<u8>>>>>,
     thread: Option<JoinHandle<()>>,
+    done_rx: Option<Receiver<()>>,
     request_pending: bool,
     pending: Vec<u8>,
     eof: bool,
@@ -297,6 +309,7 @@ impl ReadPump {
     {
         let (request_tx, request_rx) = mpsc::sync_channel::<()>(0);
         let (response_tx, response_rx) = mpsc::sync_channel::<io::Result<Option<Vec<u8>>>>(1);
+        let (done_tx, done_rx) = mpsc::channel();
         let thread = thread::spawn(move || {
             while request_rx.recv().is_ok() {
                 let mut buffer = [0u8; 8192];
@@ -306,10 +319,7 @@ impl ReadPump {
                         break;
                     }
                     Ok(read) => {
-                        if response_tx
-                            .send(Ok(Some(buffer[..read].to_vec())))
-                            .is_err()
-                        {
+                        if response_tx.send(Ok(Some(buffer[..read].to_vec()))).is_err() {
                             break;
                         }
                     }
@@ -319,12 +329,14 @@ impl ReadPump {
                     }
                 }
             }
+            let _ = done_tx.send(());
         });
 
         Self {
             request_tx: Some(request_tx),
             response_rx: Some(response_rx),
             thread: Some(thread),
+            done_rx: Some(done_rx),
             request_pending: false,
             pending: Vec::new(),
             eof: false,
@@ -397,7 +409,16 @@ impl ReadPump {
         self.request_tx.take();
         self.response_rx.take();
         if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+            let finished = self
+                .done_rx
+                .take()
+                .map(|done_rx| done_rx.recv_timeout(Duration::from_secs(2)));
+            match finished {
+                Some(Ok(())) | Some(Err(RecvTimeoutError::Disconnected)) => {
+                    let _ = thread.join();
+                }
+                Some(Err(RecvTimeoutError::Timeout)) | None => drop(thread),
+            }
         }
     }
 }
@@ -566,7 +587,7 @@ mod tests {
                 "/root",
                 "read-input",
                 "abc123",
-                input_rx,
+                &input_rx,
             );
             reader.shutdown_and_join();
             (result, output)
@@ -576,7 +597,6 @@ mod tests {
         assert!(String::from_utf8_lossy(&wrapper).contains("UUCLI;abc123;BEGIN"));
 
         input_tx.send(JobInput::Bytes(b"typed".to_vec())).unwrap();
-        input_tx.send(JobInput::Interrupt).unwrap();
         input_tx.send(JobInput::Eof).unwrap();
         assert!(writes_rx.recv_timeout(Duration::from_millis(30)).is_err());
 
@@ -589,11 +609,12 @@ mod tests {
         );
         assert_eq!(
             writes_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
-            b"\x03"
+            b"\x04"
         );
+        input_tx.send(JobInput::Interrupt).unwrap();
         assert_eq!(
             writes_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
-            b"\x04"
+            b"\x03"
         );
 
         remote_tx
