@@ -288,7 +288,7 @@ fn run_remote(config: &Config, cwd: &Path, argv: Vec<OsString>) -> Result<u8> {
 
     #[cfg(not(windows))]
     {
-        let _ = shell_command;
+        let _ = (binding, shell_command);
         bail!("remote execution is supported only on Windows in v1")
     }
 
