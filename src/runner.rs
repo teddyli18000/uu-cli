@@ -626,7 +626,6 @@ mod tests {
         assert!(all.lock().unwrap().ends_with(b"typed\x03\x04"));
     }
 
-
     #[test]
     fn invalid_remote_root_fails_before_writing() {
         let mut reader = Cursor::new(Vec::<u8>::new());
