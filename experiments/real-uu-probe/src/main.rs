@@ -10,10 +10,9 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "candidate")]
-#[allow(dead_code)]
-mod candidate_job {
-    include!(env!("CANDIDATE_JOB_PATH"));
-}
+include!(env!("CANDIDATE_MODULES_PATH"));
+#[cfg(feature = "candidate")]
+use job as candidate_job;
 
 struct Logs {
     human: File,
@@ -132,7 +131,7 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
         .find(|item| item["name"] == session && item["createdAt"] == created)
         .context("selected terminal instance disappeared/recreated; refusing attach")?;
     let mut logs = Logs::new(log_dir)?;
-    logs.event("environment", json!({"os":std::env::consts::OS, "cli":cli, "version":official(cli, &["version"]).unwrap_or_else(|e| e.to_string()), "session":selected, "pty":{"rows":24,"cols":120}, "candidate_head":"ae772ea9", "observer_revision":option_env!("PROBE_BUILD_SHA").unwrap_or("local")}))?;
+    logs.event("environment", json!({"os":std::env::consts::OS, "cli":cli, "version":official(cli, &["version"]).unwrap_or_else(|e| e.to_string()), "session":selected, "pty":{"rows":24,"cols":120}, "candidate_head":option_env!("PROBE_CANDIDATE_SHA"), "observer_revision":option_env!("PROBE_BUILD_SHA").unwrap_or("local")}))?;
     logs.note("Starting one official attach; startup/liveness alone is not attach success")?;
     let pair = native_pty_system().openpty(PtySize {
         rows: 24,
@@ -185,13 +184,15 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
         }
     });
     logs.note(
-        "Local controls: pwd hello exit7 second unicode stream sleep interrupt interrupt-key after status quit; guard-<command> or candidate-<command> selects an experiment",
+        "Local controls: pwd hello exit7 second unicode stream sleep interrupt interrupt-key after status quit; guard-<command> or candidate-<command> selects an experiment; candidate-capture validates current-directory records",
     )?;
     let mut startup = Vec::new();
     let mut all_rx = Vec::new();
     let mut pending: Option<(String, String, Instant)> = None;
     #[cfg(feature = "candidate")]
     let mut candidate_decoder: Option<candidate_job::CompletionDecoder> = None;
+    #[cfg(feature = "candidate")]
+    let mut candidate_payload = Vec::new();
     let mut sequence = 0u32;
     let mut any_command_sent = false;
     let mut win32_input_requested = false;
@@ -228,11 +229,27 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
                     };
                     if !output.is_empty() {
                         logs.bytes("CANDIDATE_OUTPUT", &output)?;
+                        candidate_payload.extend_from_slice(&output);
                     }
                     if let Some(code) = decoder.completed() {
                         if let Some((nonce, label, sent)) = pending.take() {
                             logs.event("candidate_completion", json!({"label":label,"nonce":nonce,"exit":code,"elapsed_ms":sent.elapsed().as_millis(),"candidate_sha":env!("PROBE_CANDIDATE_SHA")}))?;
                             logs.note(&format!("Candidate decoder: {label} exit={code}; production wrapper/decoder, not the visible-token observer"))?;
+                            if label == "candidate-capture" && code == 0 {
+                                match candidate_job::decode_pwd_output(&candidate_payload) {
+                                    Ok(path) => {
+                                        logs.event("candidate_pwd_capture", json!({"path":path,"candidate_sha":env!("PROBE_CANDIDATE_SHA")}))?;
+                                        logs.note("Candidate current-directory records passed production validation")?;
+                                    }
+                                    Err(error) => {
+                                        logs.event(
+                                            "candidate_pwd_error",
+                                            json!({"error":error.to_string()}),
+                                        )?;
+                                        logs.note("Candidate current-directory validation failed; no binding saved")?;
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -382,6 +399,7 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
                 .unwrap_or(control);
             let shell = match command_name {
                 "pwd" => "pwd",
+                "capture" if candidate => "current-directory records (read only)",
                 "hello" => "printf 'hello-uu\\n'",
                 "exit7" => "sh -c 'exit 7'",
                 "second" => "printf 'second-command\\n'",
@@ -409,10 +427,15 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
                 {
                     candidate_decoder =
                         Some(candidate_job::CompletionDecoder::new_console(&nonce)?);
-                    logs.note(
-                        "Candidate job uses explicit test remote root /; no binding or pool",
-                    )?;
-                    candidate_job::wrap_job("/", shell, &nonce)?
+                    candidate_payload.clear();
+                    if command_name == "capture" {
+                        candidate_job::wrap_pwd_probe(&nonce)?
+                    } else {
+                        logs.note(
+                            "Candidate job uses explicit test remote root /; no binding or pool",
+                        )?;
+                        candidate_job::wrap_job("/", shell, &nonce)?
+                    }
                 }
                 #[cfg(not(feature = "candidate"))]
                 {
@@ -448,11 +471,97 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
     Ok(())
 }
 
+#[cfg(feature = "candidate")]
+fn channel(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path) -> Result<()> {
+    let selected = items(&query(cli, &["term", "-d", device, "ls", "--json"])?)
+        .into_iter()
+        .find(|item| item["name"] == session && item["createdAt"] == created)
+        .context("selected terminal instance disappeared/recreated; refusing attach")?;
+    let mut logs = Logs::new(log_dir)?;
+    logs.event(
+        "channel_environment",
+        json!({"session":selected,"candidate_sha":env!("PROBE_CANDIDATE_SHA")}),
+    )?;
+    logs.note("Actual pinned product transport/runner; no binding, pool or installer. This mode logs API output, not raw PTY RX/TX.")?;
+    let mut transport = transport::OfficialAttachPty::attach(Path::new(cli), device, session)?;
+    logs.event("attach_spawned", json!({"pid":transport.process_id()}))?;
+    // Dispatch immediately after the actual product startup handshake, without
+    // an extra probe readiness delay.
+    let root = transport.capture_pwd()?;
+    logs.event("channel_pwd_capture", json!({"path":root}))?;
+    for (label, command, expected) in [
+        ("pwd", "pwd", 0),
+        ("exit7", "sh -c 'exit 7'", 7),
+        ("unicode", "printf '你好-UU\\n'", 0),
+        (
+            "stream",
+            "printf 'tick-1\\n'; sleep 2; printf 'tick-2\\n'",
+            0,
+        ),
+        ("sleep", "sleep 30", 130),
+        ("after", "printf 'after-interrupt\\n'", 0),
+    ] {
+        logs.event(
+            "channel_dispatch",
+            json!({"label":label,"expected":expected}),
+        )?;
+        let (tx, rx) = mpsc::channel();
+        let interrupter = if label == "sleep" {
+            Some(thread::spawn(move || {
+                thread::sleep(Duration::from_secs(2));
+                tx.send(runner::JobInput::Interrupt)
+            }))
+        } else {
+            drop(tx);
+            None
+        };
+        struct Output<'a>(&'a mut Logs);
+        impl Write for Output<'_> {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0
+                    .bytes("CHANNEL_OUTPUT", bytes)
+                    .map_err(io::Error::other)?;
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let started = Instant::now();
+        let result = transport.run_job_with_input(&mut Output(&mut logs), &root, command, &rx);
+        if let Some(interrupter) = interrupter {
+            let sent = interrupter
+                .join()
+                .map_err(|_| anyhow::anyhow!("interrupt thread panicked"))?;
+            logs.event("channel_interrupt_queued", json!({"success":sent.is_ok()}))?;
+        }
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                logs.event(
+                    "channel_error",
+                    json!({"label":label,"error":error.to_string(),"unknown":error.is_unknown()}),
+                )?;
+                return Err(error.into());
+            }
+        };
+        logs.event("channel_completion", json!({"label":label,"exit":result.exit_code,"elapsed_ms":started.elapsed().as_millis()}))?;
+        if result.exit_code != expected {
+            bail!("unexpected status for {label}; stop without further dispatch");
+        }
+    }
+    drop(transport);
+    logs.note("Actual product channel completed; owned local attach released, no remote terminal-management command")?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("list") if args.len() == 3 => list(&args[2]),
         Some("attach") if args.len() == 7 => attach(&args[2], &args[3], &args[4], &args[5], Path::new(&args[6])),
+        #[cfg(feature = "candidate")]
+        Some("channel") if args.len() == 7 => channel(&args[2], &args[3], &args[4], &args[5], Path::new(&args[6])),
         _ => bail!("usage: real-uu-probe list <cli> | attach <cli> <device> <session> <createdAt> <log-directory>"),
     }
 }

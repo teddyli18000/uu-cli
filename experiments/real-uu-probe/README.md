@@ -43,6 +43,10 @@ The local artifact contains the compiled code, without checking out production
 sources on the development machine. This still bypasses binding/pool/installer
 and therefore proves only the wrapper/decoder plus transport experiment.
 
+`candidate-capture` runs the pinned read-only current-directory wrapper without
+changing the shell's directory, then validates its records with the same pinned
+`decode_pwd_output` function. It records the result locally and saves no binding.
+
 `human.log` contains milestones; `raw.jsonl` contains timestamped TX/RX hex and
 process-state events before any interpretation. Cursor inheritance DSR is logged
 and answered only before a shell command is sent. Raw RX is never stripped or

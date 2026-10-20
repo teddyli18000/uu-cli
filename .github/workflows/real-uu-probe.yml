@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-latest
     env:
       PROBE_BUILD_SHA: ${{ github.sha }}
-      PROBE_CANDIDATE_SHA: 79fa6fbc0c8d3dbb4ebf50c2589e684bd5d85d37
+      PROBE_CANDIDATE_SHA: 3c2e44725b8f80ac09c593482ebcc964190c27c6
     timeout-minutes: 10
     defaults:
       run:
@@ -21,13 +21,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - name: Fetch pinned pure job module for candidate validation
+      - name: Fetch pinned channel modules for candidate validation
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force target | Out-Null
-          $candidatePath = Join-Path (Get-Location) 'target/candidate_job.rs'
-          Invoke-WebRequest "https://raw.githubusercontent.com/teddyli18000/uu-cli/$env:PROBE_CANDIDATE_SHA/src/job.rs" -OutFile $candidatePath
-          "CANDIDATE_JOB_PATH=$candidatePath" >> $env:GITHUB_ENV
+          $moduleLines = @()
+          foreach ($module in @('job', 'runner', 'transport')) {
+            $candidatePath = Join-Path (Get-Location) "target/candidate_$module.rs"
+            Invoke-WebRequest "https://raw.githubusercontent.com/teddyli18000/uu-cli/$env:PROBE_CANDIDATE_SHA/src/$module.rs" -OutFile $candidatePath
+            $moduleLines += '#[allow(dead_code)]'
+            $moduleLines += '#[path = r"' + $candidatePath + '"] mod ' + $module + ';'
+          }
+          $modulePath = Join-Path (Get-Location) 'target/candidate_modules.rs'
+          $moduleLines | Set-Content -Encoding utf8 $modulePath
+          "CANDIDATE_MODULES_PATH=$modulePath" >> $env:GITHUB_ENV
       - run: cargo fmt --check
       - run: cargo clippy --locked --features candidate -- -D warnings
       - run: cargo build --locked --release --features candidate
