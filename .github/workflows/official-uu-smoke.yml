@@ -29,11 +29,17 @@ jobs:
       - name: Summary
         if: always()
         shell: pwsh
+        env:
+          INSTALLER_URL: ${{ steps.probe.outputs.installer_url }}
+          UU_VERSION: ${{ steps.probe.outputs.version }}
+          UU_PRODUCT: ${{ steps.probe.outputs.product }}
+          UU_SIGNER: ${{ steps.probe.outputs.signer }}
+          UU_SHA256: ${{ steps.probe.outputs.sha256 }}
         run: |
           "## Official UU smoke" >> $env:GITHUB_STEP_SUMMARY
           "- Source page: https://uuyc.163.com/download/" >> $env:GITHUB_STEP_SUMMARY
-          "- Installer URL: ${{ steps.probe.outputs.installer_url }}" >> $env:GITHUB_STEP_SUMMARY
-          "- Version: ${{ steps.probe.outputs.version }}" >> $env:GITHUB_STEP_SUMMARY
-          "- Product: ${{ steps.probe.outputs.product }}" >> $env:GITHUB_STEP_SUMMARY
-          "- Signer: ${{ steps.probe.outputs.signer }}" >> $env:GITHUB_STEP_SUMMARY
-          "- SHA256: ${{ steps.probe.outputs.sha256 }}" >> $env:GITHUB_STEP_SUMMARY
+          "- Installer URL: $env:INSTALLER_URL" >> $env:GITHUB_STEP_SUMMARY
+          "- Version: $env:UU_VERSION" >> $env:GITHUB_STEP_SUMMARY
+          "- Product: $env:UU_PRODUCT" >> $env:GITHUB_STEP_SUMMARY
+          "- Signer: $env:UU_SIGNER" >> $env:GITHUB_STEP_SUMMARY
+          "- SHA256: $env:UU_SHA256" >> $env:GITHUB_STEP_SUMMARY
