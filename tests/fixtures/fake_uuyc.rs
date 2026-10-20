@@ -64,6 +64,12 @@ fn default_attachable() -> bool {
     true
 }
 
+fn session_is_available(device: &FixtureDevice, terminal: &FixtureTerminal) -> bool {
+    device.is_online
+        && (terminal.state.eq_ignore_ascii_case("running")
+            || terminal.state.eq_ignore_ascii_case("detached"))
+        && terminal.attachable
+}
 fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code),
@@ -137,7 +143,10 @@ fn load_fixture() -> Result<Fixture, Box<dyn Error>> {
     let bytes = fs::read(&path).map_err(|error| {
         io::Error::new(
             error.kind(),
-            format!("cannot read UU_TEST_FIXTURE_JSON {}: {error}", path.display()),
+            format!(
+                "cannot read UU_TEST_FIXTURE_JSON {}: {error}",
+                path.display()
+            ),
         )
     })?;
     let fixture = serde_json::from_slice(&bytes).map_err(|error| {
@@ -207,7 +216,7 @@ fn session_event_value(device: &FixtureDevice, terminal: &FixtureTerminal) -> Va
         "createdAt": &terminal.created_at,
         "state": &terminal.state,
         "attachable": terminal.attachable,
-        "available": device.is_online && terminal.state == "running" && terminal.attachable
+        "available": session_is_available(device, terminal)
     })
 }
 
@@ -252,7 +261,7 @@ fn resolve_attach(
         session_name: terminal.name.clone(),
         created_at: terminal.created_at.clone(),
     };
-    let available = device.is_online && terminal.state == "running" && terminal.attachable;
+    let available = session_is_available(device, terminal);
     let reason = if available {
         "available"
     } else {
@@ -298,7 +307,10 @@ fn run_attached_terminal(
         "reason": reason
     }))?;
     let Some(identity) = identity.filter(|_| available) else {
-        return Err(format!("requested terminal {device_id}/{session_name} is unavailable: {reason}").into());
+        return Err(format!(
+            "requested terminal {device_id}/{session_name} is unavailable: {reason}"
+        )
+        .into());
     };
 
     if env::var("UU_TEST_MODE").as_deref() == Ok("bash") {
@@ -419,7 +431,13 @@ fn forward_conpty_input<R: Read, W: Write>(
             possible_dsr.push(byte);
             while !DSR_RESPONSE.starts_with(&possible_dsr) {
                 let forwarded = possible_dsr.remove(0);
-                forward_bash_byte(forwarded, &mut swallow_next_lf, &mut line, &mut output, &identity)?;
+                forward_bash_byte(
+                    forwarded,
+                    &mut swallow_next_lf,
+                    &mut line,
+                    &mut output,
+                    &identity,
+                )?;
             }
             if possible_dsr.as_slice() == DSR_RESPONSE {
                 possible_dsr.clear();
@@ -428,7 +446,13 @@ fn forward_conpty_input<R: Read, W: Write>(
     }
 
     for byte in possible_dsr {
-        forward_bash_byte(byte, &mut swallow_next_lf, &mut line, &mut output, &identity)?;
+        forward_bash_byte(
+            byte,
+            &mut swallow_next_lf,
+            &mut line,
+            &mut output,
+            &identity,
+        )?;
     }
     if !line.is_empty() {
         dispatch_bash_line(&mut line, &mut output, false, &identity)?;
