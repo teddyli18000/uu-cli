@@ -11,9 +11,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 #[cfg(any(windows, test))]
 use std::thread::JoinHandle;
-#[cfg(any(windows, test))]
-use std::time::Instant;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -87,6 +85,32 @@ where
     run_prepared_job(reader, writer, output, &wrapped, nonce)
 }
 
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub(crate) fn run_framed_job_with_child<W, O>(
+    reader: &mut ReadPump,
+    writer: &mut W,
+    output: &mut O,
+    remote_root: &str,
+    shell_command: &str,
+    child_has_exited: impl FnMut() -> io::Result<bool>,
+) -> Result<JobResult, JobRunError>
+where
+    W: Write,
+    O: Write + ?Sized,
+{
+    let nonce = next_nonce();
+    let wrapped = wrap_job(remote_root, shell_command, &nonce).map_err(JobRunError::Preparation)?;
+    run_prepared_job_with_child(
+        reader,
+        writer,
+        output,
+        &wrapped,
+        &nonce,
+        true,
+        None,
+        child_has_exited,
+    )
+}
 /// Run the read-only pwd probe in the current shell directory. The caller must
 /// still treat any transport failure after sending the probe as an unknown job.
 pub fn run_framed_pwd_probe<R, W, O>(
@@ -103,6 +127,31 @@ where
     let wrapped = wrap_pwd_probe(&nonce).map_err(JobRunError::Preparation)?;
     run_prepared_job(reader, writer, output, &wrapped, &nonce)
 }
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub(crate) fn run_framed_pwd_probe_with_child<W, O>(
+    reader: &mut ReadPump,
+    writer: &mut W,
+    output: &mut O,
+    child_has_exited: impl FnMut() -> io::Result<bool>,
+) -> Result<JobResult, JobRunError>
+where
+    W: Write,
+    O: Write + ?Sized,
+{
+    let nonce = next_nonce();
+    let wrapped = wrap_pwd_probe(&nonce).map_err(JobRunError::Preparation)?;
+    run_prepared_job_with_child(
+        reader,
+        writer,
+        output,
+        &wrapped,
+        &nonce,
+        true,
+        None,
+        child_has_exited,
+    )
+}
+
 
 fn run_prepared_job<R, W, O>(
     reader: &mut R,
@@ -168,6 +217,7 @@ where
 }
 
 const INPUT_POLL: Duration = Duration::from_millis(10);
+const CHILD_EXIT_DRAIN: Duration = Duration::from_millis(250);
 
 /// Bytes are forwarded as terminal input; Interrupt sends the terminal's
 /// Ctrl+C character; Eof sends Ctrl+D once and closes this job's input stream.
@@ -176,6 +226,33 @@ pub enum JobInput {
     Bytes(Vec<u8>),
     Interrupt,
     Eof,
+}
+#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+pub(crate) fn run_framed_job_with_input_and_child<W, O>(
+    reader: &mut ReadPump,
+    writer: &mut W,
+    output: &mut O,
+    remote_root: &str,
+    shell_command: &str,
+    input: &Receiver<JobInput>,
+    child_has_exited: impl FnMut() -> io::Result<bool>,
+) -> Result<JobResult, JobRunError>
+where
+    W: Write,
+    O: Write + ?Sized,
+{
+    let nonce = next_nonce();
+    let wrapped = wrap_job(remote_root, shell_command, &nonce).map_err(JobRunError::Preparation)?;
+    run_prepared_job_with_child(
+        reader,
+        writer,
+        output,
+        &wrapped,
+        &nonce,
+        true,
+        Some(input),
+        child_has_exited,
+    )
 }
 
 /// Run a framed command while also forwarding input events. Input stays queued
@@ -220,49 +297,108 @@ where
     O: Write + ?Sized,
 {
     let wrapped = wrap_job(remote_root, shell_command, nonce).map_err(JobRunError::Preparation)?;
-    let mut decoder = CompletionDecoder::new(nonce).map_err(JobRunError::Preparation)?;
+    run_prepared_job_with_child(
+        reader,
+        writer,
+        output,
+        &wrapped,
+        nonce,
+        false,
+        Some(input),
+        || Ok(false),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_prepared_job_with_child<W, O>(
+    reader: &mut ReadPump,
+    writer: &mut W,
+    output: &mut O,
+    wrapped: &str,
+    nonce: &str,
+    console_decoder: bool,
+    input: Option<&Receiver<JobInput>>,
+    mut child_has_exited: impl FnMut() -> io::Result<bool>,
+) -> Result<JobResult, JobRunError>
+where
+    W: Write,
+    O: Write + ?Sized,
+{
+    let mut decoder = if console_decoder {
+        CompletionDecoder::new_console(nonce)
+    } else {
+        CompletionDecoder::new(nonce)
+    }
+    .map_err(JobRunError::Preparation)?;
     #[cfg(any(windows, test))]
     let mut conpty_dsr = ConPtyDsrHandshake::default();
 
-    send_wrapped_command(writer, &wrapped)
+    send_wrapped_command(writer, wrapped)
         .context("failed while sending the framed command")
         .map_err(JobRunError::Unknown)?;
 
     let mut stdin_eof = false;
     let mut input_disconnected = false;
+    let mut child_exit_deadline = None;
     loop {
-        if decoder.started() && !input_disconnected {
-            match input.recv_timeout(INPUT_POLL) {
-                Ok(JobInput::Interrupt) => {
-                    writer
-                        .write_all(b"\x03")
-                        .and_then(|_| writer.flush())
-                        .context("failed while forwarding terminal interrupt")
-                        .map_err(JobRunError::Unknown)?;
-                }
-                Ok(JobInput::Bytes(bytes)) if !stdin_eof => {
-                    writer
-                        .write_all(&bytes)
-                        .and_then(|_| writer.flush())
-                        .context("failed while forwarding terminal input")
-                        .map_err(JobRunError::Unknown)?;
-                }
-                Ok(JobInput::Eof) if !stdin_eof => {
-                    writer
-                        .write_all(b"\x04")
-                        .and_then(|_| writer.flush())
-                        .context("failed while forwarding terminal EOF")
-                        .map_err(JobRunError::Unknown)?;
-                    stdin_eof = true;
-                }
-                Ok(JobInput::Bytes(_) | JobInput::Eof) => {}
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => input_disconnected = true,
+        if child_has_exited()
+            .context("failed while checking official UU terminal process")
+            .map_err(JobRunError::Unknown)?
+        {
+            child_exit_deadline.get_or_insert_with(|| Instant::now() + CHILD_EXIT_DRAIN);
+        }
+
+        if let Some(deadline) = child_exit_deadline {
+            if Instant::now() >= deadline {
+                flush_incomplete_job_output(
+                    &mut decoder,
+                    #[cfg(any(windows, test))]
+                    &mut conpty_dsr,
+                    output,
+                )?;
+                return Err(JobRunError::Unknown(anyhow!(
+                    "official UU terminal process exited before the completion marker after {CHILD_EXIT_DRAIN:?} of PTY draining"
+                )));
             }
         }
 
+        if decoder.started() && !input_disconnected && child_exit_deadline.is_none() {
+            if let Some(input) = input {
+                match input.recv_timeout(INPUT_POLL) {
+                    Ok(JobInput::Interrupt) => {
+                        writer
+                            .write_all(b"\x03")
+                            .and_then(|_| writer.flush())
+                            .context("failed while forwarding terminal interrupt")
+                            .map_err(JobRunError::Unknown)?;
+                    }
+                    Ok(JobInput::Bytes(bytes)) if !stdin_eof => {
+                        writer
+                            .write_all(&bytes)
+                            .and_then(|_| writer.flush())
+                            .context("failed while forwarding terminal input")
+                            .map_err(JobRunError::Unknown)?;
+                    }
+                    Ok(JobInput::Eof) if !stdin_eof => {
+                        writer
+                            .write_all(b"\x04")
+                            .and_then(|_| writer.flush())
+                            .context("failed while forwarding terminal EOF")
+                            .map_err(JobRunError::Unknown)?;
+                        stdin_eof = true;
+                    }
+                    Ok(JobInput::Bytes(_) | JobInput::Eof) => {}
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => input_disconnected = true,
+                }
+            }
+        }
+
+        let wait = child_exit_deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()).min(INPUT_POLL))
+            .unwrap_or(INPUT_POLL);
         match reader
-            .read_event_timeout(INPUT_POLL)
+            .read_event_timeout(wait)
             .context("terminal transport failed while waiting for completion")
             .map_err(JobRunError::Unknown)?
         {
@@ -282,19 +418,12 @@ where
                 }
             }
             PumpRead::Eof => {
-                #[cfg(any(windows, test))]
-                let trailing = {
-                    let pending = decoder
-                        .push(&conpty_dsr.finish())
-                        .context("invalid remote job framing")
-                        .map_err(JobRunError::Unknown)?;
-                    let mut trailing = pending;
-                    trailing.extend(decoder.finish_without_marker());
-                    trailing
-                };
-                #[cfg(not(any(windows, test)))]
-                let trailing = decoder.finish_without_marker();
-                write_visible(output, &trailing, "failed to stream final remote output")?;
+                flush_incomplete_job_output(
+                    &mut decoder,
+                    #[cfg(any(windows, test))]
+                    &mut conpty_dsr,
+                    output,
+                )?;
                 return Err(JobRunError::Unknown(anyhow!(
                     "terminal stream ended before the completion marker"
                 )));
@@ -304,6 +433,25 @@ where
     }
 }
 
+fn flush_incomplete_job_output<O: Write + ?Sized>(
+    decoder: &mut CompletionDecoder,
+    #[cfg(any(windows, test))] conpty_dsr: &mut ConPtyDsrHandshake,
+    output: &mut O,
+) -> Result<(), JobRunError> {
+    #[cfg(any(windows, test))]
+    let trailing = {
+        let pending = decoder
+            .push(&conpty_dsr.finish())
+            .context("invalid remote job framing")
+            .map_err(JobRunError::Unknown)?;
+        let mut trailing = pending;
+        trailing.extend(decoder.finish_without_marker());
+        trailing
+    };
+    #[cfg(not(any(windows, test)))]
+    let trailing = decoder.finish_without_marker();
+    write_visible(output, &trailing, "failed to stream final remote output")
+}
 // ConPTY consumes keyboard input: Enter is CR. Keep caller stdin bytes unchanged.
 fn send_wrapped_command<W: Write>(writer: &mut W, wrapped: &str) -> io::Result<()> {
     #[cfg(windows)]
@@ -696,7 +844,7 @@ mod tests {
         assert!(sent.contains("cd -- '/home/pi/aic'"));
         assert!(sent.contains("'python3 main.py'"));
         assert!(sent.contains("UUC' 'abc123' 'B"));
-        assert!(sent.contains("UUC' 'abc123' 'E"));
+        assert!(sent.contains("UUC abc123 E"));
     }
 
     #[test]
@@ -757,6 +905,143 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn child_exit_is_bounded_for_job_input_and_pwd_probe_paths() {
+        for path in ["job", "input", "pwd"] {
+            let (_remote_tx, remote_rx) = mpsc::channel();
+            let (result_tx, result_rx) = mpsc::sync_channel(1);
+            let worker = thread::spawn(move || {
+                let mut reader = ReadPump::spawn(ChannelReader {
+                    chunks: remote_rx,
+                    current: Cursor::new(Vec::new()),
+                });
+                let mut writer = Vec::new();
+                let mut output = Vec::new();
+                let started = Instant::now();
+                let result = match path {
+                    "job" => run_framed_job_with_child(
+                        &mut reader,
+                        &mut writer,
+                        &mut output,
+                        "/root",
+                        "work",
+                        || Ok(true),
+                    ),
+                    "input" => {
+                        let (_input_tx, input_rx) = mpsc::channel();
+                        run_framed_job_with_input_and_child(
+                            &mut reader,
+                            &mut writer,
+                            &mut output,
+                            "/root",
+                            "read-input",
+                            &input_rx,
+                            || Ok(true),
+                        )
+                    }
+                    "pwd" => run_framed_pwd_probe_with_child(
+                        &mut reader,
+                        &mut writer,
+                        &mut output,
+                        || Ok(true),
+                    ),
+                    _ => unreachable!(),
+                };
+                let unknown = matches!(result, Err(JobRunError::Unknown(_)));
+                let _ = result_tx.send((unknown, started.elapsed()));
+                reader.shutdown_and_join();
+            });
+
+            let outcome = result_rx.recv_timeout(Duration::from_secs(2));
+            drop(_remote_tx);
+            let (unknown, elapsed) = outcome
+                .unwrap_or_else(|error| panic!("{path} path did not notice child exit: {error}"));
+            assert!(unknown, "{path} path should report an unknown result without a completion marker");
+            assert!(
+                elapsed >= Duration::from_millis(200) && elapsed < Duration::from_secs(1),
+                "{path} path should drain for at most 250 ms after child exit, took {elapsed:?}"
+            );
+            worker.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn child_exit_drain_accepts_late_completion() {
+        let (remote_tx, remote_rx) = mpsc::channel();
+        remote_tx.send(b"UUCabc123Bpartial".to_vec()).unwrap();
+        let delayed_tx = remote_tx.clone();
+        let delayed = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(30));
+            delayed_tx.send(b"UUCabc123E7Z".to_vec()).unwrap();
+        });
+        let mut reader = ReadPump::spawn(ChannelReader {
+            chunks: remote_rx,
+            current: Cursor::new(Vec::new()),
+        });
+        let mut writer = Vec::new();
+        let mut output = Vec::new();
+        let wrapped = wrap_job("/root", "work", "abc123").unwrap();
+
+        let result = run_prepared_job_with_child(
+            &mut reader,
+            &mut writer,
+            &mut output,
+            &wrapped,
+            "abc123",
+            true,
+            None,
+            || Ok(true),
+        )
+        .unwrap();
+        delayed.join().unwrap();
+        drop(remote_tx);
+        reader.shutdown_and_join();
+
+        assert_eq!(result.exit_code, 7);
+        assert_eq!(output, b"partial");
+    }
+
+    #[test]
+    fn child_exit_without_completion_flushes_partial_output_and_returns_unknown() {
+        let (remote_tx, remote_rx) = mpsc::channel();
+        remote_tx.send(b"UUCabc123Bpartial".to_vec()).unwrap();
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+        let worker = thread::spawn(move || {
+            let mut reader = ReadPump::spawn(ChannelReader {
+                chunks: remote_rx,
+                current: Cursor::new(Vec::new()),
+            });
+            let mut writer = Vec::new();
+            let mut output = Vec::new();
+            let wrapped = wrap_job("/root", "work", "abc123").unwrap();
+            let started = Instant::now();
+            let result = run_prepared_job_with_child(
+                &mut reader,
+                &mut writer,
+                &mut output,
+                &wrapped,
+                "abc123",
+                true,
+                None,
+                || Ok(true),
+            );
+            let _ = result_tx.send((
+                matches!(result, Err(JobRunError::Unknown(_))),
+                output,
+                started.elapsed(),
+            ));
+            reader.shutdown_and_join();
+        });
+
+        let outcome = result_rx.recv_timeout(Duration::from_secs(2));
+        drop(remote_tx);
+        let (unknown, output, elapsed) =
+            outcome.unwrap_or_else(|error| panic!("child exit drain did not finish: {error}"));
+        assert!(unknown);
+        assert_eq!(output, b"partial");
+        assert!(elapsed >= Duration::from_millis(200) && elapsed < Duration::from_secs(1));
+        worker.join().unwrap();
     }
 
     struct ObservedWriter {

@@ -399,12 +399,23 @@ fn windows_cli_quarantines_dropped_dispatch_without_replay_or_list_attach() {
 
     let mut drop_command = uu_command(&test, &fake_cli, "drop");
     drop_command.arg("printf '断线 世界'");
+    let started = Instant::now();
     let dropped = run_bounded(
         &mut drop_command,
-        Duration::from_secs(60),
+        Duration::from_secs(15),
         "uu with a dropping fake terminal",
     );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "uu should return promptly after the attach child exits, took {elapsed:?}"
+    );
     assert_ne!(dropped.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&dropped.stdout).contains("partial output:"),
+        "final PTY output should be drained before returning unknown: {}",
+        String::from_utf8_lossy(&dropped.stdout)
+    );
     assert!(
         String::from_utf8_lossy(&dropped.stderr)
             .to_ascii_lowercase()

@@ -1,8 +1,8 @@
 #![cfg(windows)]
 
 use crate::runner::{
-    await_conpty_startup, run_framed_job, run_framed_job_with_input, run_framed_pwd_probe,
-    JobInput, JobResult, JobRunError, ReadPump,
+    await_conpty_startup, run_framed_job_with_child, run_framed_job_with_input_and_child,
+    run_framed_pwd_probe_with_child, JobInput, JobResult, JobRunError, ReadPump,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -114,12 +114,14 @@ impl TermPty {
         remote_root: &str,
         shell_command: &str,
     ) -> Result<JobResult, JobRunError> {
-        run_framed_job(
+        let child = &mut self.child;
+        run_framed_job_with_child(
             &mut self.reader,
             &mut self.writer,
             output,
             remote_root,
             shell_command,
+            || child.try_wait().map(|status| status.is_some()),
         )
     }
 
@@ -130,19 +132,27 @@ impl TermPty {
         shell_command: &str,
         input: &Receiver<JobInput>,
     ) -> Result<JobResult, JobRunError> {
-        run_framed_job_with_input(
+        let child = &mut self.child;
+        run_framed_job_with_input_and_child(
             &mut self.reader,
             &mut self.writer,
             output,
             remote_root,
             shell_command,
             input,
+            || child.try_wait().map(|status| status.is_some()),
         )
     }
 
     fn capture_pwd(&mut self) -> Result<String, JobRunError> {
         let mut output = Vec::new();
-        let result = run_framed_pwd_probe(&mut self.reader, &mut self.writer, &mut output)?;
+        let child = &mut self.child;
+        let result = run_framed_pwd_probe_with_child(
+            &mut self.reader,
+            &mut self.writer,
+            &mut output,
+            || child.try_wait().map(|status| status.is_some()),
+        )?;
         if result.exit_code != 0 {
             return Err(JobRunError::Completed(anyhow!(
                 "remote pwd exited with code {}",
