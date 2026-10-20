@@ -88,7 +88,8 @@ impl Config {
             .collect::<std::collections::HashSet<_>>();
         let before = self.owned_workers.len();
         self.owned_workers.retain(|worker| {
-            worker.device_identity != device_identity || live_names.contains(worker.session_name.as_str())
+            worker.device_identity != device_identity
+                || live_names.contains(worker.session_name.as_str())
         });
         self.owned_workers.len() != before
     }
