@@ -10,7 +10,10 @@ use uu_cli::bind::{decide_binding, BindCandidate, BindDecision};
 use uu_cli::cli::{self, Command};
 use uu_cli::config::ConfigStore;
 use uu_cli::inventory::{discover_inventory, is_eligible_session, InventorySnapshot};
+use uu_cli::job::argv_to_shell;
 use uu_cli::model::{Config, SessionInfo, WorkspaceBinding};
+#[cfg(windows)]
+use uu_cli::transport::OfficialAttachPty;
 use uu_cli::uuyc::OfficialCli;
 use uu_cli::workspace::{resolve_binding, suggest_root};
 
@@ -42,7 +45,7 @@ fn run() -> Result<u8> {
         Command::Put { .. } | Command::Get { .. } => {
             bail!("file transfer is not implemented in this bootstrap build")
         }
-        Command::Run { argv } => run_remote_placeholder(&config, &cwd, argv),
+        Command::Run { argv } => run_remote(&config, &cwd, argv),
     }
 }
 
@@ -272,7 +275,7 @@ fn prompt(label: &str) -> Result<String> {
     Ok(input.trim().to_owned())
 }
 
-fn run_remote_placeholder(config: &Config, cwd: &Path, argv: Vec<OsString>) -> Result<u8> {
+fn run_remote(config: &Config, cwd: &Path, argv: Vec<OsString>) -> Result<u8> {
     let binding = resolve_binding(config, cwd).ok_or_else(|| {
         let root = suggest_root(cwd)
             .map(|p| p.display().to_string())
@@ -281,16 +284,84 @@ fn run_remote_placeholder(config: &Config, cwd: &Path, argv: Vec<OsString>) -> R
             "workspace {root} is not bound; open a UU Terminal for the target device, then run `uu bind`"
         )
     })?;
+    let shell_command = argv_to_shell(&argv)?;
 
-    let rendered = argv
-        .iter()
-        .map(|arg| arg.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ");
-    bail!(
-        "remote execution transport is not connected yet ({} · {}): {}",
-        binding.device_name,
-        binding.remote_root,
-        rendered
-    )
+    #[cfg(not(windows))]
+    {
+        let _ = shell_command;
+        bail!("remote execution is supported only on Windows in v1")
+    }
+
+    #[cfg(windows)]
+    {
+        let cli = OfficialCli::locate().context("official UU Remote is required for remote execution")?;
+        let snapshot = discover_inventory(&cli)?;
+        let device = snapshot
+            .devices
+            .iter()
+            .find(|item| item.device.device_identity == binding.device_identity)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "bound target {} is not present in the current UU device list",
+                    binding.device_name
+                )
+            })?;
+
+        if !device.device.is_online {
+            bail!("bound target {} is offline", binding.device_name);
+        }
+        if let Some(error) = &device.session_error {
+            bail!("cannot query terminal workers on {}: {error}", binding.device_name);
+        }
+
+        let workers: Vec<&SessionInfo> = device
+            .sessions
+            .iter()
+            .filter(|session| is_eligible_session(session))
+            .filter(|session| config.is_session_authorized(session))
+            .collect();
+        if workers.is_empty() {
+            bail!(
+                "no authorized reusable Terminal is open on {}; open one in official UU Remote and run `uu bind` once",
+                binding.device_name
+            );
+        }
+
+        let mut attach_errors = Vec::new();
+        for worker in workers {
+            let mut transport = match OfficialAttachPty::attach(
+                cli.path(),
+                &binding.device_identity,
+                &worker.session_name,
+            ) {
+                Ok(transport) => transport,
+                Err(error) => {
+                    attach_errors.push(format!("{}: {error:#}", worker.session_name));
+                    continue;
+                }
+            };
+
+            let stdout = io::stdout();
+            let mut output = stdout.lock();
+            match transport.run_job(&mut output, &binding.remote_root, &shell_command) {
+                Ok(result) => {
+                    return u8::try_from(result.exit_code).with_context(|| {
+                        format!("remote shell returned invalid exit code {}", result.exit_code)
+                    });
+                }
+                Err(error) if error.is_unknown() => {
+                    bail!(
+                        "{error}; not retrying on another Terminal because the command may already be running"
+                    );
+                }
+                Err(error) => return Err(anyhow::Error::new(error)),
+            }
+        }
+
+        bail!(
+            "no authorized Terminal could be attached on {}: {}",
+            binding.device_name,
+            attach_errors.join(" | ")
+        )
+    }
 }
