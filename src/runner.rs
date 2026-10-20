@@ -312,6 +312,11 @@ where
     let mut stdin_eof = false;
     let mut input_disconnected = false;
     let mut child_exit_deadline = None;
+    #[cfg(windows)]
+    let fixture_trace = std::env::var("UU_TEST_MODE").as_deref() == Ok("bash")
+        && std::env::var_os("UU_TEST_FIXTURE_EVENTS").is_some();
+    #[cfg(windows)]
+    let mut fixture_trace_remaining = 8192usize;
     loop {
         if child_has_exited()
             .context("failed while checking official UU terminal process")
@@ -388,6 +393,19 @@ where
                     .push(&bytes)
                     .context("invalid remote job framing")
                     .map_err(JobRunError::Unknown)?;
+                #[cfg(windows)]
+                if fixture_trace && fixture_trace_remaining > 0 {
+                    let count = bytes.len().min(fixture_trace_remaining);
+                    let hex = bytes[..count]
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>();
+                    eprintln!(
+                        "uu-test-pty-rx decoder_started={} hex={hex}",
+                        decoder.started()
+                    );
+                    fixture_trace_remaining -= count;
+                }
                 write_visible(output, &visible, "failed to stream remote output")?;
                 if let Some(exit_code) = decoder.completed() {
                     return Ok(JobResult { exit_code });
