@@ -183,7 +183,7 @@ fn run_bounded(command: &mut Command, timeout: Duration, description: &str) -> O
                 Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     "<missing>".to_owned()
-                },
+                }
                 Err(error) => format!("<could not read: {error}>"),
             },
             None => "<UU_TEST_LOG not set on command>".to_owned(),
@@ -344,9 +344,7 @@ fn read_dispatches(path: &Path) -> Vec<Value> {
         .expect("fake official CLI should record a dispatch")
         .lines()
         .map(|line| serde_json::from_str(line).expect("parse dispatch record"))
-        .filter(|record: &Value| {
-            record.get("event").and_then(Value::as_str) == Some("dispatch")
-        })
+        .filter(|record: &Value| record.get("event").and_then(Value::as_str) == Some("dispatch"))
         .collect()
 }
 

@@ -442,7 +442,8 @@ pub(crate) fn await_conpty_startup(
     let mut handshake = ConPtyDsrHandshake::default();
     let mut output = Vec::new();
     while Instant::now() < deadline {
-        let poll = deadline.saturating_duration_since(Instant::now())
+        let poll = deadline
+            .saturating_duration_since(Instant::now())
             .min(Duration::from_millis(25));
         match reader.read_event_timeout(poll)? {
             PumpRead::Data(bytes) => {
@@ -455,8 +456,13 @@ pub(crate) fn await_conpty_startup(
                 }
             }
             PumpRead::Eof => {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof,
-                    format!("ConPTY closed before its cursor handshake; startup output: {:?}", String::from_utf8_lossy(&output))));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "ConPTY closed before its cursor handshake; startup output: {:?}",
+                        String::from_utf8_lossy(&output)
+                    ),
+                ));
             }
             PumpRead::Timeout => {}
         }
@@ -886,17 +892,27 @@ mod tests {
     fn startup_must_receive_a_cursor_query_before_command_dispatch() {
         let (tx, rx) = mpsc::channel();
         tx.send(b"startup\x1b[6n".to_vec()).unwrap();
-        let mut reader = ReadPump::spawn(ChannelReader { chunks: rx, current: Cursor::new(Vec::new()) });
+        let mut reader = ReadPump::spawn(ChannelReader {
+            chunks: rx,
+            current: Cursor::new(Vec::new()),
+        });
         let mut writer = Vec::new();
-        assert_eq!(await_conpty_startup(&mut reader, &mut writer, Duration::from_millis(100)).unwrap(), b"startup");
+        assert_eq!(
+            await_conpty_startup(&mut reader, &mut writer, Duration::from_millis(100)).unwrap(),
+            b"startup"
+        );
         assert_eq!(writer, CONPTY_CURSOR_REPLY);
         drop(tx);
         reader.shutdown_and_join();
 
         let (tx, rx) = mpsc::channel();
-        let mut reader = ReadPump::spawn(ChannelReader { chunks: rx, current: Cursor::new(Vec::new()) });
+        let mut reader = ReadPump::spawn(ChannelReader {
+            chunks: rx,
+            current: Cursor::new(Vec::new()),
+        });
         let mut writer = Vec::new();
-        let error = await_conpty_startup(&mut reader, &mut writer, Duration::from_millis(20)).unwrap_err();
+        let error =
+            await_conpty_startup(&mut reader, &mut writer, Duration::from_millis(20)).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(writer.is_empty());
         drop(tx);
