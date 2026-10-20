@@ -173,7 +173,7 @@ Windows workspace key 至少验证：
 
 ## 当前实现与证据（2026-10-20）
 
-当前为 PR [#7](https://github.com/teddyli18000/uu-cli/pull/7) 中的原生 Windows 验证候选，尚未满足下面的真实 UU release gate。代码、构建、测试和安装检查都在远端完成；没有在开发者电脑安装、启动或接管 UU/Terminal。
+当前为 PR [#7](https://github.com/teddyli18000/uu-cli/pull/7) 中的原生 Windows 验证候选，尚未满足下面的真实 UU release gate。产品代码、构建、测试和安装检查在远端完成。之后经用户授权，仅在开发者电脑运行独立观察探针，连接用户交出的专用 Terminal；没有本地安装产品或修改官方 UU。
 
 | 层级 | 已验证范围 | 证据 |
 | --- | --- | --- |
@@ -184,5 +184,13 @@ Windows workspace key 至少验证：
 
 官方安装 smoke 使用的 Windows UU 为 `4.43.0.3607`，NetEase 签名有效；安装包 SHA256 为 `F26F84F01551538B9F6996D5CF0CCBF884FB12731903A4F3EFA73BE712C44DA4`。这只证明该次下载、安装、发现与未运行诊断，不证明登录或真实 Terminal attach。
 
-以下仍为 **requires-real-uu**，不得标记通过：首次 binding 的完整人类交互、多设备/新 Terminal 的真实授权体验、attach/reuse 对官方窗口的影响、真实多 Terminal 并发与长任务、stdin/Ctrl+C、UU/Terminal/网络重启、真实文件 round-trip，以及至少一台非开发环境从安装到首次绑定和执行。正式发布应逐项记录真实验收结果，再决定 release；当前没有发布正式版本。
+以下仍为 **requires-real-uu**，不得标记通过：首次 binding 的完整人类交互、多设备/新 Terminal 的真实授权体验、完整产品 attach/reuse、真实多 Terminal 并发与长任务、产品 stdin/Ctrl+C、UU/Terminal/网络重启、真实文件 round-trip，以及至少一台非开发环境从安装到首次绑定和执行。正式发布应逐项记录真实验收结果，再决定 release；当前没有发布正式版本。
 
+
+### 独立真机命令通道观察
+
+用户提供已登录的官方 UU 和明确交出的专用 Linux/bash Terminal。观察结果见 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)；原始收发字节和真实设备标识只保存在本地忽略目录。
+
+[探针 Actions 39427353688](https://github.com/teddyli18000/uu-cli/actions/runs/39427353688) 编译了生产提交 79fa6fbc0c8d3dbb4ebf50c2589e684bd5d85d37 的实际命令包装器和 console decoder。通过官方 CLI/ConPTY，已观察到同一附着中的退出码 0/7、Unicode、两秒间隔实时输出、sleep 中断返回 130 和中断后继续执行。
+
+这项证据只覆盖独立探针中的实际包装/解析模块与官方传输。完整 runner、绑定/授权交互、断线恢复及其他 release gate 仍需逐项验收；不据此宣称 v1 完成。
