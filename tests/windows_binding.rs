@@ -325,7 +325,12 @@ fn windows_first_binding_uses_isolated_console_and_preserves_job_stdin() {
     command.arg("read -r line; printf 'REMOTE_STDIN:<%s>\\n' \"$line\"");
     let running = Running::start(command, b"binding-sentinel\n");
 
-    drive(&test, running.pid, "Ctrl+C", "wait");
+    drive(
+        &test,
+        running.pid,
+        "接下来打开的 Terminal 将用于本次请求",
+        "wait",
+    );
     atomic_fixture(
         &test.fixture,
         &json!({"devices": [{
@@ -420,6 +425,91 @@ fn windows_first_binding_uses_isolated_console_and_preserves_job_stdin() {
 }
 
 #[test]
+fn windows_existing_terminal_requires_friendly_name_authorization() {
+    let test = Workspace::new();
+    let remote_root = test._temp.path().join("remote-root");
+    fs::create_dir_all(&remote_root).unwrap();
+    fs::create_dir_all(test.config.parent().unwrap()).unwrap();
+    let bash = bash_path();
+    let probe = Command::new(&bash)
+        .args(["--noprofile", "--norc", "-c", "pwd"])
+        .current_dir(&remote_root)
+        .output()
+        .expect("probe remote cwd");
+    assert!(probe.status.success());
+    let remote_root = String::from_utf8_lossy(&probe.stdout).trim().to_owned();
+    let created_at = "2026-10-20T12:30:00Z";
+    fs::write(
+        &test.config,
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "bindings": [{
+                "local_root": fs::canonicalize(&test.root).unwrap().to_string_lossy().to_string(),
+                "device_identity": DEVICE_ID,
+                "device_name": DEVICE_NAME,
+                "remote_root": remote_root,
+            }],
+            "authorized_workers": [],
+            "declined_workers": [],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    atomic_fixture(
+        &test.fixture,
+        &json!({"devices": [{
+            "deviceId": DEVICE_ID, "deviceName": DEVICE_NAME, "isOnline": true,
+            "terminals": [{"name": "bash-existing", "shell": "bash", "state": "detached",
+                "createdAt": created_at, "attachable": true}]
+        }]}),
+    );
+
+    let mut command = base_command(&test, &bash);
+    command.arg("printf EXISTING_AUTHORIZED_JOB_OK");
+    let running = Running::start(command, b"");
+    drive(&test, running.pid, "测试设备 新终端", "enter");
+
+    let output = running.finish(Duration::from_secs(60), &test);
+    assert_success(&output, "existing terminal authorization");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("EXISTING_AUTHORIZED_JOB_OK"), "{stdout:?}");
+    assert!(
+        !stdout.contains("新终端") && !stdout.contains("N/Esc"),
+        "authorization console leaked into uu stdout: {stdout:?}"
+    );
+    let transcript = fs::read_to_string(&test.transcript).unwrap_or_default();
+    assert!(transcript.contains("测试设备 新终端"), "{transcript}");
+    assert!(transcript.contains("[Enter] 交给 uu-cli"), "{transcript}");
+    assert!(
+        !transcript.contains("接下来打开的 Terminal"),
+        "an already-present Terminal was treated as a waiting-request handoff: {transcript}"
+    );
+
+    let config: Value = serde_json::from_slice(&fs::read(&test.config).unwrap()).unwrap();
+    assert_eq!(
+        config["authorized_workers"][0],
+        format!("{DEVICE_ID}\u{1f}bash-existing\u{1f}{created_at}")
+    );
+    assert_eq!(config["bindings"][0]["remote_root"], remote_root);
+    let events = read_events(&test.events);
+    let dispatches: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "dispatch")
+        .collect();
+    assert_eq!(
+        dispatches.len(),
+        1,
+        "existing binding should not capture pwd again: {events:#?}"
+    );
+    assert_eq!(dispatches[0]["deviceId"], DEVICE_ID);
+    assert_eq!(dispatches[0]["sessionName"], "bash-existing");
+    assert_eq!(dispatches[0]["createdAt"], created_at);
+    assert!(dispatches[0]["wrapper"]
+        .as_str()
+        .unwrap()
+        .contains("EXISTING_AUTHORIZED_JOB_OK"));
+}
+#[test]
 fn windows_escape_alone_cancels_root_without_binding_or_business_dispatch() {
     let test = Workspace::new();
     fs::create_dir_all(test._temp.path().join("remote-root")).unwrap();
@@ -432,7 +522,12 @@ fn windows_escape_alone_cancels_root_without_binding_or_business_dispatch() {
     command.arg("printf CANCEL_MUST_NOT_RUN");
     let running = Running::start(command, b"");
 
-    drive(&test, running.pid, "Ctrl+C", "wait");
+    drive(
+        &test,
+        running.pid,
+        "接下来打开的 Terminal 将用于本次请求",
+        "wait",
+    );
     atomic_fixture(
         &test.fixture,
         &json!({"devices": [{
