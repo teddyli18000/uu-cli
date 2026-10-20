@@ -250,7 +250,8 @@ mod tests {
         assert!(wrapped.contains("printf '\\r\\n%s%s%s' 'UUC' 'AbC123' 'B';"));
         assert!(wrapped.contains("( cd -- '/home/user/my project' && eval "));
         assert!(wrapped.contains("eval 'cd src && export X=1 && exit 7' ) )\n"));
-        assert!(wrapped.contains("printf \"\\r\\n%s%s%s%d%s\\r\\n\" UUC AbC123 E \"$__uu_status\" Z' EXIT"));
+        assert!(wrapped
+            .contains("printf \"\\r\\n%s%s%s%d%s\\r\\n\" UUC AbC123 E \"$__uu_status\" Z' EXIT"));
         assert!(!wrapped.contains("UUCAbC123B"));
         assert!(!wrapped.contains("UUCAbC123E"));
     }
