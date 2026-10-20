@@ -11,6 +11,7 @@ jobs:
     runs-on: windows-latest
     env:
       PROBE_BUILD_SHA: ${{ github.sha }}
+      PROBE_CANDIDATE_SHA: 79fa6fbc0c8d3dbb4ebf50c2589e684bd5d85d37
     timeout-minutes: 10
     defaults:
       run:
@@ -20,9 +21,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - name: Fetch pinned pure job module for candidate validation
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force target | Out-Null
+          $candidatePath = Join-Path (Get-Location) 'target/candidate_job.rs'
+          Invoke-WebRequest "https://raw.githubusercontent.com/teddyli18000/uu-cli/$env:PROBE_CANDIDATE_SHA/src/job.rs" -OutFile $candidatePath
+          "CANDIDATE_JOB_PATH=$candidatePath" >> $env:GITHUB_ENV
       - run: cargo fmt --check
-      - run: cargo clippy --locked -- -D warnings
-      - run: cargo build --locked --release
+      - run: cargo clippy --locked --features candidate -- -D warnings
+      - run: cargo build --locked --release --features candidate
       - uses: actions/upload-artifact@v4
         with:
           name: real-uu-probe-windows

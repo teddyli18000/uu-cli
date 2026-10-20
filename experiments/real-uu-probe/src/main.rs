@@ -9,6 +9,12 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(feature = "candidate")]
+#[allow(dead_code)]
+mod candidate_job {
+    include!(env!("CANDIDATE_JOB_PATH"));
+}
+
 struct Logs {
     human: File,
     raw: File,
@@ -179,11 +185,13 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
         }
     });
     logs.note(
-        "Local controls: pwd hello exit7 second unicode stream sleep interrupt interrupt-key after status quit; guard-<command> selects the job-guard experiment",
+        "Local controls: pwd hello exit7 second unicode stream sleep interrupt interrupt-key after status quit; guard-<command> or candidate-<command> selects an experiment",
     )?;
     let mut startup = Vec::new();
     let mut all_rx = Vec::new();
     let mut pending: Option<(String, String, Instant)> = None;
+    #[cfg(feature = "candidate")]
+    let mut candidate_decoder: Option<candidate_job::CompletionDecoder> = None;
     let mut sequence = 0u32;
     let mut any_command_sent = false;
     let mut win32_input_requested = false;
@@ -199,6 +207,35 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
                 // Log before any framing or startup interpretation.
                 logs.bytes("RX", &bytes)?;
                 all_rx.extend_from_slice(&bytes);
+                #[cfg(feature = "candidate")]
+                let candidate_active = candidate_decoder.is_some();
+                #[cfg(not(feature = "candidate"))]
+                let candidate_active = false;
+                #[cfg(feature = "candidate")]
+                if let Some(decoder) = &mut candidate_decoder {
+                    let output = match decoder.push(&bytes) {
+                        Ok(output) => output,
+                        Err(error) => {
+                            logs.event(
+                                "candidate_decode_error",
+                                json!({"error":error.to_string()}),
+                            )?;
+                            logs.note(
+                                "Candidate protocol error; outcome unknown, no further send",
+                            )?;
+                            break;
+                        }
+                    };
+                    if !output.is_empty() {
+                        logs.bytes("CANDIDATE_OUTPUT", &output)?;
+                    }
+                    if let Some(code) = decoder.completed() {
+                        if let Some((nonce, label, sent)) = pending.take() {
+                            logs.event("candidate_completion", json!({"label":label,"nonce":nonce,"exit":code,"elapsed_ms":sent.elapsed().as_millis(),"candidate_sha":env!("PROBE_CANDIDATE_SHA")}))?;
+                            logs.note(&format!("Candidate decoder: {label} exit={code}; production wrapper/decoder, not the visible-token observer"))?;
+                        }
+                    }
+                }
                 if !any_command_sent {
                     startup.extend_from_slice(&bytes);
                     if !win32_input_requested
@@ -218,7 +255,7 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
                         startup.drain(..startup.len() - 64);
                     }
                 }
-                if let Some((nonce, label, sent)) = &pending {
+                if let Some((nonce, label, sent)) = pending.as_ref().filter(|_| !candidate_active) {
                     // Observation only: ConPTY may replace the separator CRLF
                     // with cursor addressing. Retain that failure independently.
                     let begin = format!("UUC{nonce}B");
@@ -337,8 +374,12 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
                 logs.note("No send: previous command completion has not been observed")?;
                 continue;
             }
+            let candidate = control.starts_with("candidate-");
             let guarded = control.starts_with("guard-");
-            let command_name = control.strip_prefix("guard-").unwrap_or(control);
+            let command_name = control
+                .strip_prefix("candidate-")
+                .or_else(|| control.strip_prefix("guard-"))
+                .unwrap_or(control);
             let shell = match command_name {
                 "pwd" => "pwd",
                 "hello" => "printf 'hello-uu\\n'",
@@ -359,17 +400,43 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
             // Baseline candidate retained for comparison. The guard experiment
             // changes only this dedicated shell's monitor baseline and per-job
             // traps. Inner eval cannot replace the shell that owns the EXIT trap.
-            let wrapper = if guarded {
+            #[cfg(feature = "candidate")]
+            if !candidate {
+                candidate_decoder = None;
+            }
+            let mut wrapper = if candidate {
+                #[cfg(feature = "candidate")]
+                {
+                    candidate_decoder =
+                        Some(candidate_job::CompletionDecoder::new_console(&nonce)?);
+                    logs.note(
+                        "Candidate job uses explicit test remote root /; no binding or pool",
+                    )?;
+                    candidate_job::wrap_job("/", shell, &nonce)?
+                }
+                #[cfg(not(feature = "candidate"))]
+                {
+                    logs.note(
+                        "Candidate validation was not compiled into this probe; nothing sent",
+                    )?;
+                    continue;
+                }
+            } else if guarded {
                 format!("set +m; ( trap '__uu_status=$?; printf \"\\r\\n%s%s%s%d%s\\r\\n\" UUC {nonce} E \"$__uu_status\" Z' EXIT; trap 'exit 130' INT; printf '\\r\\n%s%s%s\\r\\n' UUC {nonce} B; ( eval {escaped} ) )\r")
             } else {
                 format!("printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; ( eval {escaped} ); __uu_status=$?; printf '\\r\\n%s%s%s%d%s' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\r")
             };
+            // Match the product transport's Enter representation, not raw LF.
+            if wrapper.ends_with('\n') {
+                wrapper.pop();
+                wrapper.push('\r');
+            }
             logs.note(&format!(
                 "Command {control} sending once: {shell}; nonce={nonce}"
             ))?;
             logs.event(
                 "command",
-                json!({"label":control,"shell":shell,"nonce":nonce,"guarded":guarded}),
+                json!({"label":control,"shell":shell,"nonce":nonce,"guarded":guarded,"candidate":candidate}),
             )?;
             pending = Some((nonce, control.to_string(), Instant::now()));
             any_command_sent = true;

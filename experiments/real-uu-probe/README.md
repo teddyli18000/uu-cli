@@ -34,6 +34,15 @@ changes job-control mode only in that dedicated shell; it is not a default produ
 repair or a change to remote system/UU settings. Cancellation still needs a matching
 END and observed prompt/reuse; no pending state is cleared by the interrupt itself.
 
+Actions additionally builds the `candidate` feature against a pinned production
+`src/job.rs`, downloaded only inside CI. `candidate-<command>` runs that exact
+wrapper and `CompletionDecoder::new_console`, with explicit test root `/` and
+the product's LF-to-CR dispatch conversion. Logs label candidate completions
+separately; the experimental visible-token observer cannot complete those jobs.
+The local artifact contains the compiled code, without checking out production
+sources on the development machine. This still bypasses binding/pool/installer
+and therefore proves only the wrapper/decoder plus transport experiment.
+
 `human.log` contains milestones; `raw.jsonl` contains timestamped TX/RX hex and
 process-state events before any interpretation. Cursor inheritance DSR is logged
 and answered only before a shell command is sent. Raw RX is never stripped or
