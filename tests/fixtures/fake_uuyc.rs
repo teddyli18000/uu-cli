@@ -23,6 +23,7 @@ fn main() -> ExitCode {
 fn run() -> Result<u8, Box<dyn Error>> {
     let owned_args: Vec<String> = env::args().skip(1).collect();
     let args: Vec<&str> = owned_args.iter().map(String::as_str).collect();
+    record_event(json!({"event": "invoke", "args": args}))?;
 
     if args.len() == 1 && args[0] == "version" {
         println!("cliVersion: 4.43.1");
@@ -84,6 +85,8 @@ fn write_json(value: Value) -> Result<u8, Box<dyn Error>> {
 }
 
 fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
+    record_event(json!({"event": "attach_started"}))?;
+
     if env::var("UU_TEST_MODE").as_deref() == Ok("bash") {
         let bash = env::var_os("UU_TEST_BASH")
             .ok_or("UU_TEST_BASH must name the Git Bash executable for bash mode")?;
@@ -135,6 +138,13 @@ fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
 }
 
 fn record_dispatch(wrapper: &str) -> Result<(), Box<dyn Error>> {
+    record_event(json!({
+        "event": "dispatch",
+        "wrapper": wrapper
+    }))
+}
+
+fn record_event(record: Value) -> Result<(), Box<dyn Error>> {
     let Some(path) = env::var_os("UU_TEST_LOG") else {
         return Ok(());
     };
@@ -143,10 +153,6 @@ fn record_dispatch(wrapper: &str) -> Result<(), Box<dyn Error>> {
         fs::create_dir_all(parent)?;
     }
     let mut log = OpenOptions::new().create(true).append(true).open(path)?;
-    let record = json!({
-        "event": "dispatch",
-        "wrapper": wrapper
-    });
     serde_json::to_writer(&mut log, &record)?;
     log.write_all(b"\n")?;
     log.flush()?;

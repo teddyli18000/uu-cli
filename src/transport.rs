@@ -1,8 +1,8 @@
 #![cfg(windows)]
 
 use crate::runner::{
-    run_framed_job, run_framed_job_with_input, run_framed_pwd_probe, JobInput, JobResult,
-    JobRunError, ReadPump,
+    await_conpty_startup, run_framed_job, run_framed_job_with_input, run_framed_pwd_probe, JobInput,
+    JobResult, JobRunError, ReadPump,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -46,11 +46,24 @@ impl TermPty {
         let raw_reader = master
             .try_clone_reader()
             .context("failed to open UU terminal PTY reader")?;
-        let writer = master
+        let mut writer = master
             .take_writer()
             .context("failed to open UU terminal PTY writer")?;
         drop(slave);
         let mut reader = ReadPump::spawn(raw_reader);
+        let startup_output = match await_conpty_startup(&mut reader, &mut writer, Duration::from_secs(5)) {
+            Ok(output) => output,
+            Err(error) => {
+                let status = child.try_wait();
+                let _ = child.kill();
+                drop(writer);
+                drop(master);
+                reader.shutdown_and_join();
+                return Err(error).with_context(|| format!("cannot initialize official UU {operation} ConPTY before dispatch (child status: {status:?})"));
+            }
+        };
+
+
 
         // Catch argument/ownership failures before command bytes can be sent.
         let status = match child.try_wait() {
@@ -64,7 +77,7 @@ impl TermPty {
             }
         };
         if let Some(status) = status {
-            let mut diagnostic = Vec::new();
+            let mut diagnostic = startup_output;
             let deadline = Instant::now() + Duration::from_millis(250);
             while Instant::now() < deadline {
                 match reader.read_event_timeout(Duration::from_millis(25)) {
@@ -239,7 +252,8 @@ mod tests {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::time::{Duration, Instant};
 
-    const PROBE: &[u8] = b"\r\nUUCconptyprobeBpayload\r\nUUCconptyprobeE0Z\r\n";
+    const PROBE: &[u8] =
+        b"\r\nUUCconptyprobeBpayload\r\nUUCconptyprobeE0Z\r\n";
 
     #[test]
     fn current_official_attach_command_targets_the_existing_authorized_session() {

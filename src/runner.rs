@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 #[cfg(any(windows, test))]
 use std::thread::JoinHandle;
-#[cfg(test)]
+#[cfg(any(windows, test))]
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -120,9 +120,7 @@ where
     #[cfg(any(windows, test))]
     let mut conpty_dsr = ConPtyDsrHandshake::default();
 
-    writer
-        .write_all(wrapped.as_bytes())
-        .and_then(|_| writer.flush())
+    send_wrapped_command(writer, wrapped)
         .context("failed while sending the framed command")
         .map_err(JobRunError::Unknown)?;
 
@@ -226,9 +224,7 @@ where
     #[cfg(any(windows, test))]
     let mut conpty_dsr = ConPtyDsrHandshake::default();
 
-    writer
-        .write_all(wrapped.as_bytes())
-        .and_then(|_| writer.flush())
+    send_wrapped_command(writer, &wrapped)
         .context("failed while sending the framed command")
         .map_err(JobRunError::Unknown)?;
 
@@ -306,6 +302,21 @@ where
             PumpRead::Timeout => {}
         }
     }
+}
+
+// ConPTY consumes keyboard input: Enter is CR. Keep caller stdin bytes unchanged.
+fn send_wrapped_command<W: Write>(writer: &mut W, wrapped: &str) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        let mut bytes = wrapped.as_bytes().to_vec();
+        if bytes.last() == Some(&b'\n') {
+            *bytes.last_mut().expect("nonempty command") = b'\r';
+        }
+        writer.write_all(&bytes)?;
+    }
+    #[cfg(not(windows))]
+    writer.write_all(wrapped.as_bytes())?;
+    writer.flush()
 }
 
 fn write_visible<O: Write + ?Sized>(
@@ -417,6 +428,41 @@ fn decode_job_bytes<W: Write + ?Sized>(
         visible.extend(decoder.push(&bytes[index..])?);
     }
     Ok(visible)
+}
+
+/// Complete ConPTY's initial cursor query before writing any shell command.
+/// Input sent earlier can be consumed by the cursor-position exchange.
+#[cfg(any(windows, test))]
+pub(crate) fn await_conpty_startup(
+    reader: &mut ReadPump,
+    writer: &mut (impl Write + ?Sized),
+    wait: Duration,
+) -> io::Result<Vec<u8>> {
+    let deadline = Instant::now() + wait;
+    let mut handshake = ConPtyDsrHandshake::default();
+    let mut output = Vec::new();
+    while Instant::now() < deadline {
+        let poll = deadline.saturating_duration_since(Instant::now())
+            .min(Duration::from_millis(25));
+        match reader.read_event_timeout(poll)? {
+            PumpRead::Data(bytes) => {
+                let visible = handshake.push(writer, &bytes)?;
+                let remaining = 16_384usize.saturating_sub(output.len());
+                output.extend_from_slice(&visible[..visible.len().min(remaining)]);
+                if handshake.cursor_queries > 0 {
+                    output.extend(handshake.finish());
+                    return Ok(output);
+                }
+            }
+            PumpRead::Eof => {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof,
+                    format!("ConPTY closed before its cursor handshake; startup output: {:?}", String::from_utf8_lossy(&output))));
+            }
+            PumpRead::Timeout => {}
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::TimedOut,
+        format!("ConPTY cursor handshake was not received within {wait:?}; this terminal environment is incompatible; startup output: {:?}", String::from_utf8_lossy(&output))))
 }
 
 /// Drain a ConPTY fixture in tests while preserving all bytes other than DSR queries.
@@ -834,6 +880,27 @@ mod tests {
         assert_eq!(visible, b"prefixSuffix");
         assert_eq!(queries, 1);
         assert_eq!(writer, CONPTY_CURSOR_REPLY);
+    }
+
+    #[test]
+    fn startup_must_receive_a_cursor_query_before_command_dispatch() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(b"startup\x1b[6n".to_vec()).unwrap();
+        let mut reader = ReadPump::spawn(ChannelReader { chunks: rx, current: Cursor::new(Vec::new()) });
+        let mut writer = Vec::new();
+        assert_eq!(await_conpty_startup(&mut reader, &mut writer, Duration::from_millis(100)).unwrap(), b"startup");
+        assert_eq!(writer, CONPTY_CURSOR_REPLY);
+        drop(tx);
+        reader.shutdown_and_join();
+
+        let (tx, rx) = mpsc::channel();
+        let mut reader = ReadPump::spawn(ChannelReader { chunks: rx, current: Cursor::new(Vec::new()) });
+        let mut writer = Vec::new();
+        let error = await_conpty_startup(&mut reader, &mut writer, Duration::from_millis(20)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(writer.is_empty());
+        drop(tx);
+        reader.shutdown_and_join();
     }
 
     #[test]
