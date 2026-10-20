@@ -1,8 +1,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use std::ffi::OsString;
 
-const OSC_PREFIX: &[u8] = b"\x1b]7770;UUCLI;";
-const BEL: u8 = 0x07;
+const END_MARKER: u8 = b'Z';
 
 /// Convert CLI argv into the remote shell text promised by the public contract.
 ///
@@ -51,7 +50,7 @@ pub fn wrap_job(remote_root: &str, shell_command: &str, nonce: &str) -> Result<S
     let command = shell_quote(shell_command);
 
     Ok(format!(
-        "printf '\\033]7770;UUCLI;{nonce};BEGIN\\007'; ( cd -- {root} && eval {command} ); __uu_status=$?; printf '\\033]7770;UUCLI;{nonce};END;%d\\007' \"$__uu_status\"\n"
+        "printf '\\n%s%s%s' 'UUC' '{nonce}' 'B'; ( cd -- {root} && eval {command} ); __uu_status=$?; printf '\\n%s%s%s%d%s' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\n"
     ))
 }
 
@@ -60,7 +59,7 @@ pub fn wrap_job(remote_root: &str, shell_command: &str, nonce: &str) -> Result<S
 pub fn wrap_pwd_probe(nonce: &str) -> Result<String> {
     validate_nonce(nonce)?;
     Ok(format!(
-        "printf '\\033]7770;UUCLI;{nonce};BEGIN\\007'; pwd; __uu_status=$?; printf '\\033]7770;UUCLI;{nonce};END;%d\\007' \"$__uu_status\"\n"
+        "printf '\\n%s%s%s' 'UUC' '{nonce}' 'B'; pwd; __uu_status=$?; printf '\\n%s%s%s%d%s' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\n"
     ))
 }
 
@@ -90,14 +89,8 @@ impl CompletionDecoder {
     pub fn new(nonce: &str) -> Result<Self> {
         validate_nonce(nonce)?;
 
-        let mut start_marker = OSC_PREFIX.to_vec();
-        start_marker.extend_from_slice(nonce.as_bytes());
-        start_marker.extend_from_slice(b";BEGIN");
-        start_marker.push(BEL);
-
-        let mut end_prefix = OSC_PREFIX.to_vec();
-        end_prefix.extend_from_slice(nonce.as_bytes());
-        end_prefix.extend_from_slice(b";END;");
+        let start_marker = format!("\nUUC{nonce}B").into_bytes();
+        let end_prefix = format!("\nUUC{nonce}E").into_bytes();
 
         Ok(Self {
             start_marker,
@@ -164,7 +157,7 @@ impl CompletionDecoder {
             let status_start = start + self.end_prefix.len();
             if let Some(relative_end) = self.pending[status_start..]
                 .iter()
-                .position(|byte| *byte == BEL)
+                .position(|byte| *byte == END_MARKER)
             {
                 let status_end = status_start + relative_end;
                 let status_text = std::str::from_utf8(&self.pending[status_start..status_end])
@@ -172,20 +165,38 @@ impl CompletionDecoder {
                 let status = status_text.parse::<i32>().map_err(|_| {
                     anyhow!("invalid exit status in completion marker: {status_text}")
                 })?;
-                let output = self.pending[..start].to_vec();
+                let output_end = without_protocol_carriage_return(&self.pending[..start]);
+                let output = self.pending[..output_end].to_vec();
                 self.pending.clear();
                 self.completed = Some(status);
                 return Ok(output);
             }
 
-            let output = self.pending[..start].to_vec();
+            let output_end = without_protocol_carriage_return(&self.pending[..start]);
+            let output = self.pending[..output_end].to_vec();
             self.pending.drain(..start);
             return Ok(output);
         }
 
-        let keep = longest_suffix_prefix(&self.pending, &self.end_prefix);
+        let mut keep = longest_suffix_prefix(&self.pending, &self.end_prefix);
+        if keep == 0 && self.pending.ends_with(b"\r") {
+            keep = 1;
+        } else if keep > 0
+            && self.pending.len() > keep
+            && self.pending[self.pending.len() - keep - 1] == b'\r'
+        {
+            keep += 1;
+        }
         let emit_len = self.pending.len().saturating_sub(keep);
         Ok(self.pending.drain(..emit_len).collect())
+    }
+}
+
+fn without_protocol_carriage_return(bytes: &[u8]) -> usize {
+    if bytes.ends_with(b"\r") {
+        bytes.len() - 1
+    } else {
+        bytes.len()
     }
 }
 
@@ -245,32 +256,35 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_isolates_state_and_has_two_markers() {
+    fn wrapper_isolates_state_and_splits_printable_markers() {
         let wrapped = wrap_job(
             "/home/user/my project",
             "cd src && export X=1 && exit 7",
             "AbC123",
         )
         .unwrap();
-        assert!(wrapped.contains("UUCLI;AbC123;BEGIN"));
+        assert!(wrapped.contains("printf '\\n%s%s%s' 'UUC' 'AbC123' 'B'"));
         assert!(wrapped.contains("( cd -- '/home/user/my project' && eval "));
         assert!(wrapped.contains("'cd src && export X=1 && exit 7'"));
-        assert!(wrapped.contains("UUCLI;AbC123;END;%d"));
+        assert!(wrapped.contains("printf '\\n%s%s%s%d%s' 'UUC' 'AbC123' 'E'"));
+        assert!(!wrapped.contains("UUCAbC123B"));
+        assert!(!wrapped.contains("UUCAbC123E"));
     }
 
     #[test]
     fn pwd_probe_runs_without_changing_remote_root() {
         let script = wrap_pwd_probe("abc123").unwrap();
-        assert!(script.contains("UUCLI;abc123;BEGIN"));
+        assert!(script.contains("printf '\\n%s%s%s' 'UUC' 'abc123' 'B'"));
         assert!(script.contains("; pwd;"));
         assert!(!script.contains("cd --"));
-        assert!(script.contains("UUCLI;abc123;END;%d"));
+        assert!(script.contains("printf '\\n%s%s%s%d%s' 'UUC' 'abc123' 'E'"));
+        assert!(!script.contains("UUCabc123B"));
     }
 
     #[test]
     fn decoder_streams_short_output_without_waiting_for_marker_window() {
         let mut decoder = CompletionDecoder::new("nonce").unwrap();
-        decoder.push(b"\x1b]7770;UUCLI;nonce;BEGIN\x07").unwrap();
+        decoder.push(b"\r\nUUCnonceB").unwrap();
         assert_eq!(decoder.push(b"short").unwrap(), b"short");
         assert_eq!(decoder.completed(), None);
     }
@@ -278,11 +292,11 @@ mod tests {
     #[test]
     fn decoder_drops_echo_and_handles_markers_split_across_frames() {
         let mut decoder = CompletionDecoder::new("abc123").unwrap();
-        let start = b"\x1b]7770;UUCLI;abc123;BEGIN\x07";
-        let end = b"\x1b]7770;UUCLI;abc123;END;17\x07prompt$ ";
+        let start = b"\r\nUUCabc123B";
+        let end = b"\r\nUUCabc123E17Zprompt$ ";
         let mut received = Vec::new();
 
-        received.extend(decoder.push(b"prompt$ printf '\\033]7770;UUCLI;").unwrap());
+        received.extend(decoder.push(b"prompt$ printf '\\n%s%s%s' 'UUC' 'abc123' 'B'\r\n").unwrap());
         received.extend(decoder.push(&start[..8]).unwrap());
         received.extend(decoder.push(&start[8..]).unwrap());
         received.extend(decoder.push(b"hello ").unwrap());
@@ -295,20 +309,16 @@ mod tests {
     }
 
     #[test]
-    fn decoder_ignores_echoed_backslash_markers_before_start() {
+    fn decoder_ignores_echoed_split_marker_before_start() {
         let mut decoder = CompletionDecoder::new("nonce").unwrap();
-        let echo = b"printf '\\033]7770;UUCLI;nonce;BEGIN\\007'\r\n";
+        let echo = b"printf '\\n%s%s%s' 'UUC' 'nonce' 'B'\r\n";
         assert!(decoder.push(echo).unwrap().is_empty());
         assert!(!decoder.started());
 
         let mut output = decoder
-            .push(b"\x1b]7770;UUCLI;nonce;BEGIN\x07real output\r\n")
+            .push(b"\r\nUUCnonceBreal output\r\n")
             .unwrap();
-        output.extend(
-            decoder
-                .push(b"\x1b]7770;UUCLI;nonce;END;0\x07prompt$ ")
-                .unwrap(),
-        );
+        output.extend(decoder.push(b"\r\nUUCnonceE0Zprompt$ ").unwrap());
         assert_eq!(output, b"real output\r\n");
         assert_eq!(decoder.completed(), Some(0));
     }
@@ -323,9 +333,7 @@ mod tests {
     #[test]
     fn eof_after_start_does_not_delay_user_output() {
         let mut decoder = CompletionDecoder::new("nonce").unwrap();
-        decoder
-            .push(b"noise\x1b]7770;UUCLI;nonce;BEGIN\x07")
-            .unwrap();
+        decoder.push(b"\r\nUUCnonceB").unwrap();
         assert_eq!(decoder.push(b"partial output").unwrap(), b"partial output");
         assert!(decoder.finish_without_marker().is_empty());
     }
@@ -333,11 +341,19 @@ mod tests {
     #[test]
     fn invalid_status_is_protocol_error() {
         let mut decoder = CompletionDecoder::new("nonce").unwrap();
-        decoder.push(b"\x1b]7770;UUCLI;nonce;BEGIN\x07").unwrap();
-        let err = decoder
-            .push(b"out\x1b]7770;UUCLI;nonce;END;nope\x07")
-            .unwrap_err()
-            .to_string();
+        decoder.push(b"\r\nUUCnonceB").unwrap();
+        let err = decoder.push(b"\r\nUUCnonceExZ").unwrap_err().to_string();
         assert!(err.contains("invalid exit status"));
+    }
+
+    #[test]
+    fn end_marker_drops_only_its_separator_newline() {
+        let mut decoder = CompletionDecoder::new("nonce").unwrap();
+        decoder.push(b"\r\nUUCnonceB").unwrap();
+        let received = decoder
+            .push(b"payload\r\n\r\nUUCnonceE0Z")
+            .unwrap();
+        assert_eq!(received, b"payload\r\n");
+        assert_eq!(decoder.completed(), Some(0));
     }
 }

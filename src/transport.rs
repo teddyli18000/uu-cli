@@ -235,13 +235,14 @@ fn attach_args(device_identity: &str, session_name: &str) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::job::CompletionDecoder;
     use crate::runner::{initialize_conpty, PumpRead};
-    use portable_pty::CommandBuilder;
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::io::Write;
     use std::time::{Duration, Instant};
 
     const PROBE: &[u8] =
-        b"\x1b]7770;UUCLI;conptyprobe;BEGIN\x07payload\x1b]7770;UUCLI;conptyprobe;END;0\x07";
+        b"\r\nUUCconptyprobeBpayload\r\nUUCconptyprobeE0Z\r\n";
 
     #[test]
     fn current_official_attach_command_targets_the_existing_authorized_session() {
@@ -258,18 +259,7 @@ mod tests {
     }
 
     #[test]
-    fn conpty_child_writes_osc() {
-        if std::env::var_os("UUCLI_CONPTY_OSC_CHILD").is_some() {
-            let mut stdout = std::io::stdout().lock();
-            stdout.write_all(PROBE).unwrap();
-            stdout.flush().unwrap();
-            std::process::exit(0);
-        }
-    }
-
-    #[test]
-    fn windows_conpty_preserves_osc_completion_markers() {
-        let executable = std::env::current_exe().unwrap();
+    fn windows_conpty_preserves_ascii_completion_markers() {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -280,9 +270,12 @@ mod tests {
             .unwrap();
         let master = pty.master;
         let slave = pty.slave;
-        let mut command = CommandBuilder::new(executable.as_os_str());
-        command.args(["conpty_child_writes_osc", "--nocapture"]);
-        command.env("UUCLI_CONPTY_OSC_CHILD", "1");
+        let mut command = CommandBuilder::new("cmd.exe");
+        command.args([
+            "/d",
+            "/c",
+            "echo. & echo UUCconptyprobeBpayload & echo UUCconptyprobeE0Z",
+        ]);
         let mut child = slave.spawn_command(command).unwrap();
         let writer = master.take_writer().unwrap();
         let reader = master.try_clone_reader().unwrap();
@@ -303,12 +296,7 @@ mod tests {
                 .unwrap()
             {
                 PumpRead::Data(bytes) => observed.extend_from_slice(&bytes),
-                PumpRead::Eof => break,
-                PumpRead::Timeout => {
-                    if matches!(child.try_wait(), Ok(Some(_))) {
-                        break;
-                    }
-                }
+                PumpRead::Eof | PumpRead::Timeout => {}
             }
         }
 
@@ -321,7 +309,11 @@ mod tests {
 
         assert!(
             observed.windows(PROBE.len()).any(|window| window == PROBE),
-            "ConPTY did not preserve the complete OSC marker payload: {observed:?}"
+            "ConPTY did not preserve the complete ASCII marker payload: {observed:?}"
         );
+
+        let mut decoder = CompletionDecoder::new("conptyprobe").unwrap();
+        assert_eq!(decoder.push(&observed).unwrap(), b"payload");
+        assert_eq!(decoder.completed(), Some(0));
     }
 }

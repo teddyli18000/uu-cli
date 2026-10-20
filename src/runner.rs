@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn streams_only_framed_user_output_and_returns_exit_code() {
-        let remote = b"old prompt and echoed wrapper\r\n\x1b]7770;UUCLI;abc123;BEGIN\x07hello\r\nworld\r\n\x1b]7770;UUCLI;abc123;END;7\x07next$ ";
+        let remote = b"old prompt and echoed wrapper\r\n\r\nUUCabc123Bhello\r\nworld\r\n\r\nUUCabc123E7Znext$ ";
         let mut reader = Cursor::new(remote.to_vec());
         let mut writer = Vec::new();
         let mut output = Vec::new();
@@ -642,13 +642,13 @@ mod tests {
         let sent = String::from_utf8(writer).unwrap();
         assert!(sent.contains("cd -- '/home/pi/aic'"));
         assert!(sent.contains("'python3 main.py'"));
-        assert!(sent.contains("UUCLI;abc123;BEGIN"));
-        assert!(sent.contains("UUCLI;abc123;END;%d"));
+        assert!(sent.contains("UUC' 'abc123' 'B"));
+        assert!(sent.contains("UUC' 'abc123' 'E"));
     }
 
     #[test]
     fn eof_after_start_is_unknown_and_preserves_partial_output() {
-        let remote = b"noise\x1b]7770;UUCLI;abc123;BEGIN\x07partial";
+        let remote = b"noise\r\nUUCabc123Bpartial";
         let mut reader = Cursor::new(remote.to_vec());
         let mut writer = Vec::new();
         let mut output = Vec::new();
@@ -757,14 +757,14 @@ mod tests {
         });
 
         let wrapper = writes_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(String::from_utf8_lossy(&wrapper).contains("UUCLI;abc123;BEGIN"));
+        assert!(String::from_utf8_lossy(&wrapper).contains("UUC' 'abc123' 'B"));
 
         input_tx.send(JobInput::Bytes(b"typed".to_vec())).unwrap();
         input_tx.send(JobInput::Eof).unwrap();
         assert!(writes_rx.recv_timeout(Duration::from_millis(30)).is_err());
 
         remote_tx
-            .send(b"\x1b]7770;UUCLI;abc123;BEGIN\x07ready".to_vec())
+            .send(b"\r\nUUCabc123Bready".to_vec())
             .unwrap();
         assert_eq!(
             writes_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
@@ -781,7 +781,7 @@ mod tests {
         );
 
         remote_tx
-            .send(b"\x1b]7770;UUCLI;abc123;END;0\x07".to_vec())
+            .send(b"\r\nUUCabc123E0Z".to_vec())
             .unwrap();
         let (result, output) = job.join().unwrap();
         assert_eq!(result.unwrap().exit_code, 0);
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn answers_startup_dsr_before_begin_and_preserves_remote_dsr_after_begin() {
-        let remote = b"\x1b[6nnoise\x1b]7770;UUCLI;abc123;BEGIN\x07payload\x1b[6n\x1b]7770;UUCLI;abc123;END;0\x07";
+        let remote = b"\x1b[6nnoise\r\nUUCabc123Bpayload\x1b[6n\r\nUUCabc123E0Z";
         let mut reader = Cursor::new(remote.to_vec());
         let mut writer = Vec::new();
         let mut output = Vec::new();
