@@ -1,6 +1,8 @@
+pub mod bind;
 pub mod cli;
 pub mod config;
 pub mod discovery;
+pub mod inventory;
 pub mod job;
 pub mod model;
 pub mod scheduler;
