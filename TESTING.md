@@ -170,3 +170,19 @@ Windows workspace key 至少验证：
 5. 非开发机或干净 Windows 环境完成至少一次从安装到首次 binding 的完整体验验证。
 
 只有 mock 通过不等于 v1 完成。
+
+## 当前实现与证据（2026-10-20）
+
+当前为 PR [#7](https://github.com/teddyli18000/uu-cli/pull/7) 中的原生 Windows 验证候选，尚未满足下面的真实 UU release gate。代码、构建、测试和安装检查都在远端完成；没有在开发者电脑安装、启动或接管 UU/Terminal。
+
+| 层级 | 已验证范围 | 证据 |
+| --- | --- | --- |
+| 纯逻辑与真实 Bash | 授权实例、设备选择、workspace、shell 隔离、并发锁、崩溃 quarantine、no-replay；真实持久 Bash 的 shell 隔离 | [Actions prepare](https://github.com/teddyli18000/uu-cli/actions/runs/39414188709) |
+| 文件传输 | 真实 Bash 中随机二进制、空文件、Unicode/空格、绝对路径、tilde；中断、unknown、完整性错误时保留目标且不报告成功 | [Actions transfer](https://github.com/teddyli18000/uu-cli/actions/runs/39414182630) |
+| 干净 Windows 安装 | 原生包在另一台全新 hosted VM 安装、真实后台进程唯一性、空闲 CPU、无 UU 诊断、升级、锁定文件失败、PATH、卸载、保留 binding/quarantine；Windows PowerShell 5.1 | [Actions installer](https://github.com/teddyli18000/uu-cli/actions/runs/39414182630) |
+| 官方安装发现 | 运行时从官方来源下载，验证 Authenticode/版本/hash，安装后由 uu-cli 发现组件并保留官方“未运行”诊断，卸载完成 | [Official UU smoke](https://github.com/teddyli18000/uu-cli/actions/runs/39412368759) |
+
+官方安装 smoke 使用的 Windows UU 为 `4.43.0.3607`，NetEase 签名有效；安装包 SHA256 为 `F26F84F01551538B9F6996D5CF0CCBF884FB12731903A4F3EFA73BE712C44DA4`。这只证明该次下载、安装、发现与未运行诊断，不证明登录或真实 Terminal attach。
+
+以下仍为 **requires-real-uu**，不得标记通过：首次 binding 的完整人类交互、多设备/新 Terminal 的真实授权体验、attach/reuse 对官方窗口的影响、真实多 Terminal 并发与长任务、stdin/Ctrl+C、UU/Terminal/网络重启、真实文件 round-trip，以及至少一台非开发环境从安装到首次绑定和执行。正式发布应逐项记录真实验收结果，再决定 release；当前没有发布正式版本。
+

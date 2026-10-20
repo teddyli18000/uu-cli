@@ -4,6 +4,12 @@
 
 详细产品契约见 `DESIGN.md`，概念架构见 `ARCHITECTURE.md`，实现目标与验收见 `IMPLEMENTATION.md`，验证策略见 `TESTING.md`。
 
+## 当前进度（2026-10-20）
+
+PR [#7](https://github.com/teddyli18000/uu-cli/pull/7) 已实现原生 CLI、用户侧 binding、按设备共享的 worker pool、实例授权与一次性交互、shell 隔离、流式输出与 stdin/Ctrl+C 转发、no-replay/quarantine、校验文件传输、隐藏 watcher、用户级安装包及 Agent Skill。实现状态和验证证据见 [TESTING.md](TESTING.md#当前实现与证据2026-10-20)。
+
+CI/hosted Windows 的通过不代表下面各阶段的真实 UU 验收完成。当前保持验证候选；真正登录后的 attach、授权交互、多 Terminal、异常恢复、文件通道及非开发环境完整使用仍待 `requires-real-uu` 验收。本轮按用户约束不触碰本地 UU，不跳过这些 gate，也不扩展 v1 范围。
+
 ## 当前产品模型
 
 ```text
