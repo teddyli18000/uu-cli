@@ -1,231 +1,194 @@
 # ROADMAP
 
-`uu-cli` 的路线只有一个判断标准：**让 `uu <command>` 像本地命令一样自然，并且不要求用户理解 UU 的内部机制。**
+目标：让 `uu <command>` 像本地命令一样自然，同时把 workspace、设备选择、Terminal 调度和 Windows UU 内部机制藏在 CLI 后面。
 
-当前 Windows UU 4.43.x 的研究已经把 terminal 的主要边界查清：已有 session 可以管理/附着/复用，但第一个 terminal session 的 host registration 只存在于官方 GUI launcher 内，没有可复用的外部 headless 入口。因此 v1 接受一个人工 bootstrap：用户在 UU 中为目标设备打开一次官方 Terminal，之后 `uu` 负责复用。
+详细产品契约见 `DESIGN.md`，最终架构见 `ARCHITECTURE.md`，可直接执行的工程步骤见 `IMPLEMENTATION.md`。
 
-## 当前产品契约
+## 当前产品模型
+
+```text
+Local Workspace
+      ↓
+Remote Binding = device + remote root
+      ↓
+Terminal Worker Pool
+```
+
+用户手工通过官方 UU 打开 Terminal；uu-cli 自动发现。Codex 不选择 deviceId，不管理 session，也不依赖某个 Terminal 的长期 shell-local 状态。
+
+日常接口：
 
 ```powershell
 uu <command...>
 uu put <local> <remote>
 uu get <remote> <local>
-
-uu devices
-uu use <device>
 ```
 
-正常工作流：
+配置/诊断：
 
-```text
-UU 已运行并登录
-  ↓
-用户为目标设备打开一次官方 Terminal
-  ↓
-uu-cli 发现并复用 session
-  ↓
-Codex / 用户只执行 uu ...
+```powershell
+uu bind
+uu list
 ```
 
-没有可用 session 时，`uu` 明确提示用户打开一次官方 Terminal；不自动点 GUI，不尝试绕过官方 host registration。
+## Phase 0 — Terminal research — CLOSED for v1
 
----
+已确认：
 
-## Phase 0 — Research / interoperability
-
-### Terminal — CLOSED for v1
-
-已完成的主要结论：
-
-- TERM / RPC / session 管理的关键协议行为已记录；
-- 官方 CLI 能查询、附着、终止已有 session；
-- terminal 是持续 PTY 字节流，不存在客户端可达的逐命令 exec/exit-code API；
-- 单次 `uu` 调用需要客户端内部 marker/sentinel 来识别命令完成和 `$?`；
-- 官方 GUI 创建 terminal 前会在主程序进程内注册 local host/token；
-- `windows_terminal`、`new_console`、`detached_process` 都属于同一个 GUI launcher 链；
-- launcher 没有 CLI / IPC / deeplink 外部调用入口；
-- v1 不继续投入时间逆向 headless host registration，也不采用注入、伪造签名等脆弱路线。
+- 已有官方 terminal session 可以查询、附着和复用；
+- terminal 是持续 PTY 字节流；
+- 官方协议没有逐命令 exec/exit-code API；
+- 单个 `uu` job 需要内部 completion marker；
+- 第一个 terminal 的 host registration 只存在于官方 GUI launcher 内；
+- `windows_terminal -> new_console -> detached_process` 没有可复用的外部 launcher 入口；
+- v1 接受“用户手工打开官方 Terminal，uu-cli 自动发现”的 bootstrap；
+- 不继续投入 GameViewer 注入、签名伪造或 host-registration 绕过。
 
 研究资料见 `docs/` 和 `proto/terminal.proto`。
 
-### File transfer — NEXT RESEARCH PRIORITY
+## Phase 1 — Repository scaffold + workspace binding
 
-只回答 `uu put/get` 真正需要的问题：
+目标：先把所有后续实现依赖的框架搭好。
 
-1. Windows 官方 UU 哪个组件发起原生文件上传/下载；
-2. 是否存在可复用的本地 CLI / IPC / RPC 入口；
-3. 是否要求 GUI 文件面板已经打开；
-4. 请求、进度、完成、覆盖和失败语义；
-5. 能否无辅助窗口传输任意二进制文件；
-6. 如果原生入口不可复用，最小可靠 fallback 是什么。
+完成：
 
-**通过门槛：** 最小原型可以把任意二进制文件传到远端再取回，并逐字节一致。
+- Rust stable 工程；
+- 一个 `uu.exe`，内部允许隐藏 broker 模式；
+- `%LOCALAPPDATA%\uu-cli` 配置；
+- workspace root lookup：最近 binding，首次 Git root 优先；
+- CLI ↔ broker user-scoped named pipe skeleton；
+- 官方 UU 安装定位；
+- `term ls --json` session discovery；
+- 按 device identity 分组；
+- 首次 bind PowerShell UX；
+- `uu list`。
 
-> 不预设 terminal + base64 为正式方案。只有确认原生文件通道不可复用后才评估 fallback，公共接口始终是 `uu put/get`。
+验收：
 
-### Device identity — PARALLEL RESEARCH
+```text
+从一个未绑定的 Git repo 执行 uu ...
+→ 找到 workspace root
+→ 用户打开 UU Terminal
+→ 自动发现
+→ 多设备时只提示用户选择一次
+→ 保存 workspace 的 device + remote root
+```
 
-产品 UX 已定，只需确认实现字段：
+## Phase 2 — One-worker shell
 
-- `device list` 实际返回哪些身份字段；
-- 哪个字段在 UU 重启、设备改名、重新登录后稳定；
-- 在线/离线状态来源；
-- 同名设备如何可靠区分；
-- 默认目标持久化保存什么最安全。
-
-**通过门槛：** 多设备时不会因为名字相似或 ID 不稳定而把命令发错设备。
-
----
-
-## Phase 1 — Minimal shell prototype
-
-前置条件：用户已在官方 UU 中为目标设备打开一个可复用 terminal session。
-
-只证明：
+只证明一个已有 Terminal 可以稳定执行：
 
 ```powershell
 uu pwd
-uu "cd ~/project && python3 main.py"
+uu git status
+uu "cd src && python3 main.py"
 ```
 
-必须做到：
+要求：
 
-- 自动发现当前默认设备的已有 terminal；
-- 自动 attach / reuse，不暴露 session name/id；
-- 没有可用 session 时明确提示人工 bootstrap；
-- 不自动弹 UU GUI；
-- 命令尽量原样交给远端 shell；
-- 使用带随机 nonce 的内部 completion marker 获取单次命令边界与 exit code；
-- marker 不泄漏到用户输出；
-- PTY 合流输出可供 Agent 直接消费；
-- Ctrl-C 不把 session 状态搞坏；
-- 长任务不被短超时截断。
+- attach/reuse 已有 session；
+- 每次 job 从 remote root 开始；
+- completion marker + 随机 nonce；
+- marker 不泄漏；
+- exit code 返回；
+- PTY 输出实时流回；
+- 长任务不被短超时截断；
+- Ctrl+C 行为可用；
+- 连接异常后不自动重放已经发送的命令。
 
-**通过门槛：** 在 terminal bootstrap 完成后，Codex 原本会运行的普通 shell 命令只需前面增加 `uu` 即可远程执行。
+验收：Codex 只加一个 `uu` 前缀即可完成普通远端 shell 工作。
 
----
+## Phase 3 — Worker pool + automatic discovery
 
-## Phase 2 — Reliable `put/get`
+目标：用户开几个官方 Terminal，就得到几个可并发 worker。
 
-实现：
+要求：
+
+- broker 自动发现新 session；
+- 已绑定设备的新 Terminal 可采用/跳过；
+- worker busy/idle lease；
+- 一个 worker 同时只有一个 job；
+- 多个并发 `uu` 调用正确分配；
+- worker 全忙时 FIFO 排队；
+- 长任务一直占用自己的 worker并实时输出；
+- 不跨设备调度；
+- broker 重启后安全重建 worker 视图，不重放未知旧 job。
+
+自动发现优先使用进程/事件触发；fallback polling 必须退避，不允许永久高频启动官方 CLI。
+
+## Phase 4 — File transfer research + `put/get`
+
+先研究官方 Windows UU 原生文件入口：
+
+1. 哪个组件实际发起上传/下载；
+2. 是否存在可复用本地 CLI / IPC / RPC；
+3. 是否依赖 GUI 文件面板；
+4. 请求、进度、完成、覆盖、失败语义；
+5. 任意二进制文件是否可完全无辅助窗口传输。
+
+然后实现：
 
 ```powershell
 uu put .\file.bin /remote/file.bin
 uu get /remote/file.bin .\roundtrip.bin
 ```
 
-要求：
+验收：不同大小/内容文件 round-trip 后逐字节一致，不完整传输绝不返回成功。
 
-- 任意二进制内容；
-- 明确成功/失败；
-- 不完整传输绝不返回成功；
-- 必要时内部校验 size/hash；
-- 错误不要求用户理解传输协议；
-- 大文件行为明确，不靠“碰运气”。
+## Phase 5 — Broker lifecycle + installer
 
-**通过门槛：** 多种大小与内容的文件 round-trip 后逐字节一致。
-
----
-
-## Phase 3 — Default device selection
-
-实现最小管理面：
-
-```powershell
-uu devices
-uu use <device>
-```
+目标：自动可用，但没事时几乎不占资源。
 
 要求：
 
-- 首次只有一台设备时尽量零操作；
-- 多台设备时用户明确选择；
-- 默认目标持久保存；
-- 日常命令仍不带设备参数；
-- 默认目标离线时明确失败；
-- 不自动 failover；
-- 不因为同名/近似名猜设备；
-- 当前目标没有可复用 terminal 时，只提示为该目标打开一次官方 Terminal。
+- user-level hidden broker/watcher；
+- 无 console / tray / GUI；
+- UU 不运行时只等待；
+- UU 运行但无 Terminal/job 时不保持无意义连接；
+- `uu` 在 broker 缺失时可以自动拉起；
+- installer user-scope 优先；
+- PATH、auto-start、uninstall 完整；
+- 卸载不影响官方 UU 或登录状态。
 
-**通过门槛：** 多台在线设备时，命令和 terminal session 都不会匹配到错误机器。
+## Agent Skill — 与 Phase 2 同步完成
 
----
-
-## Phase 4 — Runtime lifecycle
-
-实现前先判断是否真的需要后台 helper。优先无常驻设计。
-
-要求：
-
-- 无 `uu start/stop`；
-- 无额外 GUI / tray；
-- UU 关闭后不留下独立后台服务；
-- session 失效能被检测并清楚报错；
-- UU 重启后允许用户重新完成一次 Terminal bootstrap，然后继续使用；
-- helper 崩溃不能破坏官方 UU。
-
----
-
-## Phase 5 — Installer / Release
-
-最终用户拿到一个 EXE：
+Skill 只需要：
 
 ```text
-uu-cli-setup.exe
+远端命令：uu <command>
+上传：uu put <local> <remote>
+下载：uu get <remote> <local>
 ```
 
-安装：
+必须显式说明：
 
-- user-scope 优先；
-- 安装 `uu`；
-- 写入当前用户 PATH；
-- 首次需要时选择默认设备；
-- 注册 Windows 标准卸载项；
-- 如果当前没有 terminal session，在首次执行时给出简短 bootstrap 提示，而不是安装器自动操纵 GUI。
+> 不同 `uu` 调用之间不要依赖 `cd/export/source/alias/virtualenv` 等 shell-local 状态。需要连续状态时放在同一条命令；每个普通 job 从 workspace remote root 开始。
 
-升级：保留合理配置，不重复污染 PATH，不留下旧 helper。
-
-卸载：只移除项目自身文件、配置、PATH 和集成；不影响官方 UU 或登录状态。
-
----
+Agent 永远不选择 deviceId/session/worker。
 
 ## v1 freeze
 
-前置条件：用户已为默认目标打开一个官方 Terminal。
-
-然后：
+在真实 Windows + 官方 UU 环境至少验证：
 
 ```powershell
-uu devices
-uu use <target>
-uu pwd
-uu "cd ~/project && python3 main.py"
+uu git status
+uu python3 main.py
+uu "source .venv/bin/activate && pytest -q"
 uu put .\test.bin ~/test.bin
 uu get ~/test.bin .\roundtrip.bin
+uu list
 ```
 
 并满足：
 
-- 用户不需要管理 session，只需要完成一次官方 Terminal bootstrap；
-- `uu-cli` 不自动操作 GUI、不弹辅助窗口；
-- 命令/文件都到正确默认设备；
-- 单次命令结束和 exit code 可可靠识别；
-- 输出适合人和 Agent 直接消费；
-- 长任务可用；
+- 首次绑定交互短、明确；
+- 多设备不会误绑；
+- 多 Terminal 可以并发调度；
+- 长任务输出实时可见；
+- 不依赖 Terminal 历史上下文；
+- 命令不会因为内部重试被重复执行；
 - 文件字节一致；
-- UU 退出后无独立残留；
+- 空闲占用低；
 - 安装/升级/卸载干净。
 
-在这之前不扩：MCP、Web UI、tray、专用 Git/Python API、用户可见 session 管理、GUI 自动化等。
-
-## 设计纪律
-
-遇到新的内部发现时，按这个顺序判断：
-
-1. 它是否改变了用户真正需要的行为？
-2. 如果没有，能不能完全藏在 `uu / put / get` 后面？
-3. 是否有现成官方能力可以复用？
-4. 是否有更小、更稳定的路径？
-5. 是否正在为了内部实现方便而增加用户学习成本？
-
-第 5 条如果答案是“是”，默认说明设计方向错了。
+达到 v1 之前不扩：一个 workspace 多设备、MCP、Web、tray、专用 Git/Python API、用户可见 session 管理。
