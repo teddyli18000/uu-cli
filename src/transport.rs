@@ -6,6 +6,8 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 /// One local ConPTY attachment to an already-open official UU terminal session.
 ///
@@ -48,16 +50,38 @@ impl OfficialAttachPty {
 
         let master = pair.master;
         let slave = pair.slave;
-        let child = slave
+        let mut child = slave
             .spawn_command(command)
             .with_context(|| format!("failed to start {} in ConPTY", cli_path.display()))?;
-        let reader = master
+        let mut reader = master
             .try_clone_reader()
             .context("failed to open UU terminal PTY reader")?;
         let writer = master
             .take_writer()
             .context("failed to open UU terminal PTY writer")?;
         drop(slave);
+
+        // Busy/invalid attach attempts are rejected very quickly by the official
+        // CLI. Catch those before any remote command is written so the caller can
+        // safely try another worker. Once a job is written, retry is forbidden.
+        thread::sleep(Duration::from_millis(200));
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to inspect official UU attach process")?
+        {
+            let mut diagnostic = Vec::new();
+            let _ = reader.read_to_end(&mut diagnostic);
+            let text = String::from_utf8_lossy(&diagnostic);
+            let text = text.trim();
+            if text.is_empty() {
+                bail!(
+                    "official UU attach exited immediately ({status:?}) for session {session_name}"
+                );
+            }
+            bail!(
+                "official UU attach exited immediately ({status:?}) for session {session_name}: {text}"
+            );
+        }
 
         Ok(Self {
             child,
