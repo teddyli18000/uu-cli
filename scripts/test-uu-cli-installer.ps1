@@ -94,6 +94,138 @@ function Count-UserPathEntry {
     return $count
 }
 
+function Invoke-CapturedProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$Executable,
+        [string]$Arguments = '',
+        [string]$WorkingDirectory
+    )
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $Executable
+    $startInfo.Arguments = $Arguments
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    if (-not [string]::IsNullOrWhiteSpace($WorkingDirectory)) {
+        $startInfo.WorkingDirectory = $WorkingDirectory
+    }
+
+    $childProcess = New-Object System.Diagnostics.Process
+    $childProcess.StartInfo = $startInfo
+    try {
+        if (-not $childProcess.Start()) {
+            throw "Could not start '$Executable'."
+        }
+        $stdoutTask = $childProcess.StandardOutput.ReadToEndAsync()
+        $stderrTask = $childProcess.StandardError.ReadToEndAsync()
+        if (-not $childProcess.WaitForExit(15000)) {
+            $childProcess.Kill()
+            [void]$childProcess.WaitForExit(5000)
+            throw "The process '$Executable $Arguments' timed out."
+        }
+        [pscustomobject]@{
+            ExitCode = $childProcess.ExitCode
+            StdOut = $stdoutTask.Result
+            StdErr = $stderrTask.Result
+            Output = $stdoutTask.Result + [Environment]::NewLine + $stderrTask.Result
+        }
+    }
+    finally {
+        $childProcess.Dispose()
+    }
+}
+
+function Get-InstalledWatcherProcesses {
+    param(
+        [Parameter(Mandatory = $true)][string]$UuExecutable,
+        [Parameter(Mandatory = $true)][string]$BackgroundExecutable
+    )
+    $uuPath = [IO.Path]::GetFullPath($UuExecutable)
+    $backgroundPath = [IO.Path]::GetFullPath($BackgroundExecutable)
+    $owned = @()
+    $processes = Get-CimInstance -ClassName Win32_Process -Filter "Name = 'uu.exe' OR Name = 'uu-background.exe'"
+    foreach ($process in $processes) {
+        if ([string]::IsNullOrWhiteSpace([string]$process.ExecutablePath)) {
+            continue
+        }
+        try {
+            $imagePath = [IO.Path]::GetFullPath([string]$process.ExecutablePath)
+        }
+        catch {
+            continue
+        }
+        $isBackground = $imagePath -ieq $backgroundPath
+        $isWorkerWatcher = $imagePath -ieq $uuPath -and
+            ([string]$process.CommandLine -match '(?i)(?:^|\s)__watch(?:\s|$)')
+        if ($isBackground -or $isWorkerWatcher) {
+            $owned += $process
+        }
+    }
+    return $owned
+}
+
+function Wait-ForInstalledWatcher {
+    param(
+        [Parameter(Mandatory = $true)][string]$UuExecutable,
+        [Parameter(Mandatory = $true)][string]$BackgroundExecutable
+    )
+    $watchers = @()
+    $deadline = [DateTime]::UtcNow.AddSeconds(15)
+    do {
+        $watchers = @(Get-InstalledWatcherProcesses -UuExecutable $UuExecutable -BackgroundExecutable $BackgroundExecutable)
+        if ($watchers.Count -eq 1 -and
+            [IO.Path]::GetFullPath([string]$watchers[0].ExecutablePath) -ieq [IO.Path]::GetFullPath($BackgroundExecutable)) {
+            return $watchers[0]
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    throw "Expected exactly one watcher at '$BackgroundExecutable', found $($watchers.Count)."
+}
+
+function Assert-IdleWatcher {
+    param(
+        [Parameter(Mandatory = $true)]$Watcher,
+        [Parameter(Mandatory = $true)][string]$UuExecutable,
+        [Parameter(Mandatory = $true)][string]$BackgroundExecutable
+    )
+    Start-Sleep -Seconds 1
+    $process = Get-Process -Id ([int]$Watcher.ProcessId) -ErrorAction Stop
+    $before = $process.TotalProcessorTime.TotalMilliseconds
+    Start-Sleep -Seconds 2
+    $process.Refresh()
+    if ($process.HasExited) {
+        throw 'The installed background watcher exited during the idle CPU sample.'
+    }
+    $usedMilliseconds = $process.TotalProcessorTime.TotalMilliseconds - $before
+    if ($usedMilliseconds -gt 200) {
+        throw "The idle background watcher used $([math]::Round($usedMilliseconds)) ms CPU in 2 seconds (limit 200 ms)."
+    }
+
+    $stillRunning = Wait-ForInstalledWatcher -UuExecutable $UuExecutable -BackgroundExecutable $BackgroundExecutable
+    if ([int]$stillRunning.ProcessId -ne [int]$Watcher.ProcessId) {
+        throw 'The installed background watcher was replaced during the idle CPU sample.'
+    }
+}
+
+function Assert-NoInstalledWatchers {
+    param(
+        [Parameter(Mandatory = $true)][string]$UuExecutable,
+        [Parameter(Mandatory = $true)][string]$BackgroundExecutable
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds(10)
+    do {
+        $watchers = @(Get-InstalledWatcherProcesses -UuExecutable $UuExecutable -BackgroundExecutable $BackgroundExecutable)
+        if ($watchers.Count -eq 0) {
+            return
+        }
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    throw "Uninstall left $($watchers.Count) watcher process(es) from '$BackgroundExecutable' running."
+}
+
 $oldLocalAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', 'Process')
 $oldConfigOverride = [Environment]::GetEnvironmentVariable('UU_CLI_CONFIG', 'Process')
 $oldProcessPath = $env:PATH
@@ -141,9 +273,16 @@ try {
     if ([IO.Path]::GetFullPath($resolved) -ine [IO.Path]::GetFullPath($uuExe)) {
         throw "PATH resolves uu to '$resolved', expected '$uuExe'."
     }
-    $usage = (& $uuExe 2>&1 | Out-String)
-    if ($usage -notmatch 'usage:\s*uu') {
-        throw 'The installed native executable did not return its command usage.'
+    $usage = Invoke-CapturedProcess -Executable $uuExe -WorkingDirectory $localAppData
+    if ($usage.ExitCode -ne 2 -or $usage.Output -notmatch 'usage:\s*uu') {
+        throw "The installed executable returned unexpected usage output or exit code $($usage.ExitCode): $($usage.Output)"
+    }
+    $installedWatcher = Wait-ForInstalledWatcher -UuExecutable $uuExe -BackgroundExecutable $backgroundExe
+    Assert-IdleWatcher -Watcher $installedWatcher -UuExecutable $uuExe -BackgroundExecutable $backgroundExe
+
+    $listResult = Invoke-CapturedProcess -Executable $uuExe -Arguments 'list' -WorkingDirectory $localAppData
+    if ($listResult.ExitCode -ne 0 -or $listResult.Output -notmatch '(?im)^UU\s+not found\b') {
+        throw "uu list did not report a missing official UU cleanly (exit $($listResult.ExitCode)): $($listResult.Output)"
     }
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf) -or
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -cne $configBytes) {
@@ -188,8 +327,13 @@ try {
     if ([IO.Path]::GetFullPath($resolved) -ine [IO.Path]::GetFullPath($uuExe)) {
         throw 'Upgrade changed the command away from the native uu.exe path.'
     }
+    $upgradedWatcher = Wait-ForInstalledWatcher -UuExecutable $uuExe -BackgroundExecutable $backgroundExe
+    if ([IO.Path]::GetFullPath([string]$upgradedWatcher.ExecutablePath) -ine [IO.Path]::GetFullPath($backgroundExe)) {
+        throw 'Upgrade did not leave one watcher at the exact installed background path.'
+    }
 
     & $uninstaller
+    Assert-NoInstalledWatchers -UuExecutable $uuExe -BackgroundExecutable $backgroundExe
     if (Test-Path -LiteralPath $installRoot) {
         throw 'Uninstall left the uu-cli program directory behind.'
     }
@@ -255,4 +399,4 @@ finally {
 if ($null -ne $testFailure) {
     throw $testFailure
 }
-Write-Output 'Clean hosted Windows install, upgrade, Unicode/space PATH, state-preserving uninstall, and integration cleanup checks passed.'
+Write-Output 'Clean hosted Windows install, exact watcher process, idle CPU, missing-UU list, upgrade, Unicode/space PATH, and state-preserving uninstall checks passed.'
