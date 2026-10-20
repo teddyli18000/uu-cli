@@ -1,0 +1,30 @@
+name: Prepare implementation
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Format and lock dependencies
+        run: |
+          cargo fmt --all
+          cargo generate-lockfile
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add '*.rs' Cargo.lock
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: format implementation and lock dependencies"
+            git push origin "HEAD:${{ github.ref_name }}"
+          fi
+      - name: Validate prepared tree
+        run: |
+          cargo fmt --all --check
+          cargo test --locked --all-targets
