@@ -92,7 +92,10 @@ fn run_list(config: &Config, cwd: &Path) -> Result<()> {
         }
         Ok(candidates) => {
             let total: usize = candidates.iter().map(|item| item.sessions.len()).sum();
-            println!("Workers    {total} open terminals on {} device(s)", candidates.len());
+            println!(
+                "Workers    {total} open terminals on {} device(s)",
+                candidates.len()
+            );
             for candidate in candidates {
                 println!(
                     "  {} · {} terminal(s)",
@@ -108,15 +111,15 @@ fn run_list(config: &Config, cwd: &Path) -> Result<()> {
 }
 
 fn print_bound_workers(config: &Config, sessions: &[SessionInfo]) {
-    let usable: Vec<&SessionInfo> = sessions.iter().filter(|session| is_usable(session)).collect();
+    let usable: Vec<&SessionInfo> = sessions
+        .iter()
+        .filter(|session| is_usable(session))
+        .collect();
     let authorized = usable
         .iter()
         .filter(|session| config.is_session_authorized(session))
         .count();
-    println!(
-        "Workers    {authorized} authorized / {} open",
-        usable.len()
-    );
+    println!("Workers    {authorized} authorized / {} open", usable.len());
     for session in usable {
         let status = if config.is_session_authorized(session) {
             "authorized"
