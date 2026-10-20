@@ -10,6 +10,18 @@ license = "MIT"
 name = "uu"
 path = "src/main.rs"
 
+[[bin]]
+name = "uu-background"
+path = "src/background.rs"
+
+[[bin]]
+name = "fake-uuyc"
+path = "tests/fixtures/fake_uuyc.rs"
+required-features = ["test-fixture"]
+
+[features]
+test-fixture = []
+
 [dependencies]
 anyhow = "1.0"
 fs2 = "0.4"
@@ -19,6 +31,7 @@ sha2 = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 portable-pty = "0.9"
+ctrlc = "3.4"
 winreg = "0.55"
 
 [dev-dependencies]

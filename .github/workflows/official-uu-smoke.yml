@@ -12,15 +12,19 @@ on:
       - 'src/discovery.rs'
       - 'src/uuyc.rs'
       - 'src/main.rs'
+      - 'src/windows_app.rs'
       - 'Cargo.toml'
       - 'Cargo.lock'
   workflow_dispatch:
+  schedule:
+    - cron: '18 3 * * 1'
 
 permissions:
   contents: read
 
 jobs:
   probe-official-download:
+    # Compatibility signal only: no CI credentials or real-device acceptance.
     runs-on: windows-latest
     timeout-minutes: 25
     steps:
@@ -28,7 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build uu-cli release candidate
         shell: pwsh
-        run: cargo build --release
+        run: cargo build --locked --release
       - name: Discover and verify official Windows installer
         id: probe
         shell: pwsh

@@ -1,19 +1,22 @@
 #![cfg(windows)]
 
-use crate::runner::{run_framed_job, JobResult, JobRunError};
-use anyhow::{bail, Context, Result};
+use crate::runner::{
+    run_framed_job, run_framed_job_with_input, run_framed_pwd_probe, JobInput, JobResult,
+    JobRunError, ReadPump,
+};
+use anyhow::{anyhow, bail, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::ffi::OsString;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::Receiver;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 struct TermPty {
     child: Box<dyn Child + Send + Sync>,
-    _master: Box<dyn MasterPty + Send>,
-    reader: Box<dyn Read + Send>,
+    master: Option<Box<dyn MasterPty + Send>>,
+    reader: ReadPump,
     writer: Box<dyn Write + Send>,
 }
 
@@ -41,24 +44,42 @@ impl TermPty {
         let mut child = slave
             .spawn_command(command)
             .with_context(|| format!("failed to start {} in ConPTY", cli_path.display()))?;
-        let mut reader = master
+        let raw_reader = master
             .try_clone_reader()
             .context("failed to open UU terminal PTY reader")?;
         let writer = master
             .take_writer()
             .context("failed to open UU terminal PTY writer")?;
         drop(slave);
+        let mut reader = ReadPump::spawn(raw_reader);
 
-        // Vendor-side argument/ownership failures normally surface quickly. Catch
-        // them before caller command bytes are ever written; only pre-send failures
-        // are safe to retry on another transport/session.
+        // Catch argument/ownership failures before command bytes can be sent.
         thread::sleep(Duration::from_millis(250));
-        if let Some(status) = child
-            .try_wait()
-            .context("failed to inspect official UU terminal process")?
-        {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let _ = child.kill();
+                drop(writer);
+                drop(master);
+                reader.shutdown_and_join();
+                return Err(error).context("failed to inspect official UU terminal process");
+            }
+        };
+        if let Some(status) = status {
             let mut diagnostic = Vec::new();
-            let _ = reader.read_to_end(&mut diagnostic);
+            let deadline = Instant::now() + Duration::from_millis(250);
+            while Instant::now() < deadline {
+                match reader.read_event_timeout(Duration::from_millis(25)) {
+                    Ok(crate::runner::PumpRead::Data(bytes)) => {
+                        diagnostic.extend_from_slice(&bytes);
+                    }
+                    Ok(crate::runner::PumpRead::Eof) | Err(_) => break,
+                    Ok(crate::runner::PumpRead::Timeout) => {}
+                }
+            }
+            drop(writer);
+            drop(master);
+            reader.shutdown_and_join();
             let text = String::from_utf8_lossy(&diagnostic);
             let text = text.trim();
             if text.is_empty() {
@@ -66,16 +87,15 @@ impl TermPty {
             }
             bail!("official UU {operation} exited immediately ({status:?}): {text}");
         }
-
         Ok(Self {
             child,
-            _master: master,
+            master: Some(master),
             reader,
             writer,
         })
     }
 
-    fn run_job<O: Write>(
+    fn run_job<O: Write + ?Sized>(
         &mut self,
         output: &mut O,
         remote_root: &str,
@@ -89,6 +109,45 @@ impl TermPty {
             shell_command,
         )
     }
+
+    fn run_job_with_input<O: Write + ?Sized>(
+        &mut self,
+        output: &mut O,
+        remote_root: &str,
+        shell_command: &str,
+        input: &Receiver<JobInput>,
+    ) -> Result<JobResult, JobRunError> {
+        run_framed_job_with_input(
+            &mut self.reader,
+            &mut self.writer,
+            output,
+            remote_root,
+            shell_command,
+            input,
+        )
+    }
+
+    fn capture_pwd(&mut self) -> Result<String, JobRunError> {
+        let mut output = Vec::new();
+        let result = run_framed_pwd_probe(&mut self.reader, &mut self.writer, &mut output)?;
+        if result.exit_code != 0 {
+            return Err(JobRunError::Completed(anyhow!(
+                "remote pwd exited with code {}",
+                result.exit_code
+            )));
+        }
+
+        let text = String::from_utf8(output).map_err(|error| {
+            JobRunError::Completed(anyhow!("remote pwd output is not valid UTF-8: {error}"))
+        })?;
+        let path = text.trim_end_matches(|character| character == '\r' || character == '\n');
+        if path.is_empty() {
+            return Err(JobRunError::Completed(anyhow!(
+                "remote pwd returned an empty path"
+            )));
+        }
+        Ok(path.to_owned())
+    }
 }
 
 impl Drop for TermPty {
@@ -96,13 +155,18 @@ impl Drop for TermPty {
         if matches!(self.child.try_wait(), Ok(None)) {
             let _ = self.child.kill();
         }
+        // Releasing ConPTY handles unblocks the reader. Its join is bounded so
+        // shutdown cannot hang if an underlying Windows read ignores closure.
+        drop(std::mem::replace(
+            &mut self.writer,
+            Box::new(std::io::sink()),
+        ));
+        self.master.take();
+        self.reader.shutdown_and_join();
     }
 }
 
-/// Attachment to a session the user already opened in the official UU GUI.
-/// Kept as a compatibility/fallback path while the newer `term new` path is
-/// validated against the Linux host. It must never be used to steal a busy GUI
-/// terminal from the user.
+/// Attach only to an existing terminal explicitly authorized by the caller.
 pub struct OfficialAttachPty {
     inner: TermPty,
 }
@@ -126,7 +190,7 @@ impl OfficialAttachPty {
         self.inner.child.try_wait().map(|status| status.is_some())
     }
 
-    pub fn run_job<O: Write>(
+    pub fn run_job<O: Write + ?Sized>(
         &mut self,
         output: &mut O,
         remote_root: &str,
@@ -134,47 +198,21 @@ impl OfficialAttachPty {
     ) -> Result<JobResult, JobRunError> {
         self.inner.run_job(output, remote_root, shell_command)
     }
-}
 
-/// A uu-cli-owned remote terminal created through the official CLI.
-///
-/// One manually opened GUI Terminal may still be required to activate/keep warm
-/// the vendor term channel, but that GUI session is only an anchor: commands run
-/// in this uu-cli-owned Bash session and cannot mutate or occupy the user's GUI
-/// shell context.
-pub struct OfficialNewPty {
-    session_name: String,
-    inner: TermPty,
-}
-
-impl OfficialNewPty {
-    pub fn create(cli_path: &Path, device_identity: &str) -> Result<Self> {
-        if device_identity.is_empty() {
-            bail!("UU device identity is empty");
-        }
-        let session_name = owned_session_name();
-        let inner = TermPty::spawn(
-            cli_path,
-            new_args(device_identity, &session_name),
-            &format!("new session {session_name}"),
-        )?;
-        Ok(Self {
-            session_name,
-            inner,
-        })
-    }
-
-    pub fn session_name(&self) -> &str {
-        &self.session_name
-    }
-
-    pub fn run_job<O: Write>(
+    pub fn run_job_with_input<O: Write + ?Sized>(
         &mut self,
         output: &mut O,
         remote_root: &str,
         shell_command: &str,
+        input: &Receiver<JobInput>,
     ) -> Result<JobResult, JobRunError> {
-        self.inner.run_job(output, remote_root, shell_command)
+        self.inner
+            .run_job_with_input(output, remote_root, shell_command, input)
+    }
+
+    /// Read the attached shell's current directory without changing its state.
+    pub fn capture_pwd(&mut self) -> Result<String, JobRunError> {
+        self.inner.capture_pwd()
     }
 }
 
@@ -195,40 +233,19 @@ fn attach_args(device_identity: &str, session_name: &str) -> Vec<OsString> {
         .collect()
 }
 
-fn new_args(device_identity: &str, session_name: &str) -> Vec<OsString> {
-    // Current official 4.43.1 defaults `term new` to PowerShell even though Bash
-    // is supported explicitly. v1 targets the Linux AIC host, so never depend on
-    // that Windows-oriented default.
-    [
-        "term",
-        "-d",
-        device_identity,
-        "new",
-        session_name,
-        "--shell",
-        "bash",
-    ]
-    .into_iter()
-    .map(OsString::from)
-    .collect()
-}
-
-fn owned_session_name() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(0);
-    let tick = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("uu-{:x}-{tick:x}-{counter:x}", std::process::id())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runner::PumpRead;
+    use portable_pty::CommandBuilder;
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+
+    const PROBE: &[u8] =
+        b"\x1b]7770;UUCLI;conptyprobe;BEGIN\x07payload\x1b]7770;UUCLI;conptyprobe;END;0\x07";
 
     #[test]
-    fn current_official_attach_command_shape_is_exact() {
+    fn current_official_attach_command_targets_the_existing_authorized_session() {
         assert_eq!(
             attach_args("device-123", "bash-3"),
             vec![
@@ -242,30 +259,66 @@ mod tests {
     }
 
     #[test]
-    fn current_official_new_command_shape_for_linux_is_exact() {
-        assert_eq!(
-            new_args("device-123", "uu-job"),
-            vec![
-                OsString::from("term"),
-                OsString::from("-d"),
-                OsString::from("device-123"),
-                OsString::from("new"),
-                OsString::from("uu-job"),
-                OsString::from("--shell"),
-                OsString::from("bash"),
-            ]
-        );
+    fn conpty_child_writes_osc() {
+        if std::env::var_os("UUCLI_CONPTY_OSC_CHILD").is_some() {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(PROBE).unwrap();
+            stdout.flush().unwrap();
+            std::process::exit(0);
+        }
     }
 
     #[test]
-    fn owned_session_names_are_ascii_short_and_unique() {
-        let a = owned_session_name();
-        let b = owned_session_name();
-        assert_ne!(a, b);
-        assert!(a.starts_with("uu-"));
-        assert!(a.len() < 64);
-        assert!(a
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'));
+    fn windows_conpty_preserves_osc_completion_markers() {
+        let executable = std::env::current_exe().unwrap();
+        let pty = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let master = pty.master;
+        let slave = pty.slave;
+        let mut command = CommandBuilder::new(executable.as_os_str());
+        command.args(["conpty_child_writes_osc", "--nocapture"]);
+        command.env("UUCLI_CONPTY_OSC_CHILD", "1");
+        let mut child = slave.spawn_command(command).unwrap();
+        let writer = master.take_writer().unwrap();
+        let reader = master.try_clone_reader().unwrap();
+        drop(slave);
+        let mut reader = ReadPump::spawn(reader);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut observed = Vec::new();
+        while Instant::now() < deadline
+            && !observed.windows(PROBE.len()).any(|window| window == PROBE)
+        {
+            match reader
+                .read_event_timeout(Duration::from_millis(100))
+                .unwrap()
+            {
+                PumpRead::Data(bytes) => observed.extend_from_slice(&bytes),
+                PumpRead::Eof => break,
+                PumpRead::Timeout => {
+                    if matches!(child.try_wait(), Ok(Some(_))) {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if matches!(child.try_wait(), Ok(None)) {
+            let _ = child.kill();
+        }
+        drop(writer);
+        drop(master);
+        reader.shutdown_and_join();
+
+        assert!(
+            observed.windows(PROBE.len()).any(|window| window == PROBE),
+            "ConPTY did not preserve the complete OSC marker payload: {observed:?}"
+        );
     }
 }

@@ -114,7 +114,15 @@ impl ConfigStore {
         match fs::read(&self.path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .with_context(|| format!("invalid config {}", self.path.display())),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                let name = self.path.file_name().ok_or_else(|| anyhow!("config path has no filename"))?.to_string_lossy();
+                let backup = self.path.with_file_name(format!(".{name}.bak"));
+                match fs::read(&backup) {
+                    Ok(bytes) => serde_json::from_slice(&bytes).context("invalid interrupted-save backup"),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+                    Err(error) => Err(error).context("cannot recover interrupted config save"),
+                }
+            },
             Err(err) => Err(err).with_context(|| format!("cannot read {}", self.path.display())),
         }
     }
@@ -187,6 +195,17 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
+    fn interrupted_config_save_recovers_previous_binding() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.json");
+        let store = ConfigStore::at(&path);
+        let config = Config::default();
+        store.save(&config).unwrap();
+        std::fs::rename(&path, path.with_file_name(".config.json.bak")).unwrap();
+        assert_eq!(store.load().unwrap(), config);
+    }
+
+    #[test]
     fn missing_config_is_default() {
         let tmp = TempDir::new().unwrap();
         let store = ConfigStore::at(tmp.path().join("config.json"));
@@ -218,26 +237,20 @@ mod tests {
 
         store
             .update(|config| {
-                config.remember_owned_worker("device-1", "uu-one");
+                config.bindings.push(WorkspaceBinding { local_root: tmp.path().join("one"), device_identity: "device-1".into(), device_name: "Car".into(), remote_root: "/one".into() });
                 Ok(())
             })
             .unwrap();
         store
             .update(|config| {
-                config.remember_owned_worker("device-1", "uu-two");
+                config.bindings.push(WorkspaceBinding { local_root: tmp.path().join("two"), device_identity: "device-1".into(), device_name: "Car".into(), remote_root: "/two".into() });
                 Ok(())
             })
             .unwrap();
 
         let config = store.load().unwrap();
-        assert_eq!(config.owned_workers.len(), 2);
-        assert!(config
-            .owned_workers
-            .iter()
-            .any(|worker| worker.session_name == "uu-one"));
-        assert!(config
-            .owned_workers
-            .iter()
-            .any(|worker| worker.session_name == "uu-two"));
+        assert_eq!(config.bindings.len(), 2);
+        assert_eq!(config.bindings[0].remote_root, "/one");
+        assert_eq!(config.bindings[1].remote_root, "/two");
     }
 }

@@ -5,7 +5,10 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::io::Read;
+use std::thread;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliVersionInfo {
@@ -61,23 +64,6 @@ impl OfficialCli {
         parse_session_output(&output)
     }
 
-    /// Clean up a terminal session after a command is known to have finished.
-    /// Callers must only pass uu-cli-owned session names; an unknown/in-flight
-    /// session is deliberately left alone because its remote process may still run.
-    pub fn kill_session(&self, device_identity: &str, session_name: &str) -> Result<()> {
-        if device_identity.is_empty() || session_name.is_empty() {
-            bail!("device and session identity are required for terminal cleanup");
-        }
-        let output = self.run([
-            OsStr::new("term"),
-            OsStr::new("-d"),
-            OsStr::new(device_identity),
-            OsStr::new("kill"),
-            OsStr::new(session_name),
-        ])?;
-        ensure_command_success(&output, "terminal cleanup")
-    }
-
     fn run<I, S>(&self, args: I) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
@@ -87,11 +73,43 @@ impl OfficialCli {
             .path
             .parent()
             .ok_or_else(|| anyhow!("official UU CLI path has no parent directory"))?;
-        Command::new(&self.path)
-            .args(args)
-            .current_dir(working_dir)
-            .output()
-            .with_context(|| format!("failed to run official UU CLI at {}", self.path.display()))
+        let mut command = Command::new(&self.path);
+        command.args(args).current_dir(working_dir)
+            .stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x0800_0000);
+        }
+        let mut child = command.spawn().context("cannot start official UU command-line component")?;
+        let stdout = child.stdout.take().expect("piped stdout");
+        let stderr = child.stderr.take().expect("piped stderr");
+        let collect = |stream: Box<dyn Read + Send>| thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stream.take(4 * 1024 * 1024).read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let out = collect(Box::new(stdout));
+        let err = collect(Box::new(stderr));
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(50)),
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(anyhow!("official UU discovery command timed out after 20s; no remote job was sent"));
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(anyhow!(error).context("cannot wait for official UU discovery command"));
+                }
+            }
+        };
+        let stdout = out.join().map_err(|_| anyhow!("UU stdout reader failed"))??;
+        let stderr = err.join().map_err(|_| anyhow!("UU stderr reader failed"))??;
+        Ok(Output { status: status?, stdout, stderr })
     }
 }
 
@@ -279,27 +297,6 @@ fn parse_session_output(output: &Output) -> Result<Vec<SessionInfo>> {
         .collect())
 }
 
-fn ensure_command_success(output: &Output, operation: &str) -> Result<()> {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    if let Some(json) = extract_json(&stdout).or_else(|| extract_json(&stderr)) {
-        if let Ok(envelope) = serde_json::from_str::<Envelope<Value>>(json) {
-            return ensure_success(&envelope)
-                .with_context(|| format!("official UU {operation} failed"));
-        }
-    }
-
-    if output.status.success() {
-        return Ok(());
-    }
-    bail!(
-        "official UU {operation} failed (exit {:?}): {}",
-        output.status.code(),
-        concise_error(&stdout, &stderr)
-    )
-}
-
 fn ensure_success<T>(envelope: &Envelope<T>) -> Result<()> {
     if envelope.success {
         return Ok(());
@@ -332,7 +329,7 @@ fn concise_error(stdout: &str, stderr: &str) -> String {
     if one_line.len() <= 300 {
         one_line
     } else {
-        format!("{}…", &one_line[..300])
+        format!("{}…", one_line.chars().take(300).collect::<String>())
     }
 }
 
@@ -425,31 +422,6 @@ mod tests {
         let error = parse_session_output(&output).unwrap_err().to_string();
         assert!(error.contains("105"));
         assert!(error.contains("Timeout waiting for terminal environment check"));
-    }
-
-    #[test]
-    fn generic_command_success_accepts_json_envelope() {
-        let output = Output {
-            status: status(0),
-            stdout: br#"{"success":true,"data":{},"error":null}"#.to_vec(),
-            stderr: vec![],
-        };
-        ensure_command_success(&output, "test").unwrap();
-    }
-
-    #[test]
-    fn generic_command_success_preserves_vendor_error_on_zero_exit() {
-        let output = Output {
-            status: status(0),
-            stdout: br#"{"success":false,"data":null,"error":{"code":409,"message":"busy"}}"#
-                .to_vec(),
-            stderr: vec![],
-        };
-        let error = ensure_command_success(&output, "test")
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("409"));
-        assert!(error.contains("busy"));
     }
 
     #[test]
