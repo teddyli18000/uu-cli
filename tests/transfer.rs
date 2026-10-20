@@ -1,13 +1,13 @@
 #[cfg(unix)]
 mod unix_tests {
-    use uu_cli::runner::{run_framed_job, JobResult, JobRunError};
-    use uu_cli::transfer;
     use anyhow::anyhow;
     use std::fs;
     use std::io::{Read, Write};
     use std::path::PathBuf;
     use std::process::{Command, Stdio};
     use std::time::{SystemTime, UNIX_EPOCH};
+    use uu_cli::runner::{run_framed_job, JobResult, JobRunError};
+    use uu_cli::transfer;
 
     struct TempDir(PathBuf);
 
@@ -17,10 +17,8 @@ mod unix_tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos();
-            let path = std::env::temp_dir().join(format!(
-                "uu-cli-transfer-{}-{stamp:x}",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("uu-cli-transfer-{}-{stamp:x}", std::process::id()));
             fs::create_dir_all(&path).unwrap();
             Self(path)
         }
