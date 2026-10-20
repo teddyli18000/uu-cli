@@ -1,4 +1,4 @@
-#![cfg(windows)]
+#![cfg(all(windows, feature = "test-fixture"))]
 
 use serde_json::{json, Value};
 use std::fs;
@@ -55,8 +55,8 @@ impl TestWorkspace {
     }
 }
 
-fn fake_cli_path() -> Option<PathBuf> {
-    option_env!("CARGO_BIN_EXE_fake-uuyc").map(PathBuf::from)
+fn fake_cli_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_fake-uuyc"))
 }
 
 fn uu_command(test: &TestWorkspace, fake_cli: &Path, mode: &str) -> Command {
@@ -81,10 +81,7 @@ fn read_dispatches(path: &Path) -> Vec<Value> {
 
 #[test]
 fn windows_cli_streams_unicode_output_and_propagates_remote_exit_code() {
-    let Some(fake_cli) = fake_cli_path() else {
-        eprintln!("skipping fake official CLI integration: enable the test-fixture feature");
-        return;
-    };
+    let fake_cli = fake_cli_path();
     let test = TestWorkspace::new();
 
     let output = uu_command(&test, &fake_cli, "success")
@@ -125,10 +122,7 @@ fn windows_cli_streams_unicode_output_and_propagates_remote_exit_code() {
 
 #[test]
 fn windows_cli_quarantines_dropped_dispatch_without_replay_or_list_attach() {
-    let Some(fake_cli) = fake_cli_path() else {
-        eprintln!("skipping fake official CLI integration: enable the test-fixture feature");
-        return;
-    };
+    let fake_cli = fake_cli_path();
     let test = TestWorkspace::new();
 
     let dropped = uu_command(&test, &fake_cli, "drop")

@@ -3,7 +3,7 @@ name: Official UU download smoke
 on:
   push:
     branches:
-      - 'impl/**'
+      - main
     paths:
       - '.github/workflows/official-uu-smoke.yml'
       - 'scripts/official-uu-smoke.ps1'
