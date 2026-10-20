@@ -92,18 +92,15 @@ pub fn execute(command: Command, store: &ConfigStore) -> Result<u8> {
                 // always hosted in a separate console.
 
                 thread::spawn(move || {
-
                     let mut input = io::stdin().lock();
                     let mut buffer = [0u8; 8192];
                     loop {
                         match input.read(&mut buffer) {
                             Ok(0) => {
-
                                 let _ = sender.send(JobInput::Eof);
                                 break;
                             }
                             Ok(count) => {
-
                                 if sender
                                     .send(JobInput::Bytes(buffer[..count].to_vec()))
                                     .is_err()
@@ -111,8 +108,7 @@ pub fn execute(command: Command, store: &ConfigStore) -> Result<u8> {
                                     break;
                                 }
                             }
-                            Err(error) => {
-
+                            Err(_) => {
                                 let _ = sender.send(JobInput::Eof);
                                 break;
                             }

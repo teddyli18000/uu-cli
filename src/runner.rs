@@ -3,10 +3,14 @@ use anyhow::{anyhow, Context};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::process;
+#[cfg(any(windows, test))]
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(any(windows, test))]
 use std::sync::mpsc;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
+#[cfg(any(windows, test))]
+use std::sync::Arc;
 #[cfg(any(windows, test))]
 use std::thread;
 #[cfg(any(windows, test))]
@@ -468,7 +472,7 @@ fn flush_incomplete_job_output<O: Write + ?Sized>(
     let trailing = decoder.finish_without_marker();
     write_visible(output, &trailing, "failed to stream final remote output")
 }
-// ConPTY consumes keyboard input: Enter is CR. Keep caller stdin bytes unchanged.
+// ConPTY consumes keyboard input with CR as Enter; convert the wrapper's trailing LF.
 fn send_wrapped_command<W: Write>(writer: &mut W, wrapped: &str) -> io::Result<()> {
     #[cfg(windows)]
     {
@@ -662,18 +666,40 @@ pub(crate) fn initialize_conpty(
     output.extend(handshake.finish());
     Ok((output, handshake.cursor_queries))
 }
-/// A single, demand-driven PTY reader. It reads at most one chunk per request,
-/// allowing a completed job to reuse the same terminal without a blocked
-/// per-job thread. Shutdown is bounded in case an underlying reader ignores
-/// closure of its PTY handles.
+#[cfg(any(windows, test))]
+const READ_PUMP_MAX_BACKLOG: usize = 8 * 1024 * 1024;
+
+#[cfg(any(windows, test))]
+fn reserve_read_pump_backlog(queued: &AtomicUsize, incoming: usize) -> bool {
+    let mut current = queued.load(Ordering::Relaxed);
+    loop {
+        let Some(next) = current.checked_add(incoming) else {
+            return false;
+        };
+        if next > READ_PUMP_MAX_BACKLOG {
+            return false;
+        }
+        match queued.compare_exchange_weak(current, next, Ordering::AcqRel, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
+/// Continuously drains the PTY so ConPTY output cannot block terminal input.
+/// Buffered output is bounded; after the limit, output is drained and dropped
+/// and the consumer receives one error. Shutdown is bounded in case an
+/// underlying reader ignores closure of its PTY handles.
 pub(crate) struct ReadPump {
-    request_tx: Option<SyncSender<()>>,
     response_rx: Option<Receiver<io::Result<Option<Vec<u8>>>>>,
     #[cfg(any(windows, test))]
     thread: Option<JoinHandle<()>>,
     #[cfg(any(windows, test))]
     done_rx: Option<Receiver<()>>,
-    request_pending: bool,
+    #[cfg(any(windows, test))]
+    stop: Arc<AtomicBool>,
+    #[cfg(any(windows, test))]
+    queued_bytes: Arc<AtomicUsize>,
     pending: Vec<u8>,
     eof: bool,
 }
@@ -684,19 +710,46 @@ impl ReadPump {
     where
         R: Read + Send + 'static,
     {
-        let (request_tx, request_rx) = mpsc::sync_channel::<()>(0);
-        let (response_tx, response_rx) = mpsc::sync_channel::<io::Result<Option<Vec<u8>>>>(1);
+        let (response_tx, response_rx) = mpsc::channel::<io::Result<Option<Vec<u8>>>>();
         let (done_tx, done_rx) = mpsc::channel();
+        let stop = Arc::new(AtomicBool::new(false));
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let reader_stop = Arc::clone(&stop);
+        let reader_queued_bytes = Arc::clone(&queued_bytes);
         let thread = thread::spawn(move || {
-            while request_rx.recv().is_ok() {
-                let mut buffer = [0u8; 8192];
-                match reader.read(&mut buffer) {
+            let mut buffer = [0u8; 8192];
+            let mut dropping_output = false;
+            loop {
+                if reader_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                let read = reader.read(&mut buffer);
+                if reader_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                match read {
                     Ok(0) => {
                         let _ = response_tx.send(Ok(None));
                         break;
                     }
+                    Ok(_) if dropping_output => {}
                     Ok(read) => {
-                        if response_tx.send(Ok(Some(buffer[..read].to_vec()))).is_err() {
+                        if !reserve_read_pump_backlog(&reader_queued_bytes, read) {
+                            dropping_output = true;
+                            let error = io::Error::new(
+                                io::ErrorKind::Other,
+                                format!(
+                                    "terminal output backlog exceeded {READ_PUMP_MAX_BACKLOG} bytes; draining and dropping further output"
+                                ),
+                            );
+                            if response_tx.send(Err(error)).is_err() {
+                                break;
+                            }
+                            continue;
+                        }
+                        let bytes = buffer[..read].to_vec();
+                        if response_tx.send(Ok(Some(bytes))).is_err() {
+                            reader_queued_bytes.fetch_sub(read, Ordering::AcqRel);
                             break;
                         }
                     }
@@ -710,13 +763,11 @@ impl ReadPump {
         });
 
         Self {
-            request_tx: Some(request_tx),
             response_rx: Some(response_rx),
-            #[cfg(any(windows, test))]
             thread: Some(thread),
-            #[cfg(any(windows, test))]
             done_rx: Some(done_rx),
-            request_pending: false,
+            stop,
+            queued_bytes,
             pending: Vec::new(),
             eof: false,
         }
@@ -733,46 +784,33 @@ impl ReadPump {
         if self.eof {
             return Ok(PumpRead::Eof);
         }
-        if !self.request_pending {
-            let request_tx = self.request_tx.as_ref().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::UnexpectedEof, "terminal reader is stopped")
-            })?;
-            request_tx.send(()).map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "terminal reader thread stopped",
-                )
-            })?;
-            self.request_pending = true;
-        }
-
         let response_rx = self.response_rx.as_ref().ok_or_else(|| {
             io::Error::new(io::ErrorKind::UnexpectedEof, "terminal reader is stopped")
         })?;
         let received = match timeout {
-            Some(timeout) => match response_rx.recv_timeout(timeout) {
-                Ok(received) => received,
-                Err(RecvTimeoutError::Timeout) => return Ok(PumpRead::Timeout),
-                Err(RecvTimeoutError::Disconnected) => {
-                    self.request_pending = false;
-                    self.eof = true;
-                    return Err(io::Error::new(
-                        io::ErrorKind::UnexpectedEof,
-                        "terminal reader thread stopped",
-                    ));
-                }
-            },
-            None => response_rx.recv().map_err(|_| {
-                io::Error::new(
+            Some(timeout) => response_rx.recv_timeout(timeout),
+            None => response_rx
+                .recv()
+                .map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        let received = match received {
+            Ok(received) => received,
+            Err(RecvTimeoutError::Timeout) => return Ok(PumpRead::Timeout),
+            Err(RecvTimeoutError::Disconnected) => {
+                self.eof = true;
+                return Err(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
                     "terminal reader thread stopped",
-                )
-            })?,
+                ));
+            }
         };
 
-        self.request_pending = false;
         match received {
-            Ok(Some(bytes)) => Ok(PumpRead::Data(bytes)),
+            Ok(Some(bytes)) => {
+                #[cfg(any(windows, test))]
+                self.queued_bytes.fetch_sub(bytes.len(), Ordering::AcqRel);
+                Ok(PumpRead::Data(bytes))
+            }
             Ok(None) => {
                 self.eof = true;
                 Ok(PumpRead::Eof)
@@ -786,7 +824,7 @@ impl ReadPump {
 
     #[cfg(any(windows, test))]
     pub(crate) fn shutdown_and_join(&mut self) {
-        self.request_tx.take();
+        self.stop.store(true, Ordering::Release);
         self.response_rx.take();
         if let Some(thread) = self.thread.take() {
             let finished = self
@@ -802,7 +840,6 @@ impl ReadPump {
         }
     }
 }
-
 impl Read for ReadPump {
     fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
         if output.is_empty() {
@@ -936,6 +973,61 @@ mod tests {
             }
         }
     }
+    struct WaitableChannelReader {
+        chunks: Receiver<Vec<u8>>,
+        current: Cursor<Vec<u8>>,
+        stopped: Arc<AtomicBool>,
+    }
+
+    impl Read for WaitableChannelReader {
+        fn read(&mut self, output: &mut [u8]) -> io::Result<usize> {
+            loop {
+                if (self.current.position() as usize) < self.current.get_ref().len() {
+                    return self.current.read(output);
+                }
+                if self.stopped.load(Ordering::Acquire) {
+                    return Ok(0);
+                }
+                match self.chunks.recv_timeout(Duration::from_millis(10)) {
+                    Ok(chunk) => self.current = Cursor::new(chunk),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => return Ok(0),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn read_pump_drains_multiple_chunks_without_event_consumer() {
+        let (chunks_tx, chunks_rx) = mpsc::sync_channel(0);
+        let (sent_tx, sent_rx) = mpsc::channel();
+        let producer = thread::spawn(move || {
+            let all_sent = [b"first".to_vec(), b"second".to_vec(), b"third".to_vec()]
+                .into_iter()
+                .all(|chunk| chunks_tx.send(chunk).is_ok());
+            let _ = sent_tx.send(all_sent);
+        });
+        let stopped = Arc::new(AtomicBool::new(false));
+        let mut reader = ReadPump::spawn(WaitableChannelReader {
+            chunks: chunks_rx,
+            current: Cursor::new(Vec::new()),
+            stopped: Arc::clone(&stopped),
+        });
+
+        // A synchronous producer models a writer blocked until the PTY reader consumes output.
+        let all_sent = sent_rx
+            .recv_timeout(Duration::from_secs(1))
+            .unwrap_or(false);
+        stopped.store(true, Ordering::Release);
+        reader.shutdown_and_join();
+        producer.join().unwrap();
+
+        assert!(
+            all_sent,
+            "PTY output producer blocked while no read_event call was made"
+        );
+    }
+
     #[test]
     fn child_exit_is_bounded_for_job_input_and_pwd_probe_paths() {
         for path in ["job", "input", "pwd"] {
