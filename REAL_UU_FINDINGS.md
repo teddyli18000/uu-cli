@@ -130,6 +130,33 @@
 - Signal delivery to the actual foreground job remains unverified. The remote
   host implementation/version has not yet been identified in this experiment.
 
+## Observed — round 5, dedicated worker baseline and per-job guard
+
+- User surrendered the diagnostic session `bash-5`; exact instance checked before
+  one successful attach. [Build 39424881018](https://github.com/teddyli18000/uu-cli/actions/runs/39424881018)
+  (`86900bd`) passed Windows format, clippy and release build.
+- Explicit experiment: `set +m` in the dedicated worker, a guard subshell with
+  INT/EXIT traps, and a further inner command subshell. Framing adds trailing
+  newlines to BEGIN/END. No `stty`, system or UU configuration changes.
+- Same attachment, ordered fresh nonces:
+
+| Step | Result |
+| --- | --- |
+| `pwd` | expected path, END status 0 after 126 ms |
+| `sh -c 'exit 7'` | END status 7 after 80 ms |
+| `sleep 30` + ETX | ETX sent 5.97 s after dispatch; END status 130 arrived 87 ms later; prompt followed |
+| `printf 'after-interrupt\n'` | expected output, END status 0 after 129 ms |
+
+- Cancellation and subsequent reuse are demonstrated for this ordinary foreground
+  sleep. The result does not promise termination of commands that ignore SIGINT,
+  deliberately leave their process group or daemonize.
+- This supports the shared-process-group worker baseline. It does not prove the
+  remote host's exact signal implementation or isolate each guard change's effect.
+- All four results still failed the old literal-CRLF matcher. The observer was
+  reading complete visible tokens; product decoder/output integration remains open.
+- Probe disconnected normally with no pending command, without killing the remote
+  Terminal. Its dedicated shell retains the deliberately changed monitor baseline.
+
 ## Conclusion
 
 - Attach handoff is demonstrated in this environment: a live official attachment
@@ -142,9 +169,12 @@
 - Sequential commands, status 7, Unicode characters and delayed output have been
   observed in one attachment. The visible-token observer is instrumentation, not
   a product output-normalization fix or proof of arbitrary binary/text fidelity.
-- Manual official-window Ctrl+C, probe ETX and explicit Win32 key events all failed
-  to demonstrate immediate interruption. Diagnose the actual remote signal and
-  foreground-job setup before changing command framing or adding transport retries.
+- Original manual/ETX/Win32 cancellation paths failed with interactive job control
+  enabled. With the dedicated worker baseline and per-job guard, ETX cancellation,
+  status 130 and next-command reuse passed for `sleep 30` in round 5.
+- Command-channel approach is viable for the observed cases, subject to product
+  integration of the guard and VT-aware completion/output handling. This does not
+  constitute production acceptance or proof of arbitrary output byte fidelity.
 - Official attach accepts a session name, not an atomic instance identifier;
   name + createdAt preflight detects replacements before attach but cannot prove
   an atomic guarantee across the query/attach interval.
