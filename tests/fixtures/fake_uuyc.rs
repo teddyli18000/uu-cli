@@ -1,8 +1,10 @@
+use fs2::FileExt;
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::env;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, BufRead, Read, Seek, SeekFrom, Write};
 use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 
@@ -10,6 +12,57 @@ const DEVICE_ID: &str = "device-1";
 const DEVICE_NAME: &str = "测试设备";
 const SESSION_NAME: &str = "bash-3";
 const CREATED_AT: &str = "2026-10-20T12:00:00Z";
+
+#[derive(Debug, Deserialize)]
+struct Fixture {
+    devices: Vec<FixtureDevice>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FixtureDevice {
+    device_id: String,
+    device_name: String,
+    #[serde(default = "default_online")]
+    is_online: bool,
+    #[serde(default)]
+    platform: Option<Value>,
+    #[serde(default)]
+    terminals: Vec<FixtureTerminal>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FixtureTerminal {
+    name: String,
+    #[serde(default)]
+    shell: Option<String>,
+    #[serde(default = "default_terminal_state")]
+    state: String,
+    #[serde(default)]
+    created_at: Option<String>,
+    #[serde(default = "default_attachable")]
+    attachable: bool,
+}
+
+#[derive(Clone, Debug)]
+struct AttachIdentity {
+    device_id: String,
+    session_name: String,
+    created_at: Option<String>,
+}
+
+fn default_online() -> bool {
+    true
+}
+
+fn default_terminal_state() -> String {
+    "running".to_owned()
+}
+
+fn default_attachable() -> bool {
+    true
+}
 
 fn main() -> ExitCode {
     match run() {
@@ -24,7 +77,8 @@ fn main() -> ExitCode {
 fn run() -> Result<u8, Box<dyn Error>> {
     let owned_args: Vec<String> = env::args().skip(1).collect();
     let args: Vec<&str> = owned_args.iter().map(String::as_str).collect();
-    record_event(json!({"event": "invoke", "args": args}))?;
+    let fixture = load_fixture()?;
+    record_event(invocation_event(&args, &fixture))?;
 
     if args.len() == 1 && args[0] == "version" {
         println!("cliVersion: 4.43.1");
@@ -34,16 +88,13 @@ fn run() -> Result<u8, Box<dyn Error>> {
     }
 
     if args.len() == 3 && args[0] == "device" && args[1] == "list" && args[2] == "--json" {
-        return write_json(json!({
-            "success": true,
-            "data": [{
-                "deviceId": DEVICE_ID,
-                "deviceName": DEVICE_NAME,
-                "isOnline": true,
-                "platform": "linux"
-            }],
-            "error": null
-        }));
+        let device_ids = fixture
+            .devices
+            .iter()
+            .map(|device| device.device_id.as_str())
+            .collect::<Vec<_>>();
+        record_event(json!({"event": "device_list", "deviceIds": device_ids}))?;
+        return write_json(device_list_json(&fixture));
     }
 
     if args.len() == 5
@@ -52,29 +103,175 @@ fn run() -> Result<u8, Box<dyn Error>> {
         && args[3] == "ls"
         && args[4] == "--json"
     {
-        return write_json(json!({
-            "success": true,
-            "data": {
-                "items": [{
-                    "name": SESSION_NAME,
-                    "deviceId": DEVICE_ID,
-                    "deviceName": DEVICE_NAME,
-                    "shell": "bash",
-                    "state": "running",
-                    "createdAt": CREATED_AT,
-                    "attachable": true
-                }],
-                "total": 1
-            },
-            "error": null
-        }));
+        record_terminal_list(&fixture, args[2])?;
+        return write_json(session_list_json(&fixture, args[2]));
     }
 
     if args.len() == 5 && args[0] == "term" && args[1] == "-d" && args[3] == "attach" {
-        return run_attached_terminal();
+        return run_attached_terminal(&fixture, args[2], args[4]);
     }
 
     Err(format!("unsupported official CLI arguments: {args:?}").into())
+}
+
+fn load_fixture() -> Result<Fixture, Box<dyn Error>> {
+    let Some(path) = env::var_os("UU_TEST_FIXTURE_JSON") else {
+        return Ok(Fixture {
+            devices: vec![FixtureDevice {
+                device_id: DEVICE_ID.to_owned(),
+                device_name: DEVICE_NAME.to_owned(),
+                is_online: true,
+                platform: Some(json!("linux")),
+                terminals: vec![FixtureTerminal {
+                    name: SESSION_NAME.to_owned(),
+                    shell: Some("bash".to_owned()),
+                    state: "running".to_owned(),
+                    created_at: Some(CREATED_AT.to_owned()),
+                    attachable: true,
+                }],
+            }],
+        });
+    };
+
+    let path = std::path::PathBuf::from(path);
+    let bytes = fs::read(&path).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("cannot read UU_TEST_FIXTURE_JSON {}: {error}", path.display()),
+        )
+    })?;
+    let fixture = serde_json::from_slice(&bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid UU_TEST_FIXTURE_JSON {}: {error}", path.display()),
+        )
+    })?;
+    Ok(fixture)
+}
+
+fn device_list_json(fixture: &Fixture) -> Value {
+    let devices = fixture
+        .devices
+        .iter()
+        .map(|device| {
+            json!({
+                "deviceId": &device.device_id,
+                "deviceName": &device.device_name,
+                "isOnline": device.is_online,
+                "platform": &device.platform
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({"success": true, "data": devices, "error": null})
+}
+
+fn sessions_for_device<'a>(fixture: &'a Fixture, device_id: &str) -> Option<&'a FixtureDevice> {
+    fixture
+        .devices
+        .iter()
+        .find(|device| device.device_id == device_id)
+}
+
+fn session_list_json(fixture: &Fixture, device_id: &str) -> Value {
+    let items: Vec<Value> = if let Some(device) = sessions_for_device(fixture, device_id) {
+        device
+            .terminals
+            .iter()
+            .map(|terminal| {
+                json!({
+                    "name": &terminal.name,
+                    "deviceId": &device.device_id,
+                    "deviceName": &device.device_name,
+                    "shell": &terminal.shell,
+                    "state": &terminal.state,
+                    "createdAt": &terminal.created_at,
+                    "attachable": terminal.attachable
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let total = items.len();
+    json!({
+        "success": true,
+        "data": {"items": items, "total": total},
+        "error": null
+    })
+}
+
+fn session_event_value(device: &FixtureDevice, terminal: &FixtureTerminal) -> Value {
+    json!({
+        "deviceId": &device.device_id,
+        "sessionName": &terminal.name,
+        "createdAt": &terminal.created_at,
+        "state": &terminal.state,
+        "attachable": terminal.attachable,
+        "available": device.is_online && terminal.state == "running" && terminal.attachable
+    })
+}
+
+fn record_terminal_list(fixture: &Fixture, device_id: &str) -> Result<(), Box<dyn Error>> {
+    let sessions = sessions_for_device(fixture, device_id)
+        .map(|device| {
+            device
+                .terminals
+                .iter()
+                .map(|terminal| session_event_value(device, terminal))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    record_event(json!({
+        "event": "terminal_list",
+        "deviceId": device_id,
+        "sessions": sessions
+    }))
+}
+
+fn resolve_attach(
+    fixture: &Fixture,
+    device_id: &str,
+    session_name: &str,
+) -> (Option<AttachIdentity>, bool, &'static str) {
+    let Some(device) = sessions_for_device(fixture, device_id) else {
+        return (None, false, "device not present in current fixture");
+    };
+    let mut matches = device
+        .terminals
+        .iter()
+        .filter(|terminal| terminal.name == session_name);
+    let Some(terminal) = matches.next() else {
+        return (None, false, "session not present in current fixture");
+    };
+    if matches.next().is_some() {
+        return (None, false, "session name is ambiguous on this device");
+    }
+
+    let identity = AttachIdentity {
+        device_id: device.device_id.clone(),
+        session_name: terminal.name.clone(),
+        created_at: terminal.created_at.clone(),
+    };
+    let available = device.is_online && terminal.state == "running" && terminal.attachable;
+    let reason = if available {
+        "available"
+    } else {
+        "session is not online, running, and attachable"
+    };
+    (Some(identity), available, reason)
+}
+
+fn invocation_event(args: &[&str], fixture: &Fixture) -> Value {
+    let mut event = json!({"event": "invoke", "args": args});
+    if args.len() >= 3 && args[0] == "term" && args[1] == "-d" {
+        event["deviceId"] = json!(args[2]);
+        if args.len() == 5 && args[3] == "attach" {
+            event["sessionName"] = json!(args[4]);
+            let (identity, _, _) = resolve_attach(fixture, args[2], args[4]);
+            event["createdAt"] = json!(identity.and_then(|identity| identity.created_at));
+        }
+    }
+    event
 }
 
 fn write_json(value: Value) -> Result<u8, Box<dyn Error>> {
@@ -85,11 +282,27 @@ fn write_json(value: Value) -> Result<u8, Box<dyn Error>> {
     Ok(0)
 }
 
-fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
-    record_event(json!({"event": "attach_started"}))?;
+fn run_attached_terminal(
+    fixture: &Fixture,
+    device_id: &str,
+    session_name: &str,
+) -> Result<u8, Box<dyn Error>> {
+    let (identity, available, reason) = resolve_attach(fixture, device_id, session_name);
+    record_event(json!({
+        "event": "attach_started",
+        "deviceId": device_id,
+        "sessionName": session_name,
+        "createdAt": identity.as_ref().and_then(|identity| identity.created_at.as_deref()),
+        "available": available,
+        "result": if available { "accepted" } else { "rejected" },
+        "reason": reason
+    }))?;
+    let Some(identity) = identity.filter(|_| available) else {
+        return Err(format!("requested terminal {device_id}/{session_name} is unavailable: {reason}").into());
+    };
 
     if env::var("UU_TEST_MODE").as_deref() == Ok("bash") {
-        return run_git_bash_attached_terminal();
+        return run_git_bash_attached_terminal(identity);
     }
 
     let mut command = String::new();
@@ -97,7 +310,7 @@ fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
     if read == 0 {
         return Ok(0);
     }
-    record_dispatch(&command)?;
+    record_dispatch(&command, &identity)?;
 
     let Some(nonce) = command
         .split_once("'UUC' '")
@@ -129,10 +342,13 @@ fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
 
 const DSR_RESPONSE: &[u8] = b"\x1b[1;1R";
 
-fn run_git_bash_attached_terminal() -> Result<u8, Box<dyn Error>> {
+fn run_git_bash_attached_terminal(identity: AttachIdentity) -> Result<u8, Box<dyn Error>> {
     let bash = env::var_os("UU_TEST_BASH")
         .ok_or("UU_TEST_BASH must name the Git Bash executable for bash mode")?;
     let mut command = Command::new(bash);
+    if let Some(cwd) = env::var_os("UU_TEST_BASH_CWD") {
+        command.current_dir(cwd);
+    }
     command
         .args(["--noprofile", "--norc"])
         .stdin(Stdio::piped())
@@ -150,7 +366,7 @@ fn run_git_bash_attached_terminal() -> Result<u8, Box<dyn Error>> {
     let _input_relay = thread::Builder::new()
         .name("fake-uuyc-git-bash-input".to_owned())
         .spawn(move || {
-            if let Err(error) = forward_conpty_input(io::stdin(), child_stdin) {
+            if let Err(error) = forward_conpty_input(io::stdin(), child_stdin, identity) {
                 eprintln!("fake-uuyc: Git Bash input relay failed: {error}");
             }
         })?;
@@ -187,6 +403,7 @@ fn relay_bash_output<R: Read, W: Write>(mut input: R, mut output: W) -> io::Resu
 fn forward_conpty_input<R: Read, W: Write>(
     mut input: R,
     mut output: W,
+    identity: AttachIdentity,
 ) -> Result<(), Box<dyn Error>> {
     let mut read_buffer = [0_u8; 4096];
     let mut possible_dsr = Vec::with_capacity(DSR_RESPONSE.len());
@@ -202,7 +419,7 @@ fn forward_conpty_input<R: Read, W: Write>(
             possible_dsr.push(byte);
             while !DSR_RESPONSE.starts_with(&possible_dsr) {
                 let forwarded = possible_dsr.remove(0);
-                forward_bash_byte(forwarded, &mut swallow_next_lf, &mut line, &mut output)?;
+                forward_bash_byte(forwarded, &mut swallow_next_lf, &mut line, &mut output, &identity)?;
             }
             if possible_dsr.as_slice() == DSR_RESPONSE {
                 possible_dsr.clear();
@@ -211,10 +428,10 @@ fn forward_conpty_input<R: Read, W: Write>(
     }
 
     for byte in possible_dsr {
-        forward_bash_byte(byte, &mut swallow_next_lf, &mut line, &mut output)?;
+        forward_bash_byte(byte, &mut swallow_next_lf, &mut line, &mut output, &identity)?;
     }
     if !line.is_empty() {
-        dispatch_bash_line(&mut line, &mut output, false)?;
+        dispatch_bash_line(&mut line, &mut output, false, &identity)?;
     }
     output.flush()?;
     Ok(())
@@ -225,6 +442,7 @@ fn forward_bash_byte<W: Write>(
     swallow_next_lf: &mut bool,
     line: &mut Vec<u8>,
     output: &mut W,
+    identity: &AttachIdentity,
 ) -> Result<(), Box<dyn Error>> {
     if *swallow_next_lf {
         *swallow_next_lf = false;
@@ -235,10 +453,10 @@ fn forward_bash_byte<W: Write>(
 
     match byte {
         b'\r' => {
-            dispatch_bash_line(line, output, true)?;
+            dispatch_bash_line(line, output, true, identity)?;
             *swallow_next_lf = true;
         }
-        b'\n' => dispatch_bash_line(line, output, true)?,
+        b'\n' => dispatch_bash_line(line, output, true, identity)?,
         _ => line.push(byte),
     }
     Ok(())
@@ -248,6 +466,7 @@ fn dispatch_bash_line<W: Write>(
     line: &mut Vec<u8>,
     output: &mut W,
     terminated: bool,
+    identity: &AttachIdentity,
 ) -> Result<(), Box<dyn Error>> {
     let input_bytes = line.len() + if terminated { 1 } else { 0 };
     output.write_all(line)?;
@@ -255,34 +474,99 @@ fn dispatch_bash_line<W: Write>(
         output.write_all(b"\n")?;
     }
     output.flush()?;
-    if !line.is_empty() {
+    if !line.is_empty() && is_terminal_wrapper(line) {
         record_event(json!({
             "event": "dispatch",
+            "deviceId": &identity.device_id,
+            "sessionName": &identity.session_name,
+            "createdAt": &identity.created_at,
+            "result": "sent",
             "transport": "git-bash-pipe",
-            "input_bytes": input_bytes
+            "input_bytes": input_bytes,
+            "wrapper": String::from_utf8_lossy(line)
         }))?;
     }
     line.clear();
     Ok(())
 }
-fn record_dispatch(wrapper: &str) -> Result<(), Box<dyn Error>> {
+fn is_terminal_wrapper(line: &[u8]) -> bool {
+    line.starts_with(b"set +m; ( trap '__uu_status=$?;")
+        || line.starts_with(b"printf '\\r\\n%s%s%s' 'UUC' '")
+}
+
+fn record_dispatch(wrapper: &str, identity: &AttachIdentity) -> Result<(), Box<dyn Error>> {
     record_event(json!({
         "event": "dispatch",
+        "deviceId": &identity.device_id,
+        "sessionName": &identity.session_name,
+        "createdAt": &identity.created_at,
+        "result": "sent",
         "wrapper": wrapper
     }))
 }
 
 fn record_event(record: Value) -> Result<(), Box<dyn Error>> {
-    let Some(path) = env::var_os("UU_TEST_LOG") else {
-        return Ok(());
-    };
-    let path = std::path::PathBuf::from(path);
+    let legacy_path = env::var_os("UU_TEST_LOG").map(std::path::PathBuf::from);
+    let fixture_path = env::var_os("UU_TEST_FIXTURE_EVENTS").map(std::path::PathBuf::from);
+    match (legacy_path, fixture_path) {
+        (Some(legacy), Some(fixture)) if legacy == fixture => {
+            append_fixture_event(&fixture, record)?;
+        }
+        (Some(legacy), Some(fixture)) => {
+            append_legacy_event(&legacy, &record)?;
+            append_fixture_event(&fixture, record)?;
+        }
+        (Some(legacy), None) => append_legacy_event(&legacy, &record)?,
+        (None, Some(fixture)) => append_fixture_event(&fixture, record)?,
+        (None, None) => {}
+    }
+    Ok(())
+}
+
+fn append_legacy_event(path: &std::path::Path, record: &Value) -> Result<(), Box<dyn Error>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
     let mut log = OpenOptions::new().create(true).append(true).open(path)?;
-    serde_json::to_writer(&mut log, &record)?;
+    serde_json::to_writer(&mut log, record)?;
     log.write_all(b"\n")?;
     log.flush()?;
+    Ok(())
+}
+
+fn append_fixture_event(path: &std::path::Path, record: Value) -> Result<(), Box<dyn Error>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut log = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)?;
+    FileExt::lock_exclusive(&log)?;
+
+    let mut contents = String::new();
+    log.read_to_string(&mut contents)?;
+    let previous = contents
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter_map(|event| event.get("sequence").and_then(Value::as_u64))
+        .max()
+        .unwrap_or(0);
+    let sequence = previous
+        .checked_add(1)
+        .ok_or("fixture event sequence overflow")?;
+
+    let mut event = record;
+    if let Value::Object(fields) = &mut event {
+        fields.insert("sequence".to_owned(), json!(sequence));
+    }
+    log.seek(SeekFrom::End(0))?;
+    let mut bytes = serde_json::to_vec(&event)?;
+    bytes.push(b'\n');
+    log.write_all(&bytes)?;
+    log.flush()?;
+    FileExt::unlock(&log)?;
     Ok(())
 }
