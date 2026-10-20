@@ -218,6 +218,33 @@ where
 const INPUT_POLL: Duration = Duration::from_millis(10);
 const CHILD_EXIT_DRAIN: Duration = Duration::from_millis(250);
 
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct ConPtyInputNormalizer {
+    previous_was_cr: bool,
+}
+
+#[cfg(any(windows, test))]
+impl ConPtyInputNormalizer {
+    fn normalize(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut normalized = Vec::with_capacity(bytes.len());
+        for &byte in bytes {
+            match byte {
+                b'\n' if self.previous_was_cr => self.previous_was_cr = false,
+                b'\n' => {
+                    normalized.push(b'\r');
+                    self.previous_was_cr = false;
+                }
+                other => {
+                    normalized.push(other);
+                    self.previous_was_cr = other == b'\r';
+                }
+            }
+        }
+        normalized
+    }
+}
+
 /// Bytes are forwarded as terminal input; Interrupt sends the terminal's
 /// Ctrl+C character; Eof sends Ctrl+D once and closes this job's input stream.
 #[derive(Debug)]
@@ -313,12 +340,12 @@ where
     let mut input_disconnected = false;
     let mut child_exit_deadline = None;
     #[cfg(windows)]
-    let fixture_trace = std::env::var("UU_TEST_MODE").as_deref() == Ok("bash")
-        && std::env::var_os("UU_TEST_FIXTURE_EVENTS").is_some();
-    #[cfg(windows)]
-    let mut fixture_trace_remaining = 8192usize;
-    #[cfg(windows)]
-    let mut fixture_input_wait_logged = false;
+    let mut console_input_newlines = if console_decoder {
+        Some(ConPtyInputNormalizer::default())
+    } else {
+        None
+    };
+
     loop {
         if child_has_exited()
             .context("failed while checking official UU terminal process")
@@ -353,13 +380,10 @@ where
                     }
                     Ok(JobInput::Bytes(bytes)) if !stdin_eof => {
                         #[cfg(windows)]
-                        if fixture_trace {
-                            let hex = bytes
-                                .iter()
-                                .map(|byte| format!("{byte:02x}"))
-                                .collect::<String>();
-                            eprintln!("uu-test-job-input-bytes hex={hex}");
-                        }
+                        let bytes = match console_input_newlines.as_mut() {
+                            Some(normalizer) => normalizer.normalize(&bytes),
+                            None => bytes,
+                        };
                         writer
                             .write_all(&bytes)
                             .and_then(|_| writer.flush())
@@ -367,10 +391,6 @@ where
                             .map_err(JobRunError::Unknown)?;
                     }
                     Ok(JobInput::Eof) if !stdin_eof => {
-                        #[cfg(windows)]
-                        if fixture_trace {
-                            eprintln!("uu-test-job-input-eof");
-                        }
                         writer
                             .write_all(b"\x04")
                             .and_then(|_| writer.flush())
@@ -379,16 +399,7 @@ where
                         stdin_eof = true;
                     }
                     Ok(JobInput::Bytes(_) | JobInput::Eof) => {}
-                    Err(RecvTimeoutError::Timeout) => {
-                        #[cfg(windows)]
-                        if fixture_trace && !fixture_input_wait_logged {
-                            eprintln!(
-                                "uu-test-job-input-wait decoder_started={}",
-                                decoder.started()
-                            );
-                            fixture_input_wait_logged = true;
-                        }
-                    }
+                    Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => input_disconnected = true,
                 }
             }
@@ -416,19 +427,7 @@ where
                     .push(&bytes)
                     .context("invalid remote job framing")
                     .map_err(JobRunError::Unknown)?;
-                #[cfg(windows)]
-                if fixture_trace && fixture_trace_remaining > 0 {
-                    let count = bytes.len().min(fixture_trace_remaining);
-                    let hex = bytes[..count]
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect::<String>();
-                    eprintln!(
-                        "uu-test-pty-rx decoder_started={} hex={hex}",
-                        decoder.started()
-                    );
-                    fixture_trace_remaining -= count;
-                }
+
                 write_visible(output, &visible, "failed to stream remote output")?;
                 if let Some(exit_code) = decoder.completed() {
                     return Ok(JobResult { exit_code });
@@ -837,6 +836,20 @@ fn next_nonce() -> String {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn conpty_input_normalizes_line_endings_across_chunks_and_preserves_other_bytes() {
+        let mut normalizer = ConPtyInputNormalizer::default();
+
+        assert_eq!(
+            normalizer.normalize(b"first\nsecond\r\nbinary\0"),
+            b"first\rsecond\rbinary\0"
+        );
+        assert_eq!(normalizer.normalize(b"third\r"), b"third\r");
+        assert_eq!(normalizer.normalize(b"\n"), b"");
+        // The normalizer buffers no output, so EOF never synthesizes a newline.
+        assert_eq!(normalizer.normalize(b""), b"");
+    }
 
     #[test]
     fn streams_only_framed_user_output_and_returns_exit_code() {

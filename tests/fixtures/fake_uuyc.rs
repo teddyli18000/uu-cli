@@ -481,14 +481,7 @@ fn forward_conpty_input<R: Read, W: Write>(
         if bytes_read == 0 {
             break;
         }
-        if env::var("UU_TEST_MODE").as_deref() == Ok("bash")
-            && env::var_os("UU_TEST_FIXTURE_EVENTS").is_some()
-        {
-            record_fixture_diagnostic(json!({
-                "event": "conpty_input_read",
-                "hex": hex_encode(&read_buffer[..bytes_read])
-            }))?;
-        }
+
         for &byte in &read_buffer[..bytes_read] {
             possible_dsr.push(byte);
             while !DSR_RESPONSE.starts_with(&possible_dsr) {

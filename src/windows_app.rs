@@ -90,31 +90,20 @@ pub fn execute(command: Command, store: &ConfigStore) -> Result<u8> {
             let result = with_worker(store, &binding, &cancelled, move |transport| {
                 // Only the job reader consumes caller stdin. Setup/selection is
                 // always hosted in a separate console.
-                let fixture_trace = std::env::var("UU_TEST_MODE").as_deref() == Ok("bash")
-                    && std::env::var_os("UU_TEST_FIXTURE_EVENTS").is_some();
+
                 thread::spawn(move || {
-                    if fixture_trace {
-                        eprintln!("uu-test-stdin-reader-start");
-                    }
+
                     let mut input = io::stdin().lock();
                     let mut buffer = [0u8; 8192];
                     loop {
                         match input.read(&mut buffer) {
                             Ok(0) => {
-                                if fixture_trace {
-                                    eprintln!("uu-test-stdin-reader-eof");
-                                }
+
                                 let _ = sender.send(JobInput::Eof);
                                 break;
                             }
                             Ok(count) => {
-                                if fixture_trace {
-                                    let hex = buffer[..count]
-                                        .iter()
-                                        .map(|byte| format!("{byte:02x}"))
-                                        .collect::<String>();
-                                    eprintln!("uu-test-stdin-reader-bytes hex={hex}");
-                                }
+
                                 if sender
                                     .send(JobInput::Bytes(buffer[..count].to_vec()))
                                     .is_err()
@@ -123,9 +112,7 @@ pub fn execute(command: Command, store: &ConfigStore) -> Result<u8> {
                                 }
                             }
                             Err(error) => {
-                                if fixture_trace {
-                                    eprintln!("uu-test-stdin-reader-error={error}");
-                                }
+
                                 let _ = sender.send(JobInput::Eof);
                                 break;
                             }
