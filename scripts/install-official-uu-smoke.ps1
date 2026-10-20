@@ -154,6 +154,44 @@ foreach ($args in @(@('version'), @('device', 'list', '--json'))) {
     if (Test-Path $stderr) { Get-Content $stderr | Select-Object -First 80 | ForEach-Object { Write-Host "  stderr: $_" } }
 }
 
+# If the workflow supplied the uu-cli release candidate, verify our own discovery
+# against this clean official installation. Do not use UUYC_CLI here: the point is
+# to prove normal registry/installation discovery works without a developer override.
+if ($env:UU_CLI_UNDER_TEST) {
+    if (-not (Test-Path $env:UU_CLI_UNDER_TEST)) {
+        throw "uu-cli binary under test is missing: $env:UU_CLI_UNDER_TEST"
+    }
+    $uuConfig = Join-Path $env:RUNNER_TEMP 'uu-cli-smoke-config.json'
+    Remove-Item $uuConfig -ErrorAction SilentlyContinue
+    $oldConfig = $env:UU_CLI_CONFIG
+    $oldOverride = $env:UUYC_CLI
+    try {
+        $env:UU_CLI_CONFIG = $uuConfig
+        Remove-Item Env:UUYC_CLI -ErrorAction SilentlyContinue
+        Write-Host "uu-cli discovery probe: $env:UU_CLI_UNDER_TEST list"
+        $uuOutput = & $env:UU_CLI_UNDER_TEST list 2>&1
+        $uuExit = $LASTEXITCODE
+        $uuText = ($uuOutput | Out-String)
+        $uuOutput | ForEach-Object { Write-Host "  uu: $_" }
+        if ($uuExit -ne 0) {
+            throw "uu list failed with exit code $uuExit"
+        }
+        if ($uuText -notmatch [regex]::Escape($cli.FullName)) {
+            throw "uu list did not report the installed official CLI path: $($cli.FullName)"
+        }
+        if ($uuText -notmatch [regex]::Escape($cli.VersionInfo.FileVersion)) {
+            throw "uu list did not report the installed official CLI version: $($cli.VersionInfo.FileVersion)"
+        }
+        if ($uuText -notmatch 'Main application is not running') {
+            throw 'uu list did not preserve the observed official stopped-app diagnostic.'
+        }
+        Write-Host 'uu-cli clean-install discovery probe passed.'
+    } finally {
+        if ($null -eq $oldConfig) { Remove-Item Env:UU_CLI_CONFIG -ErrorAction SilentlyContinue } else { $env:UU_CLI_CONFIG = $oldConfig }
+        if ($null -eq $oldOverride) { Remove-Item Env:UUYC_CLI -ErrorAction SilentlyContinue } else { $env:UUYC_CLI = $oldOverride }
+    }
+}
+
 Write-Host 'UU-related processes before uninstall:'
 Show-UuProcesses
 
