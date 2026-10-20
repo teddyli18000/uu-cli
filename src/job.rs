@@ -83,14 +83,27 @@ pub struct CompletionDecoder {
     pending: Vec<u8>,
     started: bool,
     completed: Option<i32>,
+    console: bool,
 }
 
 impl CompletionDecoder {
     pub fn new(nonce: &str) -> Result<Self> {
+        Self::with_console_mode(nonce, false)
+    }
+
+    /// ConPTY returns terminal presentation bytes: protocol newlines may become
+    /// cursor-addressing VT. Match complete nonce tokens independently of those
+    /// separators while preserving the remaining presentation bytes.
+    pub fn new_console(nonce: &str) -> Result<Self> {
+        Self::with_console_mode(nonce, true)
+    }
+
+    fn with_console_mode(nonce: &str, console: bool) -> Result<Self> {
         validate_nonce(nonce)?;
 
-        let start_marker = format!("\r\nUUC{nonce}B").into_bytes();
-        let end_prefix = format!("\r\nUUC{nonce}E").into_bytes();
+        let separator = if console { "" } else { "\r\n" };
+        let start_marker = format!("{separator}UUC{nonce}B").into_bytes();
+        let end_prefix = format!("{separator}UUC{nonce}E").into_bytes();
 
         Ok(Self {
             start_marker,
@@ -98,6 +111,7 @@ impl CompletionDecoder {
             pending: Vec::new(),
             started: false,
             completed: None,
+            console,
         })
     }
 
@@ -165,20 +179,43 @@ impl CompletionDecoder {
                 let status = status_text.parse::<i32>().map_err(|_| {
                     anyhow!("invalid exit status in completion marker: {status_text}")
                 })?;
-                let output = self.pending[..start].to_vec();
+                if self.console && !(0..=255).contains(&status) {
+                    bail!("completion exit status is outside 0..255");
+                }
+                let output = self.pending[..self.output_end(start)].to_vec();
                 self.pending.clear();
                 self.completed = Some(status);
                 return Ok(output);
             }
 
-            let output = self.pending[..start].to_vec();
+            if self.console && self.pending.len() - status_start > 3 {
+                bail!("completion exit status is too long");
+            }
+            let output = self.pending[..self.output_end(start)].to_vec();
             self.pending.drain(..start);
             return Ok(output);
         }
 
         let keep = longest_suffix_prefix(&self.pending, &self.end_prefix);
-        let emit_len = self.pending.len().saturating_sub(keep);
+        // Retain a possible CRLF separator until the following nonce prefix is
+        // known. This delays at most two presentation bytes, never a whole line.
+        let separator_tail = if self.console { 2 } else { 0 };
+        let emit_len = self.pending.len().saturating_sub(keep + separator_tail);
         Ok(self.pending.drain(..emit_len).collect())
+    }
+
+    fn output_end(&self, marker_start: usize) -> usize {
+        if !self.console {
+            return marker_start;
+        }
+        let before = &self.pending[..marker_start];
+        if before.ends_with(b"\r\n") {
+            marker_start - 2
+        } else if before.ends_with(b"\n") {
+            marker_start - 1
+        } else {
+            marker_start
+        }
     }
 }
 
@@ -265,6 +302,40 @@ mod tests {
         assert!(script.contains("printf '\\r\\n%s%s%s%d%s\\r\\n' 'UUC' 'abc123' 'E'"));
         assert!(!script.contains("UUCabc123B"));
         assert!(!script.contains("UUCabc123E"));
+    }
+
+    #[test]
+    fn console_decoder_accepts_cursor_addressed_tokens_without_rewriting_payload() {
+        let wire = b"\x1b[17;1HUUCnonceB/home/test\x1b[19;1HUUCnonceE0Z\r\nprompt$ ";
+        for split in 0..=wire.len() {
+            let mut decoder = CompletionDecoder::new_console("nonce").unwrap();
+            let mut output = decoder.push(&wire[..split]).unwrap();
+            output.extend(decoder.push(&wire[split..]).unwrap());
+            assert_eq!(output, b"/home/test\x1b[19;1H");
+            assert_eq!(decoder.completed(), Some(0));
+        }
+    }
+
+    #[test]
+    fn console_decoder_preserves_unicode_and_payload_newline_at_every_split() {
+        let wire = "echoed wrapper\r\nUUCnonceB你好-UU\r\n\r\nUUCnonceE7Z\r\nprompt$ ".as_bytes();
+        for split in 0..=wire.len() {
+            let mut decoder = CompletionDecoder::new_console("nonce").unwrap();
+            let mut output = decoder.push(&wire[..split]).unwrap();
+            output.extend(decoder.push(&wire[split..]).unwrap());
+            assert_eq!(output, "你好-UU\r\n".as_bytes());
+            assert_eq!(decoder.completed(), Some(7));
+        }
+    }
+
+    #[test]
+    fn console_decoder_rejects_out_of_range_status_and_keeps_unknown_output() {
+        let mut decoder = CompletionDecoder::new_console("nonce").unwrap();
+        assert_eq!(decoder.push(b"UUCnonceBpartial").unwrap(), b"parti");
+        assert_eq!(decoder.finish_without_marker(), b"al");
+        let mut decoder = CompletionDecoder::new_console("nonce").unwrap();
+        assert!(decoder.push(b"UUCnonceBUUCnonceE256Z").is_err());
+        assert_eq!(decoder.completed(), None);
     }
 
     #[test]
