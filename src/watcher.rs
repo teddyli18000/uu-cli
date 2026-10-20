@@ -9,7 +9,9 @@ use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
 const ACTIVE_POLL: std::time::Duration = std::time::Duration::from_secs(20);
+#[cfg(windows)]
 const NO_UU_POLL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Runtime data is stored beside the per-user config, outside the workspace.
@@ -35,6 +37,7 @@ pub fn try_interaction_lock(config_path: &Path) -> Result<Option<File>> {
     try_lock_file(&interaction_lock_path(config_path))
 }
 
+#[cfg(windows)]
 fn watcher_lock_path(config_path: &Path) -> PathBuf {
     runtime_dir(config_path).join("watcher.lock")
 }
@@ -56,9 +59,25 @@ fn try_lock_file(path: &Path) -> Result<Option<File>> {
 
     match FileExt::try_lock_exclusive(&file) {
         Ok(()) => Ok(Some(file)),
-        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+        Err(error) if is_lock_contended(&error) => Ok(None),
         Err(error) => Err(error)
             .with_context(|| format!("cannot acquire runtime lock {}", path.display())),
+    }
+}
+
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_LOCK_VIOLATION: Windows reports a non-blocking file-lock
+        // collision as raw OS error 33 rather than ErrorKind::WouldBlock.
+        error.raw_os_error() == Some(33)
+    }
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 
@@ -93,6 +112,7 @@ pub fn spawn_if_needed(executable: &Path, config_path: &Path) -> Result<()> {
 
         Command::new(executable)
             .arg("__watch")
+            .env("UU_CLI_CONFIG", config_path.as_os_str())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -135,6 +155,23 @@ pub fn is_official_uu_running() -> Result<bool> {
 }
 
 #[cfg(windows)]
+fn authorization_executable(current_executable: &Path) -> Result<PathBuf> {
+    let is_background_helper = current_executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("uu-background.exe"));
+
+    if is_background_helper {
+        let directory = current_executable
+            .parent()
+            .context("uu-background.exe has no parent directory")?;
+        Ok(directory.join("uu.exe"))
+    } else {
+        Ok(current_executable.to_path_buf())
+    }
+}
+
+#[cfg(windows)]
 fn run_windows(config_path: &Path) -> Result<()> {
     use crate::config::ConfigStore;
     use crate::inventory::discover_inventory;
@@ -151,7 +188,8 @@ fn run_windows(config_path: &Path) -> Result<()> {
     };
 
     let config_store = ConfigStore::at(config_path.to_path_buf());
-    let executable = std::env::current_exe().context("cannot locate uu executable")?;
+    let current_executable = std::env::current_exe().context("cannot locate uu executable")?;
+    let authorization_executable = authorization_executable(&current_executable)?;
     let mut official_cli = None;
     let mut authorization_console: Option<Child> = None;
 
@@ -192,8 +230,9 @@ fn run_windows(config_path: &Path) -> Result<()> {
                     // that is already handling a waiting-terminal request.
                     if let Some(interaction_lock) = try_interaction_lock(config_path)? {
                         drop(interaction_lock);
-                        authorization_console = Command::new(&executable)
+                        authorization_console = Command::new(&authorization_executable)
                             .arg("__authorize")
+                            .env("UU_CLI_CONFIG", config_path.as_os_str())
                             .creation_flags(CREATE_NEW_CONSOLE)
                             .spawn()
                             .ok();
@@ -296,5 +335,69 @@ mod windows_process {
         }
 
         Ok(false)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::{runtime_dir, try_interaction_lock, try_lock_file};
+    use std::path::Path;
+    use std::process::Command;
+    use tempfile::tempdir;
+
+    #[test]
+    fn runtime_lock_is_exclusive_across_processes_and_released() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        let lock_path = runtime_dir(&config_path).join("watcher.lock");
+        let lock = try_lock_file(&lock_path).unwrap().expect("acquire watcher lock");
+
+        let status = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "watcher::tests::runtime_lock_child_probe"])
+            .env("UU_CLI_TEST_LOCK_PATH", &lock_path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "child process could acquire held lock");
+
+        drop(lock);
+        assert!(try_lock_file(&lock_path).unwrap().is_some());
+    }
+
+    #[test]
+    fn runtime_lock_child_probe() {
+        let Some(path) = std::env::var_os("UU_CLI_TEST_LOCK_PATH") else {
+            return;
+        };
+        assert!(try_lock_file(Path::new(&path)).unwrap().is_none());
+    }
+
+    #[test]
+    fn interaction_lock_is_exclusive_until_released() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        let lock = try_interaction_lock(&config_path)
+            .unwrap()
+            .expect("acquire interaction lock");
+
+        assert!(try_interaction_lock(&config_path).unwrap().is_none());
+
+        drop(lock);
+        assert!(try_interaction_lock(&config_path).unwrap().is_some());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn background_helper_authorizes_with_sibling_cli() {
+        let current = Path::new(r"C:\Tools\uu-background.exe");
+        assert_eq!(
+            super::authorization_executable(current).unwrap(),
+            Path::new(r"C:\Tools\uu.exe")
+        );
+        let normal = Path::new(r"C:\Tools\UU.EXE");
+        assert_eq!(
+            super::authorization_executable(normal).unwrap(),
+            normal
+        );
     }
 }

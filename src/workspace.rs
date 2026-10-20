@@ -63,8 +63,7 @@ fn git_root_boundary(cwd: &Path) -> Option<PathBuf> {
 pub fn resolve_binding<'a>(config: &'a Config, cwd: &Path) -> Option<&'a WorkspaceBinding> {
     let resolved_cwd = canonical(cwd).ok()?;
     let cwd = comparable(&resolved_cwd)?;
-    let git_boundary = git_root_boundary(&resolved_cwd)
-        .and_then(|boundary| comparable(&boundary));
+    let git_boundary = git_root_boundary(&resolved_cwd).and_then(|boundary| comparable(&boundary));
 
     config
         .bindings
@@ -195,7 +194,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("workspace");
         std::fs::create_dir_all(&root).unwrap();
-        let with_separator = PathBuf::from(format!("{}{}", root.display(), std::path::MAIN_SEPARATOR));
+        let with_separator =
+            PathBuf::from(format!("{}{}", root.display(), std::path::MAIN_SEPARATOR));
 
         assert!(same_path(&root, &with_separator));
     }
