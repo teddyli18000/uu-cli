@@ -300,9 +300,7 @@ mod tests {
     #[test]
     fn invalid_status_is_protocol_error() {
         let mut decoder = CompletionDecoder::new("nonce").unwrap();
-        decoder
-            .push(b"\x1b]7770;UUCLI;nonce;BEGIN\x07")
-            .unwrap();
+        decoder.push(b"\x1b]7770;UUCLI;nonce;BEGIN\x07").unwrap();
         let err = decoder
             .push(b"out\x1b]7770;UUCLI;nonce;END;nope\x07")
             .unwrap_err()
