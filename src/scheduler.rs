@@ -61,7 +61,11 @@ impl Scheduler {
 
     /// Finish a job that is known to have completed. If work is queued for the
     /// same device, the worker is immediately leased to the oldest queued job.
-    pub fn finish(&mut self, worker_id: &str, job_id: &str) -> Result<Option<Lease>, ScheduleError> {
+    pub fn finish(
+        &mut self,
+        worker_id: &str,
+        job_id: &str,
+    ) -> Result<Option<Lease>, ScheduleError> {
         self.release_known_job(worker_id, job_id, WorkerState::Idle)?;
         self.dispatch_next(worker_id)
     }
@@ -88,9 +92,7 @@ impl Scheduler {
     }
 
     pub fn queued_for(&self, device_identity: &str) -> usize {
-        self.queues
-            .get(device_identity)
-            .map_or(0, VecDeque::len)
+        self.queues.get(device_identity).map_or(0, VecDeque::len)
     }
 
     fn idle_worker_for(&self, device_identity: &str) -> Option<String> {
