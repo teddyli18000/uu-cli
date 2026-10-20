@@ -375,10 +375,11 @@ fn run_git_bash_attached_terminal(identity: AttachIdentity) -> Result<u8, Box<dy
     let child_stdin = child.stdin.take().ok_or("Git Bash stdin was not piped")?;
     let child_stdout = child.stdout.take().ok_or("Git Bash stdout was not piped")?;
     let child_stderr = child.stderr.take().ok_or("Git Bash stderr was not piped")?;
+    let input_identity = identity.clone();
     let _input_relay = thread::Builder::new()
         .name("fake-uuyc-git-bash-input".to_owned())
         .spawn(move || {
-            if let Err(error) = forward_conpty_input(io::stdin(), child_stdin, identity.clone()) {
+            if let Err(error) = forward_conpty_input(io::stdin(), child_stdin, input_identity) {
                 eprintln!("fake-uuyc: Git Bash input relay failed: {error}");
             }
         })?;
@@ -532,7 +533,7 @@ fn dispatch_bash_line<W: Write>(
         output.write_all(b"\n")?;
     }
     output.flush()?;
-    let mut forwarded = line.clone();
+    let mut forwarded = line.to_vec();
     if terminated {
         forwarded.push(b'\n');
     }
