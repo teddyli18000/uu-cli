@@ -363,10 +363,7 @@ fn run_remote(
             }
 
             let live = snapshot.live_sessions_for(&binding.device_identity);
-            if config.forget_missing_owned_workers(
-                &binding.device_identity,
-                live.iter().copied(),
-            ) {
+            if config.forget_missing_owned_workers(&binding.device_identity, live.iter().copied()) {
                 store.save(config)?;
             }
 
@@ -404,9 +401,7 @@ fn run_remote(
                         return normalize_exit_code(result.exit_code);
                     }
                     Err(error) if error.is_unknown() => {
-                        bail!(
-                            "{error}; not retrying because the command may already be running"
-                        );
+                        bail!("{error}; not retrying because the command may already be running");
                     }
                     Err(error) => {
                         lease.complete()?;
@@ -506,7 +501,9 @@ mod tests {
             "主控端版本过低，被控端不再兼容此协议版本"
         ));
         assert!(needs_terminal_activation("terminal channel not active"));
-        assert!(!needs_terminal_activation("Main application is not running"));
+        assert!(!needs_terminal_activation(
+            "Main application is not running"
+        ));
         assert!(!needs_terminal_activation("device is offline"));
     }
 }
