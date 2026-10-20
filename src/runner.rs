@@ -117,6 +117,8 @@ where
     O: Write + ?Sized,
 {
     let mut decoder = CompletionDecoder::new(nonce).map_err(JobRunError::Preparation)?;
+    #[cfg(any(windows, test))]
+    let mut conpty_dsr = ConPtyDsrHandshake::default();
 
     writer
         .write_all(wrapped.as_bytes())
@@ -132,6 +134,17 @@ where
             .map_err(JobRunError::Unknown)?;
 
         if read == 0 {
+            #[cfg(any(windows, test))]
+            let trailing = {
+                let pending = decoder
+                    .push(&conpty_dsr.finish())
+                    .context("invalid remote job framing")
+                    .map_err(JobRunError::Unknown)?;
+                let mut trailing = pending;
+                trailing.extend(decoder.finish_without_marker());
+                trailing
+            };
+            #[cfg(not(any(windows, test)))]
             let trailing = decoder.finish_without_marker();
             write_visible(output, &trailing, "failed to stream final remote output")?;
             return Err(JobRunError::Unknown(anyhow!(
@@ -139,6 +152,11 @@ where
             )));
         }
 
+        #[cfg(any(windows, test))]
+        let visible = decode_job_bytes(&mut decoder, &mut conpty_dsr, writer, &buffer[..read])
+            .context("invalid remote job framing or ConPTY cursor handshake")
+            .map_err(JobRunError::Unknown)?;
+        #[cfg(not(any(windows, test)))]
         let visible = decoder
             .push(&buffer[..read])
             .context("invalid remote job framing")
@@ -203,6 +221,8 @@ where
 {
     let wrapped = wrap_job(remote_root, shell_command, nonce).map_err(JobRunError::Preparation)?;
     let mut decoder = CompletionDecoder::new(nonce).map_err(JobRunError::Preparation)?;
+    #[cfg(any(windows, test))]
+    let mut conpty_dsr = ConPtyDsrHandshake::default();
 
     writer
         .write_all(wrapped.as_bytes())
@@ -249,6 +269,11 @@ where
             .map_err(JobRunError::Unknown)?
         {
             PumpRead::Data(bytes) => {
+                #[cfg(any(windows, test))]
+                let visible = decode_job_bytes(&mut decoder, &mut conpty_dsr, writer, &bytes)
+                    .context("invalid remote job framing or ConPTY cursor handshake")
+                    .map_err(JobRunError::Unknown)?;
+                #[cfg(not(any(windows, test)))]
                 let visible = decoder
                     .push(&bytes)
                     .context("invalid remote job framing")
@@ -259,6 +284,17 @@ where
                 }
             }
             PumpRead::Eof => {
+                #[cfg(any(windows, test))]
+                let trailing = {
+                    let pending = decoder
+                        .push(&conpty_dsr.finish())
+                        .context("invalid remote job framing")
+                        .map_err(JobRunError::Unknown)?;
+                    let mut trailing = pending;
+                    trailing.extend(decoder.finish_without_marker());
+                    trailing
+                };
+                #[cfg(not(any(windows, test)))]
                 let trailing = decoder.finish_without_marker();
                 write_visible(output, &trailing, "failed to stream final remote output")?;
                 return Err(JobRunError::Unknown(anyhow!(
@@ -355,9 +391,33 @@ fn longest_suffix_prefix(bytes: &[u8], prefix: &[u8]) -> usize {
     0
 }
 
-/// Drain the brief ConPTY startup phase, answer its cursor query, and return
-/// non-query bytes so they can be replayed to the job framing decoder.
+/// Drain a ConPTY fixture during tests, answering cursor queries while
+/// preserving all other bytes for the job framing decoder.
 #[cfg(any(windows, test))]
+fn decode_job_bytes<W: Write + ?Sized>(
+    decoder: &mut CompletionDecoder,
+    handshake: &mut ConPtyDsrHandshake,
+    writer: &mut W,
+    bytes: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let mut visible = Vec::new();
+    let mut index = 0;
+
+    while index < bytes.len() && !decoder.started() {
+        let filtered = handshake.push(writer, &bytes[index..index + 1])?;
+        if !filtered.is_empty() {
+            visible.extend(decoder.push(&filtered)?);
+        }
+        index += 1;
+    }
+
+    if index < bytes.len() {
+        visible.extend(decoder.push(&bytes[index..])?);
+    }
+    Ok(visible)
+}
+
+#[cfg(test)]
 pub(crate) fn initialize_conpty(
     reader: &mut ReadPump,
     writer: &mut (impl Write + ?Sized),
@@ -447,14 +507,6 @@ impl ReadPump {
         self.read_event(Some(timeout))
     }
 
-    #[cfg(any(windows, test))]
-    pub(crate) fn prepend(&mut self, bytes: Vec<u8>) {
-        if !bytes.is_empty() {
-            let mut pending = bytes;
-            pending.extend_from_slice(&self.pending);
-            self.pending = pending;
-        }
-    }
 
     fn read_event(&mut self, timeout: Option<Duration>) -> io::Result<PumpRead> {
         if !self.pending.is_empty() {
@@ -734,6 +786,35 @@ mod tests {
         assert_eq!(result.unwrap().exit_code, 0);
         assert_eq!(output, b"ready");
         assert!(all.lock().unwrap().ends_with(b"typed\x04\x03"));
+    }
+
+    #[test]
+    fn answers_startup_dsr_before_begin_and_preserves_remote_dsr_after_begin() {
+        let remote = b"\x1b[6nnoise\x1b]7770;UUCLI;abc123;BEGIN\x07payload\x1b[6n\x1b]7770;UUCLI;abc123;END;0\x07";
+        let mut reader = Cursor::new(remote.to_vec());
+        let mut writer = Vec::new();
+        let mut output = Vec::new();
+
+        let result = run_framed_job_with_nonce(
+            &mut reader,
+            &mut writer,
+            &mut output,
+            "/root",
+            "printf payload",
+            "abc123",
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(output, b"payload\x1b[6n");
+        assert!(writer.ends_with(CONPTY_CURSOR_REPLY));
+        assert_eq!(
+            writer
+                .windows(CONPTY_CURSOR_REPLY.len())
+                .filter(|window| *window == CONPTY_CURSOR_REPLY)
+                .count(),
+            1
+        );
     }
 
     #[test]
