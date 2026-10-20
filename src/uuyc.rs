@@ -42,11 +42,7 @@ impl OfficialCli {
     }
 
     pub fn list_devices(&self) -> Result<Vec<DeviceInfo>> {
-        let output = self.run([
-            OsStr::new("device"),
-            OsStr::new("list"),
-            OsStr::new("--json"),
-        ])?;
+        let output = self.run([OsStr::new("device"), OsStr::new("list")])?;
         parse_device_output(&output)
     }
 
