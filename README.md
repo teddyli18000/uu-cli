@@ -18,8 +18,8 @@ uu "source .venv/bin/activate && pytest -q"
 文件传输：
 
 ```powershell
-uu put .\main.py remote/main.py
-uu get remote/result.csv .\result.csv
+uu put .\main.py ~/aic/main.py
+uu get ~/aic/result.csv .\result.csv
 ```
 
 首次配置/诊断最多保留：
@@ -30,12 +30,6 @@ uu list
 ```
 
 正常情况下 Codex 不需要使用 `bind/list`。
-
-如果远端命令本身恰好叫 `put/get/bind/list`，使用标准 escape：
-
-```powershell
-uu -- <remote command...>
-```
 
 ## 核心模型
 
@@ -49,8 +43,6 @@ uu -- <remote command...>
 
 用户通过官方 UU 手工打开 Terminal；`uu-cli` 自动发现这些已有 session，把被允许使用的 Terminal 当成执行槽。开 1 个 Terminal 就有 1 个 worker，开 3 个就可以让最多 3 个前台 job 并行。
 
-worker pool 属于远端设备，不属于某个 workspace。同一台设备可以服务多个本地 workspace；每条命令都从自己 workspace 的 remote root 开始，所以不会因为共享 Terminal 而混项目。
-
 Terminal 本身不属于 Codex，也不作为长期 shell 上下文。具体某条命令落到哪个 session，由 `uu-cli` 内部调度。
 
 ## 第一次使用
@@ -63,28 +55,15 @@ Terminal 本身不属于 Codex，也不作为长期 shell 上下文。具体某�
 uu git status
 ```
 
-如果还没有 binding，`uu-cli` 会自动确定 workspace、等待/发现用户打开的 Terminal，并只在真正有歧义时做一次很短的人类选择。
+如果还没有 binding，`uu-cli` 会自动确定 workspace、发现用户打开的 Terminal，并在需要时做一次很短的人类选择。
 
 - Git 仓库默认使用 Git root；
-- 只有一台明确设备时不要求用户输入 deviceId；
-- 多台设备同时可用时，弹一个简单选择器；
-- remote root 默认可取所选 Terminal 当前 `pwd`，Enter 接受或输入修改；
+- 只有一台明确设备时尽量自动完成；
+- 多台设备同时有 Terminal 时，弹一个简单 PowerShell 选择器；
+- 用户只选择友好设备名，不接触裸 `deviceId`；
 - binding 完成后，原命令继续执行，不要求重跑。
 
-如果 `uu` 正在等一个 Terminal，它会明确提示你“接下来打开的匹配 Terminal 会用于本次请求”。你此时在官方 UU 打开它，就直接继续这个请求，不再弹第二轮重复确认。
-
-## 后来再开 Terminal
-
-如果没有命令正在等待，新 Terminal 不会被静默接管，而是只弹一次很短的确认：
-
-```text
-AIC-Car-1 新终端已打开
-[Enter] 交给 uu-cli    [N] 保留手动使用
-```
-
-`N`、Esc、关闭或取消都表示不使用。v1 不做“以后这个设备所有新 Terminal 都自动接管”的永久开关，避免你未来手动开的 Terminal 被抢走。
-
-同一设备多个 workspace 共享一个 worker pool，所以不会再问“这个 Terminal 属于哪个 workspace”。短时间打开多个 Terminal 时，应在同一个交互窗口里顺序/批量处理，避免连续弹窗。
+如果后续新打开 Terminal，`uu-cli` 应自动发现。归属明确时尽量自动处理；有歧义或无法判断是否供 uu-cli 使用时，再弹一个几秒内能完成的 PowerShell 选择。
 
 ## 多个 Terminal
 
@@ -92,9 +71,9 @@ AIC-Car-1 新终端已打开
 
 ```text
 AIC-Car-1
-  worker 1  busy
-  worker 2  idle
-  worker 3  idle
+  terminal 1  busy
+  terminal 2  idle
+  terminal 3  idle
 ```
 
 `uu-cli` 自动调度空闲 worker。长任务持续占用自己的 terminal，并实时把输出返回给调用它的 Codex；其他命令使用其他空闲 worker。没有空闲 worker 时等待。
@@ -117,19 +96,7 @@ uu python main.py
 uu "cd src && source .venv/bin/activate && python main.py"
 ```
 
-每条普通 `uu` job 都从当前 workspace 绑定的 `remote root` 开始，并应尽量隔离本次 job 的 shell-local 变化，避免 `cd/export/source/exit/exec` 意外影响后续 job。
-
-后续 Codex Skill 会明确写出这条规则。
-
-## 交互不会污染命令流
-
-人类选择和远端 job I/O 必须分离。
-
-- 正常 `uu` stdout 尽量只有远端输出；
-- 工具诊断走 stderr；
-- 需要你选择设备/Terminal 时，使用独立的短 PowerShell/console 交互；
-- 选择器不能偷走远端命令 stdin，也不能把菜单混进 Codex 正在解析的输出；
-- 不要求用户额外安装 PowerShell 7：可以优先使用 `pwsh`，不存在时必须有系统自带或原生 fallback。
+每条普通 `uu` job 都从当前 workspace 绑定的 `remote root` 开始。后续 Codex Skill 会明确写出这条规则。
 
 ## 不干扰官方 UU
 
@@ -140,23 +107,19 @@ uu "cd src && source .venv/bin/activate && python main.py"
 - 修改/注入/patch 官方 UU 或 GameViewer；
 - 改 UU 登录、账号、设备、更新、启动配置；
 - 保存密码、Token、Cookie 等认证材料；
-- kill、rename、close 或偷偷接管用户没有交给 uu-cli 的 Terminal；
+- kill、rename 或偷偷接管用户没有交给 uu-cli 的 Terminal；
 - 改变用户正在手工使用的 Terminal；
 - 因自身崩溃、升级或卸载影响 UU 的正常使用。
 
-用户明确把某个 Terminal 交给 uu-cli 后，它才可以作为专用 worker。若某种 attach/reuse 方法会干扰未授权的官方 UU 窗口，就必须换更安全的方案。
-
-## 异常时宁可停，不重复执行
-
-命令一旦已经发到远端，连接异常后不会自动换 Terminal 重跑。
-
-如果无法确认旧命令是否结束，结果会明确标记为未知；对应 worker 也不能马上被当成 idle 使用。宁可等待、重新开一个 Terminal，也不能重复执行有副作用的命令或把新命令塞进可能仍繁忙的 PTY。
+如果某种 attach/reuse 方法会明显干扰官方 UI，就必须换更安全的方案或只使用用户明确提供给 uu-cli 的专用 Terminal。
 
 ## 尽可能任何正常电脑都能用
 
 目标不是只在开发机可用，而是：**只要官方 UU Remote 本身能在该 Windows 电脑正常工作，uu-cli 就应尽量做到安装后直接可用。**
 
-因此实现不能硬编码开发机路径、用户名、盘符、deviceId、session 名或精确安装位置；应自动发现官方 UU 和所需组件，尽量使用普通用户权限，不要求用户额外安装 Python/Rust/Node/PowerShell 7/WSL 等开发环境。
+因此实现不能硬编码开发机路径、用户名、盘符、deviceId 或精确安装目录；应自动发现官方 UU 和所需组件，尽量使用普通用户权限，不要求用户额外安装 Python/Rust/Node/WSL 等开发环境。
+
+发布前必须在非开发机或干净用户环境验证从安装、首次绑定到实际执行的完整流程。
 
 ## 自动发现与占用
 
@@ -167,17 +130,19 @@ uu "cd src && source .venv/bin/activate && python main.py"
 - 自动发现新开的官方 Terminal；
 - 空闲时 CPU 接近 0，不高频轮询；
 - 无 tray、额外 GUI 或常驻可见 console；
-- 只有真正需要用户选择时才弹短交互；
+- 只有真正需要用户选择时才弹短 PowerShell 交互；
 - 用户不需要手工管理第二个服务；
 - 不拖累 UU 的启动、退出和升级。
 
-## CI-first
+## 官方下载入口
 
-能在干净 Windows VM 上验证的事情，优先交给 GitHub Actions，而不是反复折腾开发者主力电脑。
+CI 和兼容性测试如需下载安装官方 UU Remote，应从网易官方公开入口获取：
 
-CI 应负责 build/test、故障路径、多 worker 状态、installer、clean install/upgrade/uninstall 等；需要官方 UU 安装包时，只从网易/UU 官方公开来源临时下载并验证签名/版本/hash，不把官方安装包提交或重新分发到仓库。
+```text
+https://uuyc.163.com/download/
+```
 
-真实 UU 登录、真实 Terminal attach、远端设备、长任务、Ctrl+C、真实文件通道等 CI 无法证明的部分，再做最小必要实机验收。
+不要把官方安装包提交或重新分发进本仓库；运行安装包前应验证来源、Authenticode 签名、版本和 hash。
 
 ## 当前 Windows UU 限制
 
@@ -208,7 +173,7 @@ CI 应负责 build/test、故障路径、多 worker 状态、installer、clean i
 - [DESIGN.md](DESIGN.md)：产品契约与边界
 - [ARCHITECTURE.md](ARCHITECTURE.md)：workspace / device / terminal pool 的概念架构
 - [IMPLEMENTATION.md](IMPLEMENTATION.md)：实现目标、兼容性和验收契约；不规定具体技术方案
-- [TESTING.md](TESTING.md)：CI-first 与真实 UU 分层验证策略
+- [TESTING.md](TESTING.md)：CI-first 验证策略和实机边界
 - [ROADMAP.md](ROADMAP.md)：阶段目标与验收
 - [AGENTS.md](AGENTS.md)：给实现 Agent 的硬规则
 - `docs/`、`proto/terminal.proto`：Windows UU terminal 互操作研究
