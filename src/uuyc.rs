@@ -203,7 +203,9 @@ mod tests {
     fn tolerates_non_json_noise_around_wrapper() {
         let output = Output {
             status: status(0),
-            stdout: b"notice\n{\"success\":true,\"data\":{\"items\":[],\"total\":0},\"error\":null}\n".to_vec(),
+            stdout:
+                b"notice\n{\"success\":true,\"data\":{\"items\":[],\"total\":0},\"error\":null}\n"
+                    .to_vec(),
             stderr: vec![],
         };
         assert!(parse_session_output(&output).unwrap().is_empty());
