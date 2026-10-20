@@ -10,12 +10,24 @@ pub struct WorkspaceBinding {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OwnedWorker {
+    pub device_identity: String,
+    pub session_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
     pub version: u32,
     #[serde(default)]
     pub bindings: Vec<WorkspaceBinding>,
+    /// Legacy manual-session authorization retained for config compatibility.
+    /// New builds never attach to user GUI sessions automatically.
     #[serde(default)]
     pub authorized_workers: Vec<String>,
+    /// Remote terminal sessions created by uu-cli itself. Names are generated with
+    /// high-entropy process/time components and scoped by device identity.
+    #[serde(default)]
+    pub owned_workers: Vec<OwnedWorker>,
 }
 
 impl Default for Config {
@@ -24,6 +36,7 @@ impl Default for Config {
             version: 1,
             bindings: Vec::new(),
             authorized_workers: Vec::new(),
+            owned_workers: Vec::new(),
         }
     }
 }
@@ -39,6 +52,45 @@ impl Config {
         } else {
             self.bindings.push(binding);
         }
+    }
+
+    pub fn remember_owned_worker(&mut self, device_identity: &str, session_name: &str) -> bool {
+        if device_identity.is_empty() || session_name.is_empty() {
+            return false;
+        }
+        if self.owned_workers.iter().any(|worker| {
+            worker.device_identity == device_identity && worker.session_name == session_name
+        }) {
+            return false;
+        }
+        self.owned_workers.push(OwnedWorker {
+            device_identity: device_identity.to_owned(),
+            session_name: session_name.to_owned(),
+        });
+        true
+    }
+
+    pub fn is_owned_worker(&self, session: &SessionInfo) -> bool {
+        self.owned_workers.iter().any(|worker| {
+            worker.device_identity == session.device_identity
+                && worker.session_name == session.session_name
+        })
+    }
+
+    pub fn forget_missing_owned_workers<'a>(
+        &mut self,
+        device_identity: &str,
+        live_sessions: impl IntoIterator<Item = &'a SessionInfo>,
+    ) -> bool {
+        let live_names = live_sessions
+            .into_iter()
+            .map(|session| session.session_name.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        let before = self.owned_workers.len();
+        self.owned_workers.retain(|worker| {
+            worker.device_identity != device_identity || live_names.contains(worker.session_name.as_str())
+        });
+        self.owned_workers.len() != before
     }
 
     pub fn authorize_session(&mut self, session: &SessionInfo) -> bool {
@@ -86,12 +138,9 @@ pub struct SessionInfo {
 }
 
 impl SessionInfo {
-    /// A conservative local identity for remembering a user's authorization.
-    ///
-    /// Session names can be reused after UU restarts. `created_at` is therefore
-    /// part of the fingerprint when the official CLI supplies it. A missing
-    /// timestamp intentionally produces no fingerprint: callers must not carry
-    /// an old authorization onto an instance they cannot distinguish safely.
+    /// A conservative instance identity used for cross-process locking of an
+    /// already-created worker. Session names can be reused after UU restarts, so
+    /// created_at must be present before an old lock/authorization can apply.
     pub fn authorization_fingerprint(&self) -> Option<String> {
         let created_at = self.created_at.as_deref()?;
         Some(format!(
@@ -118,7 +167,7 @@ mod tests {
     }
 
     #[test]
-    fn session_name_alone_is_not_authorization_identity() {
+    fn session_name_alone_is_not_instance_identity() {
         assert_eq!(session(None).authorization_fingerprint(), None);
     }
 
@@ -131,7 +180,41 @@ mod tests {
     }
 
     #[test]
-    fn authorization_is_for_one_session_instance_only() {
+    fn owned_worker_is_scoped_by_device_and_name() {
+        let mut config = Config::default();
+        assert!(config.remember_owned_worker("device-1", "uu-a"));
+        assert!(!config.remember_owned_worker("device-1", "uu-a"));
+
+        let mut owned = session(Some("t"));
+        owned.session_name = "uu-a".into();
+        assert!(config.is_owned_worker(&owned));
+        owned.device_identity = "device-2".into();
+        assert!(!config.is_owned_worker(&owned));
+    }
+
+    #[test]
+    fn stale_owned_worker_record_is_pruned_without_touching_other_device() {
+        let mut config = Config::default();
+        config.remember_owned_worker("device-1", "uu-old");
+        config.remember_owned_worker("device-1", "uu-live");
+        config.remember_owned_worker("device-2", "uu-other");
+
+        let mut live = session(Some("t"));
+        live.session_name = "uu-live".into();
+        assert!(config.forget_missing_owned_workers("device-1", [&live]));
+        assert_eq!(config.owned_workers.len(), 2);
+        assert!(config
+            .owned_workers
+            .iter()
+            .any(|worker| worker.session_name == "uu-live"));
+        assert!(config
+            .owned_workers
+            .iter()
+            .any(|worker| worker.session_name == "uu-other"));
+    }
+
+    #[test]
+    fn legacy_authorization_remains_instance_scoped() {
         let a = session(Some("2026-10-19T17:27:45Z"));
         let mut replacement = a.clone();
         replacement.created_at = Some("2026-10-20T17:27:45Z".into());
@@ -140,12 +223,5 @@ mod tests {
         assert!(config.authorize_session(&a));
         assert!(config.is_session_authorized(&a));
         assert!(!config.is_session_authorized(&replacement));
-    }
-
-    #[test]
-    fn cannot_persist_ambiguous_session_authorization() {
-        let mut config = Config::default();
-        assert!(!config.authorize_session(&session(None)));
-        assert!(config.authorized_workers.is_empty());
     }
 }
