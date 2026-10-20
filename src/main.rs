@@ -4,6 +4,7 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 use uu_cli::cli::{self, Command};
 use uu_cli::config::ConfigStore;
+use uu_cli::uuyc::OfficialCli;
 use uu_cli::workspace::{resolve_binding, suggest_root};
 
 fn main() -> ExitCode {
@@ -37,6 +38,7 @@ fn run() -> Result<u8> {
                 println!("Remote     unbound");
                 println!("Workers    0");
             }
+            print_official_uu_status();
             Ok(0)
         }
         Command::Bind => {
@@ -50,6 +52,24 @@ fn run() -> Result<u8> {
             bail!("file transfer is not implemented in this bootstrap build")
         }
         Command::Run { argv } => run_remote_placeholder(&config, &cwd, argv),
+    }
+}
+
+fn print_official_uu_status() {
+    match OfficialCli::locate() {
+        Ok(cli) => match cli.version() {
+            Ok(version) => {
+                let status = version.message.as_deref().unwrap_or("available");
+                println!(
+                    "UU         {} · {} · {}",
+                    version.cli_version,
+                    cli.path().display(),
+                    status
+                );
+            }
+            Err(error) => println!("UU         found · incompatible ({error})"),
+        },
+        Err(_) => println!("UU         not found"),
     }
 }
 
