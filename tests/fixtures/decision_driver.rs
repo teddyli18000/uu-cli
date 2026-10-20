@@ -252,6 +252,9 @@ mod windows {
             "escape" => write_keys(input, [(0x1b, 27)]),
             "close" => {
                 let window = unsafe { GetConsoleWindow() };
+                unsafe {
+                    FreeConsole();
+                }
                 if window.is_null() || unsafe { PostMessageW(window, 0x0010, 0, 0) } == 0 {
                     Err(io::Error::last_os_error())
                 } else {
@@ -287,6 +290,9 @@ mod windows {
             std::fs::write(Path::new(&args[2]), &captured)?;
             if captured.contains(&args[3]) {
                 action(input, &args[4])?;
+                if args[4] == "close" {
+                    return Ok(());
+                }
                 thread::sleep(Duration::from_millis(100));
                 if let Ok(final_screen) = screen(output) {
                     std::fs::write(Path::new(&args[2]), final_screen)?;
