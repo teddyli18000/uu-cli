@@ -1,8 +1,8 @@
 #![cfg(windows)]
 
 use crate::runner::{
-    run_framed_job, run_framed_job_with_input, run_framed_pwd_probe, JobInput, JobResult,
-    JobRunError, ReadPump,
+    initialize_conpty, run_framed_job, run_framed_job_with_input, run_framed_pwd_probe, JobInput,
+    JobResult, JobRunError, ReadPump,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -53,8 +53,14 @@ impl TermPty {
         drop(slave);
         let mut reader = ReadPump::spawn(raw_reader);
 
+        // Answer ConPTY's startup cursor query before waiting for the attached
+        // UU CLI to emit its first usable terminal output.
+        let (startup_output, _) =
+            initialize_conpty(&mut reader, &mut writer, Duration::from_millis(250))
+                .context("failed to initialize local ConPTY cursor state")?;
+        reader.prepend(startup_output);
+
         // Catch argument/ownership failures before command bytes can be sent.
-        thread::sleep(Duration::from_millis(250));
         let status = match child.try_wait() {
             Ok(status) => status,
             Err(error) => {
@@ -140,7 +146,7 @@ impl TermPty {
         let text = String::from_utf8(output).map_err(|error| {
             JobRunError::Completed(anyhow!("remote pwd output is not valid UTF-8: {error}"))
         })?;
-        let path = text.trim_end_matches(|character| character == '\r' || character == '\n');
+        let path = text.trim_end_matches(['\r', '\n']);
         if path.is_empty() {
             return Err(JobRunError::Completed(anyhow!(
                 "remote pwd returned an empty path"
@@ -285,13 +291,20 @@ mod tests {
         command.args(["conpty_child_writes_osc", "--nocapture"]);
         command.env("UUCLI_CONPTY_OSC_CHILD", "1");
         let mut child = slave.spawn_command(command).unwrap();
-        let writer = master.take_writer().unwrap();
+        let mut writer = master.take_writer().unwrap();
         let reader = master.try_clone_reader().unwrap();
         drop(slave);
         let mut reader = ReadPump::spawn(reader);
 
+        let (startup_output, cursor_queries) =
+            initialize_conpty(&mut reader, &mut writer, Duration::from_millis(500)).unwrap();
+        assert!(
+            cursor_queries > 0,
+            "ConPTY startup did not emit the cursor query needed for the handshake"
+        );
+
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut observed = Vec::new();
+        let mut observed = startup_output;
         while Instant::now() < deadline
             && !observed.windows(PROBE.len()).any(|window| window == PROBE)
         {

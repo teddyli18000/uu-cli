@@ -4,9 +4,16 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::thread::{self, JoinHandle};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+#[cfg(any(windows, test))]
+use std::sync::mpsc;
+#[cfg(any(windows, test))]
+use std::thread;
+#[cfg(any(windows, test))]
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(any(windows, test))]
+use std::time::Instant;
 
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -288,6 +295,95 @@ pub(crate) enum PumpRead {
     Timeout,
 }
 
+#[cfg(any(windows, test))]
+const CONPTY_CURSOR_QUERY: &[u8] = b"\x1b[6n";
+#[cfg(any(windows, test))]
+const CONPTY_CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
+
+/// Handles the initial cursor-position query emitted by Windows ConPTY before
+/// normal terminal traffic. Other startup bytes are preserved for the job
+/// decoder. The reply uses the known origin of this newly opened pseudoconsole.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct ConPtyDsrHandshake {
+    pending: Vec<u8>,
+    cursor_queries: usize,
+}
+
+#[cfg(any(windows, test))]
+impl ConPtyDsrHandshake {
+    fn push<W: Write + ?Sized>(&mut self, writer: &mut W, chunk: &[u8]) -> io::Result<Vec<u8>> {
+        self.pending.extend_from_slice(chunk);
+        let mut output = Vec::new();
+
+        loop {
+            if let Some(start) = self
+                .pending
+                .windows(CONPTY_CURSOR_QUERY.len())
+                .position(|window| window == CONPTY_CURSOR_QUERY)
+            {
+                output.extend_from_slice(&self.pending[..start]);
+                self.pending
+                    .drain(..start + CONPTY_CURSOR_QUERY.len());
+                writer.write_all(CONPTY_CURSOR_REPLY)?;
+                writer.flush()?;
+                self.cursor_queries += 1;
+                continue;
+            }
+
+            let keep = longest_suffix_prefix(&self.pending, CONPTY_CURSOR_QUERY);
+            let emit = self.pending.len().saturating_sub(keep);
+            output.extend(self.pending.drain(..emit));
+            break;
+        }
+
+        Ok(output)
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn longest_suffix_prefix(bytes: &[u8], prefix: &[u8]) -> usize {
+    let max = bytes.len().min(prefix.len().saturating_sub(1));
+    for length in (1..=max).rev() {
+        if bytes[bytes.len() - length..] == prefix[..length] {
+            return length;
+        }
+    }
+    0
+}
+
+/// Drain the brief ConPTY startup phase, answer its cursor query, and return
+/// non-query bytes so they can be replayed to the job framing decoder.
+#[cfg(any(windows, test))]
+pub(crate) fn initialize_conpty(
+    reader: &mut ReadPump,
+    writer: &mut (impl Write + ?Sized),
+    wait: Duration,
+) -> io::Result<(Vec<u8>, usize)> {
+    let deadline = Instant::now() + wait;
+    let mut handshake = ConPtyDsrHandshake::default();
+    let mut output = Vec::new();
+
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let poll = remaining.min(Duration::from_millis(25));
+        match reader.read_event_timeout(poll)? {
+            PumpRead::Data(bytes) => output.extend(handshake.push(writer, &bytes)?),
+            PumpRead::Eof => {
+                output.extend(handshake.finish());
+                return Ok((output, handshake.cursor_queries));
+            }
+            PumpRead::Timeout => {}
+        }
+    }
+
+    output.extend(handshake.finish());
+    Ok((output, handshake.cursor_queries))
+}
 /// A single, demand-driven PTY reader. It reads at most one chunk per request,
 /// allowing a completed job to reuse the same terminal without a blocked
 /// per-job thread. Shutdown is bounded in case an underlying reader ignores
@@ -295,7 +391,9 @@ pub(crate) enum PumpRead {
 pub(crate) struct ReadPump {
     request_tx: Option<SyncSender<()>>,
     response_rx: Option<Receiver<io::Result<Option<Vec<u8>>>>>,
+    #[cfg(any(windows, test))]
     thread: Option<JoinHandle<()>>,
+    #[cfg(any(windows, test))]
     done_rx: Option<Receiver<()>>,
     request_pending: bool,
     pending: Vec<u8>,
@@ -303,6 +401,7 @@ pub(crate) struct ReadPump {
 }
 
 impl ReadPump {
+    #[cfg(any(windows, test))]
     pub(crate) fn spawn<R>(mut reader: R) -> Self
     where
         R: Read + Send + 'static,
@@ -335,7 +434,9 @@ impl ReadPump {
         Self {
             request_tx: Some(request_tx),
             response_rx: Some(response_rx),
+            #[cfg(any(windows, test))]
             thread: Some(thread),
+            #[cfg(any(windows, test))]
             done_rx: Some(done_rx),
             request_pending: false,
             pending: Vec::new(),
@@ -345,6 +446,15 @@ impl ReadPump {
 
     pub(crate) fn read_event_timeout(&mut self, timeout: Duration) -> io::Result<PumpRead> {
         self.read_event(Some(timeout))
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn prepend(&mut self, bytes: Vec<u8>) {
+        if !bytes.is_empty() {
+            let mut pending = bytes;
+            pending.extend_from_slice(&self.pending);
+            self.pending = pending;
+        }
     }
 
     fn read_event(&mut self, timeout: Option<Duration>) -> io::Result<PumpRead> {
@@ -405,6 +515,7 @@ impl ReadPump {
         }
     }
 
+    #[cfg(any(windows, test))]
     pub(crate) fn shutdown_and_join(&mut self) {
         self.request_tx.take();
         self.response_rx.take();
@@ -624,6 +735,27 @@ mod tests {
         assert_eq!(result.unwrap().exit_code, 0);
         assert_eq!(output, b"ready");
         assert!(all.lock().unwrap().ends_with(b"typed\x04\x03"));
+    }
+
+    #[test]
+    fn conpty_startup_answers_split_cursor_query_and_preserves_other_bytes() {
+        let (remote_tx, remote_rx) = mpsc::channel();
+        let mut reader = ReadPump::spawn(ChannelReader {
+            chunks: remote_rx,
+            current: Cursor::new(Vec::new()),
+        });
+        remote_tx.send(b"prefix\x1b[6".to_vec()).unwrap();
+        remote_tx.send(b"nSuffix".to_vec()).unwrap();
+        drop(remote_tx);
+
+        let mut writer = Vec::new();
+        let (visible, queries) =
+            initialize_conpty(&mut reader, &mut writer, Duration::from_millis(100)).unwrap();
+        reader.shutdown_and_join();
+
+        assert_eq!(visible, b"prefixSuffix");
+        assert_eq!(queries, 1);
+        assert_eq!(writer, CONPTY_CURSOR_REPLY);
     }
 
     #[test]
