@@ -180,8 +180,14 @@ fn windows_cli_reports_an_unusable_component_without_dispatch() {
     let test = TestWorkspace::new();
     let broken = test.workspace.join("incompatible component.exe");
     fs::write(&broken, b"not a Windows executable").unwrap();
-    let output = uu_command(&test, &broken, "success").arg("list").output().unwrap();
+    let output = uu_command(&test, &broken, "success")
+        .arg("list")
+        .output()
+        .unwrap();
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("incompatible"));
-    assert!(!test.log_path.exists(), "diagnostics must not attach or dispatch");
+    assert!(
+        !test.log_path.exists(),
+        "diagnostics must not attach or dispatch"
+    );
 }
