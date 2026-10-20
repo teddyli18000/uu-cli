@@ -4,8 +4,15 @@ use std::fmt;
 use std::io::{self, Read, Write};
 use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
-use std::thread::{self, JoinHandle};
+#[cfg(any(windows, test))]
+use std::sync::mpsc;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+#[cfg(any(windows, test))]
+use std::thread;
+#[cfg(any(windows, test))]
+use std::thread::JoinHandle;
+#[cfg(test)]
+use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 static NONCE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -110,6 +117,8 @@ where
     O: Write + ?Sized,
 {
     let mut decoder = CompletionDecoder::new(nonce).map_err(JobRunError::Preparation)?;
+    #[cfg(any(windows, test))]
+    let mut conpty_dsr = ConPtyDsrHandshake::default();
 
     writer
         .write_all(wrapped.as_bytes())
@@ -125,6 +134,17 @@ where
             .map_err(JobRunError::Unknown)?;
 
         if read == 0 {
+            #[cfg(any(windows, test))]
+            let trailing = {
+                let pending = decoder
+                    .push(&conpty_dsr.finish())
+                    .context("invalid remote job framing")
+                    .map_err(JobRunError::Unknown)?;
+                let mut trailing = pending;
+                trailing.extend(decoder.finish_without_marker());
+                trailing
+            };
+            #[cfg(not(any(windows, test)))]
             let trailing = decoder.finish_without_marker();
             write_visible(output, &trailing, "failed to stream final remote output")?;
             return Err(JobRunError::Unknown(anyhow!(
@@ -132,6 +152,11 @@ where
             )));
         }
 
+        #[cfg(any(windows, test))]
+        let visible = decode_job_bytes(&mut decoder, &mut conpty_dsr, writer, &buffer[..read])
+            .context("invalid remote job framing or ConPTY cursor handshake")
+            .map_err(JobRunError::Unknown)?;
+        #[cfg(not(any(windows, test)))]
         let visible = decoder
             .push(&buffer[..read])
             .context("invalid remote job framing")
@@ -196,6 +221,8 @@ where
 {
     let wrapped = wrap_job(remote_root, shell_command, nonce).map_err(JobRunError::Preparation)?;
     let mut decoder = CompletionDecoder::new(nonce).map_err(JobRunError::Preparation)?;
+    #[cfg(any(windows, test))]
+    let mut conpty_dsr = ConPtyDsrHandshake::default();
 
     writer
         .write_all(wrapped.as_bytes())
@@ -242,6 +269,11 @@ where
             .map_err(JobRunError::Unknown)?
         {
             PumpRead::Data(bytes) => {
+                #[cfg(any(windows, test))]
+                let visible = decode_job_bytes(&mut decoder, &mut conpty_dsr, writer, &bytes)
+                    .context("invalid remote job framing or ConPTY cursor handshake")
+                    .map_err(JobRunError::Unknown)?;
+                #[cfg(not(any(windows, test)))]
                 let visible = decoder
                     .push(&bytes)
                     .context("invalid remote job framing")
@@ -252,6 +284,17 @@ where
                 }
             }
             PumpRead::Eof => {
+                #[cfg(any(windows, test))]
+                let trailing = {
+                    let pending = decoder
+                        .push(&conpty_dsr.finish())
+                        .context("invalid remote job framing")
+                        .map_err(JobRunError::Unknown)?;
+                    let mut trailing = pending;
+                    trailing.extend(decoder.finish_without_marker());
+                    trailing
+                };
+                #[cfg(not(any(windows, test)))]
                 let trailing = decoder.finish_without_marker();
                 write_visible(output, &trailing, "failed to stream final remote output")?;
                 return Err(JobRunError::Unknown(anyhow!(
@@ -288,6 +331,119 @@ pub(crate) enum PumpRead {
     Timeout,
 }
 
+#[cfg(any(windows, test))]
+const CONPTY_CURSOR_QUERY: &[u8] = b"\x1b[6n";
+#[cfg(any(windows, test))]
+const CONPTY_CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
+
+/// Handles the initial cursor-position query emitted by Windows ConPTY before
+/// normal terminal traffic. Other startup bytes are preserved for the job
+/// decoder. The reply uses the known origin of this newly opened pseudoconsole.
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct ConPtyDsrHandshake {
+    pending: Vec<u8>,
+    cursor_queries: usize,
+}
+
+#[cfg(any(windows, test))]
+impl ConPtyDsrHandshake {
+    fn push<W: Write + ?Sized>(&mut self, writer: &mut W, chunk: &[u8]) -> io::Result<Vec<u8>> {
+        self.pending.extend_from_slice(chunk);
+        let mut output = Vec::new();
+
+        loop {
+            if let Some(start) = self
+                .pending
+                .windows(CONPTY_CURSOR_QUERY.len())
+                .position(|window| window == CONPTY_CURSOR_QUERY)
+            {
+                output.extend_from_slice(&self.pending[..start]);
+                self.pending.drain(..start + CONPTY_CURSOR_QUERY.len());
+                writer.write_all(CONPTY_CURSOR_REPLY)?;
+                writer.flush()?;
+                self.cursor_queries += 1;
+                continue;
+            }
+
+            let keep = longest_suffix_prefix(&self.pending, CONPTY_CURSOR_QUERY);
+            let emit = self.pending.len().saturating_sub(keep);
+            output.extend(self.pending.drain(..emit));
+            break;
+        }
+
+        Ok(output)
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.pending)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn longest_suffix_prefix(bytes: &[u8], prefix: &[u8]) -> usize {
+    let max = bytes.len().min(prefix.len().saturating_sub(1));
+    for length in (1..=max).rev() {
+        if bytes[bytes.len() - length..] == prefix[..length] {
+            return length;
+        }
+    }
+    0
+}
+
+/// Decode terminal bytes and answer ConPTY startup DSR queries until the
+/// remote job BEGIN marker has been recognized.
+#[cfg(any(windows, test))]
+fn decode_job_bytes<W: Write + ?Sized>(
+    decoder: &mut CompletionDecoder,
+    handshake: &mut ConPtyDsrHandshake,
+    writer: &mut W,
+    bytes: &[u8],
+) -> anyhow::Result<Vec<u8>> {
+    let mut visible = Vec::new();
+    let mut index = 0;
+
+    while index < bytes.len() && !decoder.started() {
+        let filtered = handshake.push(writer, &bytes[index..index + 1])?;
+        if !filtered.is_empty() {
+            visible.extend(decoder.push(&filtered)?);
+        }
+        index += 1;
+    }
+
+    if index < bytes.len() {
+        visible.extend(decoder.push(&bytes[index..])?);
+    }
+    Ok(visible)
+}
+
+/// Drain a ConPTY fixture in tests while preserving all bytes other than DSR queries.
+#[cfg(test)]
+pub(crate) fn initialize_conpty(
+    reader: &mut ReadPump,
+    writer: &mut (impl Write + ?Sized),
+    wait: Duration,
+) -> io::Result<(Vec<u8>, usize)> {
+    let deadline = Instant::now() + wait;
+    let mut handshake = ConPtyDsrHandshake::default();
+    let mut output = Vec::new();
+
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let poll = remaining.min(Duration::from_millis(25));
+        match reader.read_event_timeout(poll)? {
+            PumpRead::Data(bytes) => output.extend(handshake.push(writer, &bytes)?),
+            PumpRead::Eof => {
+                output.extend(handshake.finish());
+                return Ok((output, handshake.cursor_queries));
+            }
+            PumpRead::Timeout => {}
+        }
+    }
+
+    output.extend(handshake.finish());
+    Ok((output, handshake.cursor_queries))
+}
 /// A single, demand-driven PTY reader. It reads at most one chunk per request,
 /// allowing a completed job to reuse the same terminal without a blocked
 /// per-job thread. Shutdown is bounded in case an underlying reader ignores
@@ -295,7 +451,9 @@ pub(crate) enum PumpRead {
 pub(crate) struct ReadPump {
     request_tx: Option<SyncSender<()>>,
     response_rx: Option<Receiver<io::Result<Option<Vec<u8>>>>>,
+    #[cfg(any(windows, test))]
     thread: Option<JoinHandle<()>>,
+    #[cfg(any(windows, test))]
     done_rx: Option<Receiver<()>>,
     request_pending: bool,
     pending: Vec<u8>,
@@ -303,6 +461,7 @@ pub(crate) struct ReadPump {
 }
 
 impl ReadPump {
+    #[cfg(any(windows, test))]
     pub(crate) fn spawn<R>(mut reader: R) -> Self
     where
         R: Read + Send + 'static,
@@ -335,7 +494,9 @@ impl ReadPump {
         Self {
             request_tx: Some(request_tx),
             response_rx: Some(response_rx),
+            #[cfg(any(windows, test))]
             thread: Some(thread),
+            #[cfg(any(windows, test))]
             done_rx: Some(done_rx),
             request_pending: false,
             pending: Vec::new(),
@@ -346,6 +507,7 @@ impl ReadPump {
     pub(crate) fn read_event_timeout(&mut self, timeout: Duration) -> io::Result<PumpRead> {
         self.read_event(Some(timeout))
     }
+
 
     fn read_event(&mut self, timeout: Option<Duration>) -> io::Result<PumpRead> {
         if !self.pending.is_empty() {
@@ -405,6 +567,7 @@ impl ReadPump {
         }
     }
 
+    #[cfg(any(windows, test))]
     pub(crate) fn shutdown_and_join(&mut self) {
         self.request_tx.take();
         self.response_rx.take();
@@ -459,7 +622,7 @@ mod tests {
 
     #[test]
     fn streams_only_framed_user_output_and_returns_exit_code() {
-        let remote = b"old prompt and echoed wrapper\r\n\x1b]7770;UUCLI;abc123;BEGIN\x07hello\r\nworld\r\n\x1b]7770;UUCLI;abc123;END;7\x07next$ ";
+        let remote = b"old prompt and echoed wrapper\r\n\r\nUUCabc123Bhello\r\nworld\r\n\r\nUUCabc123E7Znext$ ";
         let mut reader = Cursor::new(remote.to_vec());
         let mut writer = Vec::new();
         let mut output = Vec::new();
@@ -479,13 +642,13 @@ mod tests {
         let sent = String::from_utf8(writer).unwrap();
         assert!(sent.contains("cd -- '/home/pi/aic'"));
         assert!(sent.contains("'python3 main.py'"));
-        assert!(sent.contains("UUCLI;abc123;BEGIN"));
-        assert!(sent.contains("UUCLI;abc123;END;%d"));
+        assert!(sent.contains("UUC' 'abc123' 'B"));
+        assert!(sent.contains("UUC' 'abc123' 'E"));
     }
 
     #[test]
     fn eof_after_start_is_unknown_and_preserves_partial_output() {
-        let remote = b"noise\x1b]7770;UUCLI;abc123;BEGIN\x07partial";
+        let remote = b"noise\r\nUUCabc123Bpartial";
         let mut reader = Cursor::new(remote.to_vec());
         let mut writer = Vec::new();
         let mut output = Vec::new();
@@ -594,14 +757,14 @@ mod tests {
         });
 
         let wrapper = writes_rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        assert!(String::from_utf8_lossy(&wrapper).contains("UUCLI;abc123;BEGIN"));
+        assert!(String::from_utf8_lossy(&wrapper).contains("UUC' 'abc123' 'B"));
 
         input_tx.send(JobInput::Bytes(b"typed".to_vec())).unwrap();
         input_tx.send(JobInput::Eof).unwrap();
         assert!(writes_rx.recv_timeout(Duration::from_millis(30)).is_err());
 
         remote_tx
-            .send(b"\x1b]7770;UUCLI;abc123;BEGIN\x07ready".to_vec())
+            .send(b"\r\nUUCabc123Bready".to_vec())
             .unwrap();
         assert_eq!(
             writes_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
@@ -618,12 +781,62 @@ mod tests {
         );
 
         remote_tx
-            .send(b"\x1b]7770;UUCLI;abc123;END;0\x07".to_vec())
+            .send(b"\r\nUUCabc123E0Z".to_vec())
             .unwrap();
         let (result, output) = job.join().unwrap();
         assert_eq!(result.unwrap().exit_code, 0);
         assert_eq!(output, b"ready");
         assert!(all.lock().unwrap().ends_with(b"typed\x04\x03"));
+    }
+
+    #[test]
+    fn answers_startup_dsr_before_begin_and_preserves_remote_dsr_after_begin() {
+        let remote = b"\x1b[6nnoise\r\nUUCabc123Bpayload\x1b[6n\r\nUUCabc123E0Z";
+        let mut reader = Cursor::new(remote.to_vec());
+        let mut writer = Vec::new();
+        let mut output = Vec::new();
+
+        let result = run_framed_job_with_nonce(
+            &mut reader,
+            &mut writer,
+            &mut output,
+            "/root",
+            "printf payload",
+            "abc123",
+        )
+        .unwrap();
+
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(output, b"payload\x1b[6n");
+        assert!(writer.ends_with(CONPTY_CURSOR_REPLY));
+        assert_eq!(
+            writer
+                .windows(CONPTY_CURSOR_REPLY.len())
+                .filter(|window| *window == CONPTY_CURSOR_REPLY)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn conpty_startup_answers_split_cursor_query_and_preserves_other_bytes() {
+        let (remote_tx, remote_rx) = mpsc::channel();
+        let mut reader = ReadPump::spawn(ChannelReader {
+            chunks: remote_rx,
+            current: Cursor::new(Vec::new()),
+        });
+        remote_tx.send(b"prefix\x1b[6".to_vec()).unwrap();
+        remote_tx.send(b"nSuffix".to_vec()).unwrap();
+        drop(remote_tx);
+
+        let mut writer = Vec::new();
+        let (visible, queries) =
+            initialize_conpty(&mut reader, &mut writer, Duration::from_millis(100)).unwrap();
+        reader.shutdown_and_join();
+
+        assert_eq!(visible, b"prefixSuffix");
+        assert_eq!(queries, 1);
+        assert_eq!(writer, CONPTY_CURSOR_REPLY);
     }
 
     #[test]

@@ -1,8 +1,8 @@
 #![cfg(windows)]
 
 use crate::runner::{
-    run_framed_job, run_framed_job_with_input, run_framed_pwd_probe, JobInput, JobResult,
-    JobRunError, ReadPump,
+    run_framed_job, run_framed_job_with_input, run_framed_pwd_probe, JobInput,
+    JobResult, JobRunError, ReadPump,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -10,7 +10,6 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::Receiver;
-use std::thread;
 use std::time::{Duration, Instant};
 
 struct TermPty {
@@ -53,8 +52,8 @@ impl TermPty {
         drop(slave);
         let mut reader = ReadPump::spawn(raw_reader);
 
+
         // Catch argument/ownership failures before command bytes can be sent.
-        thread::sleep(Duration::from_millis(250));
         let status = match child.try_wait() {
             Ok(status) => status,
             Err(error) => {
@@ -140,7 +139,7 @@ impl TermPty {
         let text = String::from_utf8(output).map_err(|error| {
             JobRunError::Completed(anyhow!("remote pwd output is not valid UTF-8: {error}"))
         })?;
-        let path = text.trim_end_matches(|character| character == '\r' || character == '\n');
+        let path = text.trim_end_matches(['\r', '\n']);
         if path.is_empty() {
             return Err(JobRunError::Completed(anyhow!(
                 "remote pwd returned an empty path"
@@ -236,13 +235,13 @@ fn attach_args(device_identity: &str, session_name: &str) -> Vec<OsString> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runner::PumpRead;
-    use portable_pty::CommandBuilder;
-    use std::io::Write;
+    use crate::job::CompletionDecoder;
+    use crate::runner::{initialize_conpty, PumpRead};
+    use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::time::{Duration, Instant};
 
     const PROBE: &[u8] =
-        b"\x1b]7770;UUCLI;conptyprobe;BEGIN\x07payload\x1b]7770;UUCLI;conptyprobe;END;0\x07";
+        b"\r\nUUCconptyprobeBpayload\r\nUUCconptyprobeE0Z\r\n";
 
     #[test]
     fn current_official_attach_command_targets_the_existing_authorized_session() {
@@ -259,18 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn conpty_child_writes_osc() {
-        if std::env::var_os("UUCLI_CONPTY_OSC_CHILD").is_some() {
-            let mut stdout = std::io::stdout().lock();
-            stdout.write_all(PROBE).unwrap();
-            stdout.flush().unwrap();
-            std::process::exit(0);
-        }
-    }
-
-    #[test]
-    fn windows_conpty_preserves_osc_completion_markers() {
-        let executable = std::env::current_exe().unwrap();
+    fn windows_conpty_preserves_ascii_completion_markers() {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -281,17 +269,24 @@ mod tests {
             .unwrap();
         let master = pty.master;
         let slave = pty.slave;
-        let mut command = CommandBuilder::new(executable.as_os_str());
-        command.args(["conpty_child_writes_osc", "--nocapture"]);
-        command.env("UUCLI_CONPTY_OSC_CHILD", "1");
+        let mut command = CommandBuilder::new("cmd.exe");
+        command.args([
+            "/d",
+            "/c",
+            "echo.&echo UUCconptyprobeBpayload&echo UUCconptyprobeE0Z",
+        ]);
         let mut child = slave.spawn_command(command).unwrap();
-        let writer = master.take_writer().unwrap();
+        let mut writer = master.take_writer().unwrap();
         let reader = master.try_clone_reader().unwrap();
         drop(slave);
         let mut reader = ReadPump::spawn(reader);
 
+        let (startup_output, cursor_queries) =
+            initialize_conpty(&mut reader, &mut writer, Duration::from_millis(500)).unwrap();
+        eprintln!("ConPTY startup cursor queries answered: {cursor_queries}");
+
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut observed = Vec::new();
+        let mut observed = startup_output;
         while Instant::now() < deadline
             && !observed.windows(PROBE.len()).any(|window| window == PROBE)
         {
@@ -300,12 +295,7 @@ mod tests {
                 .unwrap()
             {
                 PumpRead::Data(bytes) => observed.extend_from_slice(&bytes),
-                PumpRead::Eof => break,
-                PumpRead::Timeout => {
-                    if matches!(child.try_wait(), Ok(Some(_))) {
-                        break;
-                    }
-                }
+                PumpRead::Eof | PumpRead::Timeout => {}
             }
         }
 
@@ -318,7 +308,11 @@ mod tests {
 
         assert!(
             observed.windows(PROBE.len()).any(|window| window == PROBE),
-            "ConPTY did not preserve the complete OSC marker payload: {observed:?}"
+            "ConPTY did not preserve the complete ASCII marker payload: {observed:?}"
         );
+
+        let mut decoder = CompletionDecoder::new("conptyprobe").unwrap();
+        assert_eq!(decoder.push(&observed).unwrap(), b"payload");
+        assert_eq!(decoder.completed(), Some(0));
     }
 }

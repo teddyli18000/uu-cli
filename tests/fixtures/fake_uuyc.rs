@@ -3,7 +3,7 @@ use std::env;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, Write};
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 const DEVICE_ID: &str = "device-1";
 const DEVICE_NAME: &str = "测试设备";
@@ -84,6 +84,18 @@ fn write_json(value: Value) -> Result<u8, Box<dyn Error>> {
 }
 
 fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
+    if env::var("UU_TEST_MODE").as_deref() == Ok("bash") {
+        let bash = env::var_os("UU_TEST_BASH")
+            .ok_or("UU_TEST_BASH must name the Git Bash executable for bash mode")?;
+        let status = Command::new(bash)
+            .args(["--noprofile", "--norc"])
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()?;
+        return Ok(status.code().and_then(|code| u8::try_from(code).ok()).unwrap_or(1));
+    }
+
     let mut command = String::new();
     let read = io::stdin().lock().read_line(&mut command)?;
     if read == 0 {
@@ -92,8 +104,8 @@ fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
     record_dispatch(&command)?;
 
     let Some(nonce) = command
-        .split_once("UUCLI;")
-        .and_then(|(_, rest)| rest.split_once(";BEGIN").map(|(nonce, _)| nonce))
+        .split_once("'UUC' '")
+        .and_then(|(_, rest)| rest.split_once("' 'B'").map(|(nonce, _)| nonce))
         .filter(|nonce| {
             !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_alphanumeric())
         })
@@ -102,7 +114,7 @@ fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
     };
 
     let mut stdout = io::stdout().lock();
-    write!(stdout, "\x1b]7770;UUCLI;{nonce};BEGIN\x07")?;
+    write!(stdout, "\r\nUUC{nonce}B")?;
     match env::var("UU_TEST_MODE").as_deref() {
         Ok("drop") => {
             stdout.write_all("partial output: 断线 世界".as_bytes())?;
@@ -111,7 +123,7 @@ fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
         }
         Ok("success") | Err(_) => {
             stdout.write_all("fake output: 你好 世界\r\n".as_bytes())?;
-            write!(stdout, "\x1b]7770;UUCLI;{nonce};END;7\x07")?;
+            write!(stdout, "\r\nUUC{nonce}E7Z")?;
             stdout.flush()?;
             Ok(0)
         }
