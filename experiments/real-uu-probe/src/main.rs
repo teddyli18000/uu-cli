@@ -126,7 +126,7 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
         .find(|item| item["name"] == session && item["createdAt"] == created)
         .context("selected terminal instance disappeared/recreated; refusing attach")?;
     let mut logs = Logs::new(log_dir)?;
-    logs.event("environment", json!({"os":std::env::consts::OS, "cli":cli, "version":official(cli, &["version"]).unwrap_or_else(|e| e.to_string()), "session":selected, "pty":{"rows":24,"cols":120}, "candidate_head":"ae772ea9"}))?;
+    logs.event("environment", json!({"os":std::env::consts::OS, "cli":cli, "version":official(cli, &["version"]).unwrap_or_else(|e| e.to_string()), "session":selected, "pty":{"rows":24,"cols":120}, "candidate_head":"ae772ea9", "observer_revision":option_env!("PROBE_BUILD_SHA").unwrap_or("local")}))?;
     logs.note("Starting one official attach; startup/liveness alone is not attach success")?;
     let pair = native_pty_system().openpty(PtySize {
         rows: 24,
@@ -178,7 +178,9 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
             }
         }
     });
-    logs.note("Local controls: pwd hello exit7 second unicode sleep interrupt after status quit")?;
+    logs.note(
+        "Local controls: pwd hello exit7 second unicode stream sleep interrupt after status quit",
+    )?;
     let mut startup = Vec::new();
     let mut all_rx = Vec::new();
     let mut pending: Option<(String, String, Instant)> = None;
@@ -210,20 +212,39 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
                     }
                 }
                 if let Some((nonce, label, sent)) = &pending {
-                    let begin = format!("\r\nUUC{nonce}B");
-                    let end = format!("\r\nUUC{nonce}E");
-                    if all_rx.windows(begin.len()).any(|p| p == begin.as_bytes()) {
-                        if let Some(index) =
-                            all_rx.windows(end.len()).position(|p| p == end.as_bytes())
+                    // Observation only: ConPTY may replace the separator CRLF
+                    // with cursor addressing. Retain that failure independently.
+                    let begin = format!("UUC{nonce}B");
+                    let end = format!("UUC{nonce}E");
+                    if let Some(begin_index) = all_rx
+                        .windows(begin.len())
+                        .position(|p| p == begin.as_bytes())
+                    {
+                        let payload_start = begin_index + begin.len();
+                        if let Some(relative_index) = all_rx[payload_start..]
+                            .windows(end.len())
+                            .position(|p| p == end.as_bytes())
                         {
+                            let index = payload_start + relative_index;
                             let rest = &all_rx[index + end.len()..];
                             if let Some(finish) = rest.iter().position(|b| *b == b'Z') {
                                 if let Ok(code) = std::str::from_utf8(&rest[..finish])
                                     .unwrap_or("")
                                     .parse::<u16>()
                                 {
-                                    logs.note(&format!("Candidate completion: {label} exit={code}, elapsed={:.3}s (raw log remains authoritative)", sent.elapsed().as_secs_f64()))?;
-                                    pending = None;
+                                    if code <= 255 {
+                                        let literal_begin = begin_index >= 2
+                                            && &all_rx[begin_index - 2..begin_index] == b"\r\n";
+                                        let literal_end =
+                                            index >= 2 && &all_rx[index - 2..index] == b"\r\n";
+                                        let payload_hex: String = all_rx[payload_start..index]
+                                            .iter()
+                                            .map(|b| format!("{b:02x}"))
+                                            .collect();
+                                        logs.event("visible_nonce_completion", json!({"label":label,"nonce":nonce,"exit":code,"elapsed_ms":sent.elapsed().as_millis(),"literal_crlf_begin":literal_begin,"literal_crlf_end":literal_end,"raw_payload_hex":payload_hex}))?;
+                                        logs.note(&format!("Visible ordered nonce markers: {label} exit={code}, elapsed={:.3}s; original CRLF decoder compatible={} (raw output is unmodified)", sent.elapsed().as_secs_f64(), literal_begin && literal_end))?;
+                                        pending = None;
+                                    }
                                 }
                             }
                         }
@@ -299,6 +320,7 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
                 "exit7" => "sh -c 'exit 7'",
                 "second" => "printf 'second-command\\n'",
                 "unicode" => "printf '你好-UU\\n'",
+                "stream" => "printf 'tick-1\\n'; sleep 2; printf 'tick-2\\n'",
                 "sleep" => "sleep 30",
                 "after" => "printf 'after-interrupt\\n'",
                 _ => {

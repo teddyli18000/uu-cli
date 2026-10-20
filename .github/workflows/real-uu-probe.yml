@@ -9,6 +9,8 @@ permissions:
 jobs:
   probe:
     runs-on: windows-latest
+    env:
+      PROBE_BUILD_SHA: ${{ github.sha }}
     timeout-minutes: 10
     defaults:
       run:
