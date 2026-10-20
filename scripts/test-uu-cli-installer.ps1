@@ -100,8 +100,13 @@ $oldProcessPath = $env:PATH
 $oldUserPath = Read-RegistryValue -SubKey 'Environment' -Name 'Path'
 $oldRunValue = Read-RegistryValue -SubKey 'Software\Microsoft\Windows\CurrentVersion\Run' -Name 'uu-cli'
 $testRoot = Join-Path $env:RUNNER_TEMP ('uu-cli-installer-' + [guid]::NewGuid().ToString('N'))
-$localAppData = Join-Path $testRoot 'localappdata'
-$configPath = Join-Path $testRoot 'custom-state\binding.json'
+$unicode = ([char]0x6D4B).ToString() + ([char]0x8BD5).ToString()
+$localAppData = Join-Path $testRoot ('Local Data ' + $unicode)
+$configPath = Join-Path $localAppData 'uu-cli\config.json'
+$lockPath = Join-Path (Split-Path -Parent $configPath) '.config.json.lock'
+$backupPath = Join-Path (Split-Path -Parent $configPath) '.config.json.bak'
+$workerStateDirectory = Join-Path (Split-Path -Parent $configPath) 'workers'
+$workerStatePath = Join-Path $workerStateDirectory 'fixture-worker.inflight'
 $installRoot = Join-Path $localAppData 'Programs\uu-cli'
 $package = [IO.Path]::GetFullPath($PackageRoot)
 $installer = Join-Path $package 'installer\install.ps1'
@@ -111,12 +116,16 @@ $testFailure = $null
 
 try {
     New-Item -ItemType Directory -Path (Split-Path -Parent $configPath) -Force | Out-Null
-    $sentinel = '{"version":1,"bindings":[{"local_root":"C:\\installer-test-workspace","device_identity":"installer-test-device","device_name":"Install test","remote_root":"/home/sentinel"}],"authorized_workers":[],"owned_workers":[]}' + [Environment]::NewLine
+    $sentinel = '{"version":1,"bindings":[{"local_root":"C:\\installer-test-workspace","device_identity":"installer-test-device","device_name":"Install test","remote_root":"/home/sentinel"}],"authorized_workers":["authorized-worker-fingerprint"],"declined_workers":["declined-worker-fingerprint"]}' + [Environment]::NewLine
     [IO.File]::WriteAllBytes($configPath, [Text.Encoding]::ASCII.GetBytes($sentinel))
     $configBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath))
+    [IO.File]::WriteAllText($lockPath, 'persistent config lock')
+    [IO.File]::WriteAllText($backupPath, 'persistent config backup')
+    New-Item -ItemType Directory -Path $workerStateDirectory -Force | Out-Null
+    [IO.File]::WriteAllText($workerStatePath, 'pid=999999' + [Environment]::NewLine + 'worker=fixture-worker')
 
     [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, 'Process')
-    [Environment]::SetEnvironmentVariable('UU_CLI_CONFIG', $configPath, 'Process')
+    [Environment]::SetEnvironmentVariable('UU_CLI_CONFIG', $null, 'Process')
 
     & $installer -PackageRoot $package
     $uuExe = Join-Path $installRoot 'uu.exe'
@@ -184,13 +193,21 @@ try {
     if (Test-Path -LiteralPath $installRoot) {
         throw 'Uninstall left the uu-cli program directory behind.'
     }
-    if (Test-Path -LiteralPath $configPath) {
-        throw 'Uninstall left uu-cli''s configured binding file behind.'
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf) -or
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -cne $configBytes) {
+        throw 'Uninstall changed or removed the user binding and authorization config.'
     }
-    foreach ($suffix in @('.binding.json.lock', '.binding.json.bak')) {
-        if (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $configPath) $suffix)) {
-            throw "Uninstall left a uu-cli config sidecar behind: $suffix"
-        }
+    if (-not (Test-Path -LiteralPath $lockPath -PathType Leaf) -or
+        [IO.File]::ReadAllText($lockPath) -cne 'persistent config lock') {
+        throw 'Uninstall changed or removed the per-user config lock.'
+    }
+    if (-not (Test-Path -LiteralPath $backupPath -PathType Leaf) -or
+        [IO.File]::ReadAllText($backupPath) -cne 'persistent config backup') {
+        throw 'Uninstall changed or removed the per-user config backup.'
+    }
+    if (-not (Test-Path -LiteralPath $workerStatePath -PathType Leaf) -or
+        [IO.File]::ReadAllText($workerStatePath) -cne ('pid=999999' + [Environment]::NewLine + 'worker=fixture-worker')) {
+        throw 'Uninstall changed or removed unknown/quarantine worker runtime state.'
     }
     if ((Count-UserPathEntry $installRoot) -ne 0) {
         throw 'Uninstall left its user PATH entry behind.'
@@ -238,4 +255,4 @@ finally {
 if ($null -ne $testFailure) {
     throw $testFailure
 }
-Write-Output 'Clean hosted Windows install, upgrade, PATH/background integration, and uninstall checks passed.'
+Write-Output 'Clean hosted Windows install, upgrade, Unicode/space PATH, state-preserving uninstall, and integration cleanup checks passed.'

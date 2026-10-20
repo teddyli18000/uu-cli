@@ -1,21 +1,7 @@
 #[cfg(unix)]
-#[path = "../src/transfer.rs"]
-mod transfer;
-
-#[cfg(unix)]
-mod job {
-    pub use uu_cli::job::shell_quote;
-}
-
-#[cfg(unix)]
-mod runner {
-    pub use uu_cli::runner::{run_framed_job, JobResult, JobRunError};
-}
-
-#[cfg(unix)]
 mod unix_tests {
-    use super::runner::{run_framed_job, JobResult, JobRunError};
-    use super::transfer;
+    use uu_cli::runner::{run_framed_job, JobResult, JobRunError};
+    use uu_cli::transfer;
     use anyhow::anyhow;
     use std::fs;
     use std::io::{Read, Write};
@@ -92,23 +78,23 @@ mod unix_tests {
     #[test]
     fn round_trips_large_empty_unicode_absolute_and_tilde_paths() {
         let temp = TempDir::new();
-        let root = temp.0.join("远端 workspace");
+        let root = temp.0.join("è¿ç«¯ workspace");
         let home = temp.0.join("remote home");
-        fs::create_dir_all(root.join("目录 with spaces")).unwrap();
+        fs::create_dir_all(root.join("ç®å½ with spaces")).unwrap();
         fs::create_dir_all(root.join("absolute target")).unwrap();
         fs::create_dir_all(home.join("nested directory")).unwrap();
 
         let mut executor = real_executor(root.clone(), home.clone());
 
         let data = random_bytes(1024 * 1024 + 137);
-        let local_source = temp.0.join("本地 source.bin");
+        let local_source = temp.0.join("æ¬å° source.bin");
         fs::write(&local_source, &data).unwrap();
-        let remote_relative = "目录 with spaces/数据.bin";
+        let remote_relative = "ç®å½ with spaces/æ°æ®.bin";
         let receipt = transfer::put(&local_source, remote_relative, &mut executor).unwrap();
         assert_eq!(receipt.size, data.len() as u64);
         assert_eq!(fs::read(root.join(remote_relative)).unwrap(), data);
 
-        let local_copy = temp.0.join("下载 copy.bin");
+        let local_copy = temp.0.join("ä¸è½½ copy.bin");
         let downloaded = transfer::get(remote_relative, &local_copy, &mut executor).unwrap();
         assert_eq!(downloaded, receipt);
         assert_eq!(fs::read(local_copy).unwrap(), data);
@@ -116,10 +102,10 @@ mod unix_tests {
         let empty_source = temp.0.join("empty.bin");
         fs::write(&empty_source, b"").unwrap();
         let empty_receipt =
-            transfer::put(&empty_source, "目录 with spaces/空.bin", &mut executor).unwrap();
+            transfer::put(&empty_source, "ç®å½ with spaces/ç©º.bin", &mut executor).unwrap();
         assert_eq!(empty_receipt.size, 0);
         let empty_copy = temp.0.join("empty copy.bin");
-        transfer::get("目录 with spaces/空.bin", &empty_copy, &mut executor).unwrap();
+        transfer::get("ç®å½ with spaces/ç©º.bin", &empty_copy, &mut executor).unwrap();
         assert!(fs::read(empty_copy).unwrap().is_empty());
 
         let absolute = root.join("absolute target").join("absolute.bin");

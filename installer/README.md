@@ -14,6 +14,6 @@ To uninstall:
 
     powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer\uninstall.ps1
 
-Uninstall removes this installation's files, its user PATH and Run entries, and uu-cli's config file, lock, and backup. With an absolute UU_CLI_CONFIG override, it removes only that config and its adjacent uu-cli lock/backup files. A relative override is left untouched because its location depends on the caller's working directory. Official UU files, settings, processes, and data are outside this installer's scope.
+Uninstall removes only this installation's program files and its user PATH and Run entries. It preserves all per-user uu-cli state, including workspace bindings and authorization in %LOCALAPPDATA%\uu-cli\config.json, config lock/backup files, worker runtime state, and unknown/quarantine markers under %LOCALAPPDATA%\uu-cli\workers. If UU_CLI_CONFIG points elsewhere, that file and its adjacent runtime state are preserved there too. This lets a later reinstall keep the same bindings and safely retain quarantined workers. Official UU files, settings, processes, and data are outside this installer's scope.
 
 The hosted installer validation is scripts/test-uu-cli-installer.ps1; it refuses to run outside GitHub Actions.

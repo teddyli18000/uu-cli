@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - 'impl/**'
   pull_request:
   workflow_dispatch:
 
@@ -14,6 +13,7 @@ permissions:
 jobs:
   linux-transfer:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -22,10 +22,11 @@ jobs:
           components: rustfmt
 
       - name: Verify binary-safe transfer over a real Bash shell
-        run: cargo test --test transfer
+        run: cargo test --locked --test transfer
 
   windows-package:
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +35,8 @@ jobs:
       - name: Build native Windows executables and package
         shell: powershell
         run: |
-          cargo build --release --bin uu --bin uu-background
+          cargo build --locked --release --bin uu --bin uu-background
+          if ($LASTEXITCODE -ne 0) { throw 'cargo build failed.' }
           $package = Join-Path $env:RUNNER_TEMP 'uu-cli-package'
           New-Item -ItemType Directory -Path $package -Force | Out-Null
           New-Item -ItemType Directory -Path (Join-Path $package 'installer') -Force | Out-Null
@@ -57,6 +59,7 @@ jobs:
   windows-clean-install:
     needs: windows-package
     runs-on: windows-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 

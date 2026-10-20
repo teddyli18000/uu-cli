@@ -19,15 +19,13 @@ if (Test-Path -LiteralPath $installRoot) {
         Remove-Item -LiteralPath $installRoot -Recurse -Force
     }
     catch {
-        throw "Could not remove '$installRoot'. A uu-cli job may still be using its executable; let it finish and retry. The user PATH and binding config are still present."
+        throw "Could not remove '$installRoot'. A uu-cli job may still be using its executable; let it finish and retry. The user PATH and uu-cli binding/runtime state are still present."
     }
     if (Test-Path -LiteralPath $installRoot) {
-        throw "Could not fully remove '$installRoot'. The user PATH and binding config are still present."
+        throw "Could not fully remove '$installRoot'. The user PATH and binding/runtime state are still present."
     }
 }
 
 Set-UuCliUserPath -InstallRoot $installRoot -Remove
 Set-UuCliProcessPath -InstallRoot $installRoot -Remove
-Remove-UuCliConfig
-
-Write-Output 'Removed uu-cli, its user PATH/Run entries, and its own binding config. Official UU was not modified.'
+Write-Output 'Removed uu-cli program files and its user PATH/Run entries. Binding and runtime/quarantine state were preserved; official UU was not modified.'
