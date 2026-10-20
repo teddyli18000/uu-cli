@@ -21,6 +21,12 @@ uu bind
 uu list
 ```
 
+保留词冲突时：
+
+```powershell
+uu -- <remote command...>
+```
+
 Codex 的日常心智模型只有一个：**本地命令前加 `uu`，就是在当前 workspace 绑定的远端工作目录执行。**
 
 ## 2. Workspace binding
@@ -61,27 +67,33 @@ Terminal 只是执行资源，不是 Agent 的长期上下文：
 
 ### 有 `uu` 请求正在等 Terminal
 
-如果目标设备已经确定，用户此时从官方 UU 打开该设备 Terminal，应直接用于满足等待请求，不再弹一个多余的“是否加入”窗口。
+等待提示必须明确告诉用户：**接下来从官方 UU 打开的匹配 Terminal 会用于本次请求。** 用户随后打开它即构成本次授权。
 
-如果 workspace 还没绑定，且用户正被提示打开想使用设备的 Terminal，唯一新出现的 Terminal 可以同时完成设备识别和本次授权，再只做必要的 remote-root 确认。
+如果目标设备已经确定，匹配 Terminal 直接满足等待请求，不再弹第二个“是否加入”窗口。
+
+如果 workspace 还没绑定，唯一新出现的 Terminal 可以同时完成设备识别和本次 worker 授权，再只做必要的 remote-root 确认。
+
+若同时出现多个候选设备/Terminal，则只弹一次短选择，不能猜。
 
 ### 没有请求在等待
 
-- 设备已设置自动加入：直接加入；
-- 否则弹一次短 PowerShell：
+发现新 Terminal 后只做一次短授权：
 
 ```text
 AIC-Car-1 新终端已打开
-[Enter] 交给 uu-cli   [N] 不使用   [A] 此设备以后自动加入
+[Enter] 交给 uu-cli    [N] 保留手动使用
 ```
 
-- `N` 后该 session 不得被使用；
-- `A` 为 device-level 偏好；
-- 多个新 session 短时间出现时尽量合并，不要逐个开窗口。
+- Enter：该 session 加入 device pool；
+- N / Esc / 关闭 / 取消：该 session 不授权，不得随后偷偷调度；
+- v1 不提供“以后这个设备所有新 Terminal 都自动接管”的永久开关；
+- 多个新 session 短时间出现时应在一个交互窗口里顺序/批量处理，不要逐个弹新窗口。
 
 ### 交互与 job I/O 分离
 
-选择器不能污染 `uu` stdout，也不能消费远端命令 stdin。需要人类选择时，应使用独立、短、可取消的 PowerShell 交互或等价安全方式。
+选择器不能污染 `uu` stdout，也不能消费远端命令 stdin。需要人类选择时，应使用独立、短、可取消的 PowerShell/console 交互或等价安全方式。
+
+不能要求用户预装 PowerShell 7。若实现偏好 `pwsh`，必须在不存在时回退 Windows 自带能力或项目自己的最小交互。
 
 如果当前桌面/会话无法安全展示人类交互，不能猜默认答案。
 
@@ -166,7 +178,7 @@ uu "cd src && source .venv/bin/activate && python main.py"
 - 自动发现官方 UU 安装位置和相关组件，不硬编码开发机路径；
 - 不硬编码用户名、盘符、deviceId、session name、安装版本或本机目录；
 - 优先能力探测/兼容性检测，而不是只认一个精确版本号；
-- 不要求用户安装 Python、Rust、Node、WSL 等开发运行时；
+- 不要求用户安装 Python、Rust、Node、PowerShell 7、WSL 等开发运行时；
 - 安装和日常运行尽量使用普通用户权限，不无故要求管理员；
 - 配置只保存在当前用户合理的应用数据目录；
 - 升级能够保留有效 binding，卸载只清理 uu-cli 自己的内容；
@@ -186,7 +198,7 @@ uu "cd src && source .venv/bin/activate && python main.py"
 - 空闲时 CPU 接近 0，不做高频轮询或持续 spawn 官方 CLI；
 - 没有必要时不维持昂贵连接；
 - 无多余 GUI、tray、常驻可见 console；
-- 只有真正需要用户选择时才弹短 PowerShell；
+- 只有真正需要用户选择时才弹短人类交互；
 - 后台组件缺失/崩溃后，下一次 `uu` 能自动恢复或给出可理解错误；
 - uu-cli 的后台生命周期不能拖累或阻止官方 UU 正常启动、退出、升级。
 
@@ -232,6 +244,8 @@ uu get <remote> <local>
 
 可以使用 scheduled/manual workflow 定期检查最新官方 UU 的安装/组件发现是否发生变化。
 
+如果 GitHub-hosted Windows 的 OS/SKU 本身不受官方 UU 支持，官方 UU 安装 smoke 可以作为 non-gating/manual compatibility signal；不能为了让 CI 绿而伪装成“真实 UU 已验证”。核心 build/test/installer clean-state CI 仍应正常 gating。
+
 真实登录态、真实 Terminal attach/reuse、真实远端设备、多 Terminal、长任务、Ctrl+C 和真实文件通道仍需要最小必要的实机验收；mock 或 hosted CI 不能冒充这部分已经通过。
 
 详细测试策略见 `TESTING.md`。
@@ -259,7 +273,8 @@ Agent 不管理 deviceId、session、worker 或 uu-cli 后台生命周期。
 - 全新 workspace 可以完成首次 binding；
 - 多设备同时开 Terminal 时不会误绑；
 - 新开 Terminal 能自动发现；等待中的 `uu` 不会遭遇重复确认；
-- PowerShell 人类选择不污染 job stdin/stdout；
+- 没有等待请求时，未授权 Terminal 不会被静默接管；
+- 人类选择不污染 job stdin/stdout；
 - 同一设备多个 workspace 共享 pool 时不会串 remote root；
 - 多个 Terminal 能安全并发调度；
 - 长任务实时输出且不阻塞其他 worker；
