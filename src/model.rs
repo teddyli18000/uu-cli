@@ -60,11 +60,7 @@ impl Config {
         self.upsert_owned_worker(device_identity, session_name, false)
     }
 
-    pub fn quarantine_owned_worker(
-        &mut self,
-        device_identity: &str,
-        session_name: &str,
-    ) -> bool {
+    pub fn quarantine_owned_worker(&mut self, device_identity: &str, session_name: &str) -> bool {
         self.upsert_owned_worker(device_identity, session_name, true)
     }
 
