@@ -157,24 +157,48 @@
 - Probe disconnected normally with no pending command, without killing the remote
   Terminal. Its dedicated shell retains the deliberately changed monitor baseline.
 
+## Observed — round 6, pinned product wrapper and decoder
+
+- [Build 39427353688](https://github.com/teddyli18000/uu-cli/actions/runs/39427353688)
+  (`64e856d`) compiled the actual `src/job.rs` from production commit
+  `79fa6fbc0c8d3dbb4ebf50c2589e684bd5d85d37` inside Actions. The probe used
+  `wrap_job` and `CompletionDecoder::new_console`; its visible-token observer was
+  disabled for these jobs. Same authorized `bash-5`, exact-instance preflight.
+- All jobs used the explicit test root `/`, without product binding or scheduling:
+
+| Step | Product decoder result |
+| --- | --- |
+| `pwd` | `/`, exit 0, 143 ms |
+| `sh -c 'exit 7'` | exit 7, 112 ms |
+| Unicode printf | `你好-UU`, exit 0, 129 ms |
+| two ticks separated by sleep 2 | first payload streamed in 127 ms; second about 2 s later; exit 0 |
+| `sleep 30` + ETX | interrupted after about 5 s; exit 130 decoded 95 ms after ETX |
+| post-interrupt printf | `after-interrupt`, exit 0, 128 ms |
+
+- Returned payload remained ConPTY presentation bytes, including CRLF. No arbitrary
+  VT stripping or original-byte fidelity claim. This round did not exercise the
+  complete product runner, binding, pool or installer.
+- Probe disconnected normally with no pending command. Its own local attach
+  child was confirmed gone; no remote exit/kill/rename was sent.
+
 ## Conclusion
 
 - Attach handoff is demonstrated in this environment: a live official attachment
   rejects a second client; user closing that dedicated tab leaves the instance
   detached and attachable. It is not simultaneous sharing of an open tab.
-- Current transport as a reliable command channel: not yet established. Real
-  ConPTY replaces protocol CRLF separators with cursor-addressing VT, so the
-  candidate's literal-CRLF framing is invalid here. This is a real official-CLI
-  observation, independent of the earlier cooked-console fake failures.
+- Real ConPTY replaces protocol CRLF separators with cursor-addressing VT, so
+  the original literal-CRLF framing is invalid here. Round 6 demonstrates the
+  product's nonce-token decoder on the observed command cases.
 - Sequential commands, status 7, Unicode characters and delayed output have been
   observed in one attachment. The visible-token observer is instrumentation, not
   a product output-normalization fix or proof of arbitrary binary/text fidelity.
 - Original manual/ETX/Win32 cancellation paths failed with interactive job control
   enabled. With the dedicated worker baseline and per-job guard, ETX cancellation,
   status 130 and next-command reuse passed for `sleep 30` in round 5.
-- Command-channel approach is viable for the observed cases, subject to product
-  integration of the guard and VT-aware completion/output handling. This does not
-  constitute production acceptance or proof of arbitrary output byte fidelity.
+- Command-channel approach is viable for the observed cases. The production
+  wrapper and console decoder passed this isolated probe; full runner integration,
+  disconnect handling and safe remote-root capture still need acceptance. This
+  does not constitute full product acceptance or arbitrary output byte fidelity.
 - Official attach accepts a session name, not an atomic instance identifier;
   name + createdAt preflight detects replacements before attach but cannot prove
   an atomic guarantee across the query/attach interval.
