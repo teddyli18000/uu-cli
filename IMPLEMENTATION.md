@@ -38,11 +38,12 @@ remote device + remote root
 - binding 放在用户侧，不污染项目仓库；
 - v1 一个 workspace 只绑定一台远端设备；
 - Codex 不选择、不看到裸 `deviceId`；
-- 多设备同时存在时，由用户通过极短的人类交互选择一次，之后记住。
+- 多设备同时存在时，由用户通过极短的人类交互选择一次，之后记住；
+- 同一远端设备可以服务多个本地 workspace，这些 workspace 共享设备级 worker pool，但各自 remote root 必须严格独立。
 
 ## 3. Terminal 的产品语义
 
-官方 UU Terminal 由用户自己打开。`uu-cli` 负责发现已经存在的 Terminal，并把被允许使用的 Terminal 当成 worker。
+官方 UU Terminal 由用户自己打开。`uu-cli` 负责发现已经存在的 Terminal，并把被允许使用的 Terminal 当成该设备的 worker。
 
 Terminal 只是执行资源，不是 Agent 的长期上下文：
 
@@ -51,31 +52,50 @@ Terminal 只是执行资源，不是 Agent 的长期上下文：
 - 其他命令可使用其他空闲 worker；
 - worker 全忙时等待，不抢占；
 - 绝不跨设备调度；
-- 具体 session name/id 不应成为日常用户概念。
+- session name/id 不应成为日常用户概念；
+- 同设备多个 workspace 不需要把 Terminal 再分组，job 自己携带 remote root。
 
-### 新 Terminal 的交互
+## 4. 新 Terminal 的交互状态机
 
-目标是尽量无感：
+交互必须尽量无感，而且不能产生重复确认。
 
-- 当某个 `uu` 调用正在等待可用 Terminal 时，用户刚打开的目标设备 Terminal 应被自动发现并继续原请求；
-- 如果新 Terminal 的归属完全明确，可以直接加入对应 worker pool；
-- 如果存在歧义（多个设备、多个 workspace、或无法判断是否供 uu-cli 使用），允许自动弹出一个非常短的 PowerShell 选择窗口；
-- 选择器优先提供默认项和数字键/Enter 操作，不展示协议字段；
-- 不反复询问已经确认过的同一绑定/Terminal；
-- 用户明确不交给 uu-cli 的 Terminal 不得被使用。
+### 有 `uu` 请求正在等 Terminal
 
-交互设计以“几秒内完成、不需要理解 UU 内部机制”为标准。
+如果目标设备已经确定，用户此时从官方 UU 打开该设备 Terminal，应直接用于满足等待请求，不再弹一个多余的“是否加入”窗口。
 
-## 4. Shell context
+如果 workspace 还没绑定，且用户正被提示打开想使用设备的 Terminal，唯一新出现的 Terminal 可以同时完成设备识别和本次授权，再只做必要的 remote-root 确认。
 
-这是硬契约：**不同 `uu` 调用之间不保证共享 shell-local 状态。**
+### 没有请求在等待
 
-因此 Agent/用户不能依赖上一条命令留下的：
+- 设备已设置自动加入：直接加入；
+- 否则弹一次短 PowerShell：
+
+```text
+AIC-Car-1 新终端已打开
+[Enter] 交给 uu-cli   [N] 不使用   [A] 此设备以后自动加入
+```
+
+- `N` 后该 session 不得被使用；
+- `A` 为 device-level 偏好；
+- 多个新 session 短时间出现时尽量合并，不要逐个开窗口。
+
+### 交互与 job I/O 分离
+
+选择器不能污染 `uu` stdout，也不能消费远端命令 stdin。需要人类选择时，应使用独立、短、可取消的 PowerShell 交互或等价安全方式。
+
+如果当前桌面/会话无法安全展示人类交互，不能猜默认答案。
+
+## 5. Shell context
+
+这是硬契约：**不同 `uu` 调用之间不保证共享 shell-local 状态，而且实现应尽量主动隔离普通 job 的 shell-local 变化。**
+
+Agent/用户不能依赖上一条命令留下的：
 
 - `cd`；
 - `export`；
 - `source` / virtualenv；
 - alias；
+- shell options；
 - 其他只存在于某个 shell 进程内的状态。
 
 需要连续状态时放在同一次调用中，例如：
@@ -84,9 +104,13 @@ Terminal 只是执行资源，不是 Agent 的长期上下文：
 uu "cd src && source .venv/bin/activate && python main.py"
 ```
 
-每个普通 job 从 workspace 的 `remote root` 开始。后续 Skill 必须明确写出这一点。
+每个普通 job 从 workspace 的 `remote_root` 开始，并应在一个 job-local shell scope 中运行，使 `cd/export/source/exit/exec` 等不会无意成为下一条 job 的隐式输入。
 
-## 5. 命令行为
+具体使用 subshell、fresh shell 或其他机制，由实现者根据真实 PTY、交互和 Ctrl+C 行为自行决定。
+
+最终 Skill 必须明确写出这一点。
+
+## 6. 命令行为
 
 `uu <command>` 应尽量表现得像直接在远端 shell 中执行：
 
@@ -96,11 +120,25 @@ uu "cd src && source .venv/bin/activate && python main.py"
 - PTY stdout/stderr 如果天然合流，不伪造不存在的分离；
 - Ctrl+C/取消行为尽量符合普通终端预期；
 - 已经发送到远端的命令，连接异常后不得自动在另一个 Terminal 重放；
-- 无法确认执行结果时明确返回未知状态，而不是猜测成功或再次执行。
+- 无法确认执行结果时明确返回 unknown/may-still-be-running，而不是猜测成功或再次执行。
 
 具体如何实现命令边界、attach、恢复和并发，由实现者根据现有研究和实机结果决定。
 
-## 6. 不干扰官方 UU — 硬边界
+## 7. Crash / recovery safety
+
+后台组件、CLI 客户端或本地连接异常不能导致 worker 被错误复用。
+
+必须满足：
+
+- 如果某个 worker 在崩溃前可能仍有已发送 job，恢复后不能直接视为 idle；
+- 能证明旧 job 已结束才可安全重新加入 idle pool；
+- 无法证明时进入 unknown/quarantine，等待、重新打开 Terminal 或使用其他 worker；
+- 绝不能为了“恢复”而向可能仍繁忙的 PTY 注入新命令；
+- 绝不能重放已经发送过的旧命令。
+
+恢复机制如何记录/证明由实现者决定。
+
+## 8. 不干扰官方 UU — 硬边界
 
 `uu-cli` 是官方 UU 的旁路辅助工具，不是它的补丁或替代品。
 
@@ -113,11 +151,11 @@ uu "cd src && source .venv/bin/activate && python main.py"
 - 不改变用户正在手工操作的 Terminal 的输入/状态；
 - 不因为 uu-cli 崩溃、升级、卸载而破坏 UU 自身功能；
 - 不依赖签名伪造、认证绕过、GUI 自动点击或进程注入；
-- 如果某种官方 attach/reuse 行为会明显影响用户当前 UU 窗口，必须换更安全的实现或要求使用专门提供给 uu-cli 的 Terminal，不能静默干扰。
+- 如果某种官方 attach/reuse 行为会明显影响用户当前 UU 窗口，只能用于用户已经明确交给 uu-cli 的专用 Terminal，或换更安全方案。
 
 研究和调用官方已存在的本地互操作接口可以，但必须保持上述边界。
 
-## 7. 尽可能在任何正常电脑上可用
+## 9. 尽可能在任何正常电脑上可用
 
 目标不是“只在开发者这台电脑能跑”，而是：
 
@@ -135,9 +173,9 @@ uu "cd src && source .venv/bin/activate && python main.py"
 - 官方 UU 不在预期位置、版本行为变化或缺少能力时，给出明确诊断，而不是静默失效；
 - 对不同机器上的路径、设备名、Windows 用户名、显示语言等差异保持稳健。
 
-发布前至少应在“干净机器/干净用户配置”场景验证安装和首次使用，而不能依赖开发机遗留状态。
+支持范围应跟随官方 Windows UU 实际支持的平台；不要把某台开发机的偶然环境当成产品前置条件。
 
-## 8. 后台生命周期与资源占用
+## 10. 后台生命周期与资源占用
 
 用户希望：官方 UU 在用时，uu-cli 随时可用；没有任务或没有可用 Terminal 时，资源占用尽可能低。
 
@@ -148,13 +186,13 @@ uu "cd src && source .venv/bin/activate && python main.py"
 - 空闲时 CPU 接近 0，不做高频轮询或持续 spawn 官方 CLI；
 - 没有必要时不维持昂贵连接；
 - 无多余 GUI、tray、常驻可见 console；
-- 只有真正需要用户选择时才弹短 PowerShell 交互；
+- 只有真正需要用户选择时才弹短 PowerShell；
 - 后台组件缺失/崩溃后，下一次 `uu` 能自动恢复或给出可理解错误；
 - uu-cli 的后台生命周期不能拖累或阻止官方 UU 正常启动、退出、升级。
 
 是否采用 broker、watcher、事件监听、lazy process 或其他结构，由实现者自行决定。
 
-## 9. 文件传输
+## 11. 文件传输
 
 公共接口固定：
 
@@ -168,12 +206,37 @@ uu get <remote> <local>
 - 任意二进制安全；
 - 成功/失败语义明确；
 - 不完整传输不能报告成功；
+- 远端相对路径以 workspace `remote_root` 为基准；
+- 绝对路径保持远端绝对语义；
+- 若支持 `~`，必须按远端环境解析；
 - 尽可能复用官方稳定能力；
 - 内部传输机制不暴露给 Agent。
 
 如果原生路径不可复用，实现者可自行选择可靠 fallback，但不要为了实现方便改变公共接口或破坏文件完整性。
 
-## 10. Agent Skill
+## 12. CI-first 验证
+
+能离开开发者主力电脑完成的事情，优先交给 GitHub Actions。
+
+实现者应主动建立 Windows CI 来覆盖：
+
+- build / lint / unit / integration-with-fakes；
+- 多 workspace / 多 device / 多 worker 的逻辑状态矩阵；
+- shell-state isolation、命令包装、no-replay、unknown/quarantine；
+- installer 构建；
+- 在新的 hosted Windows job 中安装、PATH、后台集成、升级/重复安装、卸载和残留检查；
+- 无 UU、UU 未运行、组件缺失、不兼容版本等错误路径；
+- 如果 hosted runner 环境允许，从官方公开来源下载当前 Windows UU installer，验证 Authenticode/版本/hash，并做安装发现和兼容性 smoke test。
+
+官方 UU 安装包不得提交或重新分发到仓库；CI 只从官方来源临时获取。不得把真实 UU 账号凭据放入 GitHub Secrets 去模拟用户登录。
+
+可以使用 scheduled/manual workflow 定期检查最新官方 UU 的安装/组件发现是否发生变化。
+
+真实登录态、真实 Terminal attach/reuse、真实远端设备、多 Terminal、长任务、Ctrl+C 和真实文件通道仍需要最小必要的实机验收；mock 或 hosted CI 不能冒充这部分已经通过。
+
+详细测试策略见 `TESTING.md`。
+
+## 13. Agent Skill
 
 Skill 要极短，只教三件事：
 
@@ -189,21 +252,25 @@ Skill 要极短，只教三件事：
 
 Agent 不管理 deviceId、session、worker 或 uu-cli 后台生命周期。
 
-## 11. 完成标准
+## 14. 完成标准
 
-实现者自行决定开发顺序和代码结构，但 v1 完成前必须在真实 Windows + 官方 UU 环境证明：
+实现者自行决定开发顺序和代码结构，但 v1 完成前必须证明：
 
 - 全新 workspace 可以完成首次 binding；
 - 多设备同时开 Terminal 时不会误绑；
-- 新开 Terminal 能自动发现，必要时交互简单；
+- 新开 Terminal 能自动发现；等待中的 `uu` 不会遭遇重复确认；
+- PowerShell 人类选择不污染 job stdin/stdout；
+- 同一设备多个 workspace 共享 pool 时不会串 remote root；
 - 多个 Terminal 能安全并发调度；
 - 长任务实时输出且不阻塞其他 worker；
-- 不依赖 Terminal 的历史 `cd/source/export` 状态；
+- 普通 job 不依赖且尽可能不泄漏 Terminal 历史 `cd/source/export` 状态；
 - 已发送命令不会因内部恢复逻辑重复执行；
+- crash/recovery 不会把可能繁忙的 worker 错当 idle；
 - `put/get` 二进制 round-trip 一致；
 - UU 重启、Terminal 消失、网络异常、后台组件重启时行为可理解且不串设备；
 - 空闲占用低；
 - 安装、升级、卸载不影响官方 UU；
-- 在至少一台非开发机/干净环境上完成从安装到使用的验证。
+- CI clean-machine 路径通过；
+- 至少一个真实非开发/干净环境完成从安装到首次 binding 的完整体验验证。
 
 只要满足这些目标和 `DESIGN.md` 的公共契约，实现者有充分自由选择技术方案。
