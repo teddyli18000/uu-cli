@@ -232,3 +232,29 @@ fn missing_external_encoder_tool_fails_without_a_valid_envelope() {
     assert_eq!(decoder.completed(), Some(127));
     assert_rejected(&payload);
 }
+
+#[test]
+fn cursor_visibility_controls_are_only_allowed_between_pwd_records() {
+    let valid = envelope(b"/tmp/visible\n");
+    let boundary = valid
+        .windows(6)
+        .position(|bytes| bytes == b"D0000:")
+        .unwrap();
+    let mut observed = valid.clone();
+    observed.splice(boundary..boundary, b"\x1b[?25l\x1b[?25h".iter().copied());
+    assert_eq!(decode_pwd_output(&observed).unwrap(), "/tmp/visible");
+    for control in [b"\x1b[?25l".as_slice(), b"\x1b[?25h".as_slice()] {
+        let mut inside = valid.clone();
+        inside.splice(boundary + 8..boundary + 8, control.iter().copied());
+        assert_rejected(&inside);
+    }
+    for control in [
+        b"\x1b[?1049h".as_slice(),
+        b"\x1b[?2004h".as_slice(),
+        b"\x1b[?25;1l".as_slice(),
+    ] {
+        let mut unsupported = valid.clone();
+        unsupported.splice(boundary..boundary, control.iter().copied());
+        assert_rejected(&unsupported);
+    }
+}
