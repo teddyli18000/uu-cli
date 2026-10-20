@@ -102,6 +102,7 @@ job: not-sent / running / finished / connection-unknown
 - 多个新 Terminal 短时间出现时尽量在一个交互窗口处理，不连续抢焦点；
 - 同一设备多个 workspace 不构成 Terminal 归属歧义；
 - 用户未授权的 Terminal 不得随后被自动调度；
+- Terminal 授权必须绑定到可验证的 session 实例；如果 UU 重启/重建后只能看到相同名字、却无法证明还是同一实例，不得仅凭 session name 继承旧授权；
 - 已绑定 workspace 不因为其他设备上线而静默切换；
 - 已经发送的命令绝不因为恢复/重连自动重复执行；
 - 交互实现不能要求 PowerShell 7 预装，fallback 也必须测试。
@@ -146,7 +147,19 @@ job B 应从 workspace `remote_root` 开始，并且实现应尽可能隔离 job
 - 0-byte、小文件、大文件、随机二进制；
 - 失败/中断时不报告成功。
 
-## 10. Release gate
+## 10. Workspace path tests
+
+Windows workspace key 至少验证：
+
+- drive-letter/case 差异不会把同一目录误当两个 binding；
+- trailing separator 不产生重复 binding；
+- 从子目录能选择最近的已存在 binding；
+- nested Git repo/submodule 不会错误跳到更远的 parent binding；
+- 空格和 Unicode 本地路径可用。
+
+具体 canonicalization 算法由实现者决定，但用户不能因为 Windows 路径表示方式变化而随机切错 workspace。
+
+## 11. Release gate
 
 一个 release candidate 至少应具备：
 
