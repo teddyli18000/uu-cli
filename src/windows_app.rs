@@ -215,13 +215,62 @@ fn check_instance_support(current: &[SessionInfo]) -> Result<()> {
 }
 
 fn prompt(label: &str) -> Result<String> {
+    use std::ffi::c_void;
+    #[repr(C)]
+    struct ReadControl {
+        length: u32,
+        initial_chars: u32,
+        wakeup_mask: u32,
+        control_key_state: u32,
+    }
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(kind: u32) -> *mut c_void;
+        fn ReadConsoleW(
+            handle: *mut c_void,
+            buffer: *mut u16,
+            count: u32,
+            read: *mut u32,
+            control: *mut ReadControl,
+        ) -> i32;
+    }
     print!("{label}");
     io::stdout().flush()?;
-    let mut line = String::new();
-    if io::stdin().read_line(&mut line)? == 0 {
-        bail!("decision window input closed");
+    let handle = unsafe { GetStdHandle(-10i32 as u32) };
+    let mut line = Vec::new();
+    loop {
+        let mut buffer = [0u16; 1024];
+        let mut count = 0;
+        // Keep native line editing, but return immediately when Esc is pressed.
+        let mut control = ReadControl {
+            length: std::mem::size_of::<ReadControl>() as u32,
+            initial_chars: 0,
+            wakeup_mask: 1 << 27,
+            control_key_state: 0,
+        };
+        if unsafe {
+            ReadConsoleW(
+                handle,
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                &mut count,
+                &mut control,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        if count == 0 {
+            bail!("decision window input closed");
+        }
+        line.extend_from_slice(&buffer[..count as usize]);
+        if line.iter().any(|ch| matches!(*ch, 10 | 13 | 27)) {
+            return Ok(String::from_utf16(&line)
+                .context("invalid Unicode in decision input")?
+                .trim()
+                .to_owned());
+        }
     }
-    Ok(line.trim().to_owned())
 }
 
 fn accept_one(store: &ConfigStore, session: &SessionInfo) -> Result<bool> {
@@ -665,6 +714,7 @@ fn decision_console() -> Result<()> {
     #[link(name = "kernel32")]
     extern "system" {
         fn SetStdHandle(kind: u32, handle: *mut c_void) -> i32;
+        fn SetConsoleOutputCP(code_page: u32) -> i32;
     }
     // A console created by the hidden watcher may inherit null std handles.
     // Reopen only this dedicated decision console, never the caller's job I/O.
@@ -679,7 +729,8 @@ fn decision_console() -> Result<()> {
         .open("CONOUT$")?
         .into_raw_handle();
     unsafe {
-        if SetStdHandle(-10i32 as u32, input) == 0
+        if SetConsoleOutputCP(65001) == 0
+            || SetStdHandle(-10i32 as u32, input) == 0
             || SetStdHandle(-11i32 as u32, output) == 0
             || SetStdHandle(-12i32 as u32, output) == 0
         {
