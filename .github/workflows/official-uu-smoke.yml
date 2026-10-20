@@ -8,6 +8,7 @@ on:
       - '.github/workflows/official-uu-smoke.yml'
       - 'scripts/official-uu-smoke.ps1'
       - 'scripts/inspect-official-uu.ps1'
+      - 'scripts/install-official-uu-smoke.ps1'
   workflow_dispatch:
 
 permissions:
@@ -16,7 +17,7 @@ permissions:
 jobs:
   probe-official-download:
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - name: Discover and verify official Windows installer
@@ -26,6 +27,9 @@ jobs:
       - name: Inspect verified package and embedded CLI
         shell: pwsh
         run: ./scripts/inspect-official-uu.ps1
+      - name: Clean install, CLI probe, and uninstall on disposable runner
+        shell: pwsh
+        run: ./scripts/install-official-uu-smoke.ps1
       - name: Summary
         if: always()
         shell: pwsh
