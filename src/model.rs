@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn fingerprint_includes_device_name_and_creation_instance() {
+    fn fingerprint_includes_device_identity_and_creation_instance() {
         let a = SessionInfo {
             device_identity: "device-1".into(),
             device_name: "car".into(),
@@ -97,9 +97,6 @@ mod tests {
         };
         let mut b = a.clone();
         b.created_at = Some("2026-10-20T17:27:45Z".into());
-        assert_ne!(
-            a.authorization_fingerprint(),
-            b.authorization_fingerprint()
-        );
+        assert_ne!(a.authorization_fingerprint(), b.authorization_fingerprint());
     }
 }
