@@ -14,10 +14,13 @@ Write-Host "Page bytes: $([Text.Encoding]::UTF8.GetByteCount($html))"
 $baseUri = [Uri]$pageUrl
 $candidates = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
 
-# Absolute and relative executable links embedded directly in HTML/JS.
+# The official page currently exposes a stable NetEase redirect in its JSON-LD,
+# e.g. downloadUrl=https://adl.netease.com/d/g/uuremote/c/gw?type=pc.
+# Do not hard-code the resolved installer file itself; rediscover the public link each run.
 $patterns = @(
     '(?i)https?://[^\s\"''<>]+?\.exe(?:\?[^\s\"''<>]*)?',
-    '(?i)(?:href|url|downloadUrl|download_url)\s*[:=]\s*[\"'']([^\"'']+\.exe(?:\?[^\"'']*)?)[\"'']'
+    '(?i)[\"'']downloadUrl[\"'']\s*:\s*[\"'']([^\"'']+)[\"'']',
+    '(?i)(?:href|url|download_url)\s*[:=]\s*[\"'']([^\"'']+\.exe(?:\?[^\"'']*)?)[\"'']'
 )
 
 foreach ($pattern in $patterns) {
@@ -35,35 +38,45 @@ foreach ($pattern in $patterns) {
     }
 }
 
-Write-Host "Executable candidates: $($candidates.Count)"
+Write-Host "Download candidates: $($candidates.Count)"
 $candidates | Sort-Object | ForEach-Object { Write-Host "  $_" }
 
 if ($candidates.Count -eq 0) {
-    Write-Host 'No direct .exe URL was present in the initial HTML.'
-    Write-Host 'Download-related excerpts:'
-    [regex]::Matches($html, '(?is).{0,100}(?:windows|download|下载|exe).{0,180}') |
-        Select-Object -First 20 |
-        ForEach-Object { Write-Host ($_.Value -replace '\s+', ' ') }
-    throw 'Could not discover a Windows installer URL from the official page HTML.'
+    throw 'Could not discover any download URL from the official page HTML.'
 }
 
-# Prefer candidates still under NetEase-controlled domains. Authenticode remains the final binary check.
-$preferred = $candidates |
-    Where-Object {
-        try {
-            $hostName = ([Uri]$_).DnsSafeHost.ToLowerInvariant()
+function Test-NetEaseHost([string]$url) {
+    try {
+        $hostName = ([Uri]$url).DnsSafeHost.ToLowerInvariant()
+        return (
             $hostName -eq '163.com' -or $hostName.EndsWith('.163.com') -or
             $hostName -eq 'netease.com' -or $hostName.EndsWith('.netease.com')
-        } catch { $false }
+        )
+    } catch {
+        return $false
+    }
+}
+
+# Prefer the Windows endpoint advertised by the official page. We deliberately
+# identify it by product route/type rather than by a versioned installer filename.
+$preferred = $candidates |
+    Where-Object {
+        if (-not (Test-NetEaseHost $_)) { return $false }
+        $uri = [Uri]$_
+        $text = $uri.AbsoluteUri.ToLowerInvariant()
+        return $text.Contains('/uuremote/') -and (
+            $text.Contains('type=pc') -or
+            $uri.AbsolutePath.TrimEnd('/').EndsWith('/gw')
+        )
     } |
     Sort-Object |
     Select-Object -First 1
 
 if (-not $preferred) {
-    throw 'Found executable links, but none are on a recognized NetEase-controlled domain.'
+    throw 'Official page did not expose a recognizable NetEase Windows download endpoint.'
 }
 
-Write-Host "Selected candidate: $preferred"
+Write-Host "Selected Windows endpoint: $preferred"
 $installer = Join-Path $env:RUNNER_TEMP 'uuyc-installer.exe'
 Invoke-WebRequest -Uri $preferred -OutFile $installer -MaximumRedirection 8 -UseBasicParsing
 
@@ -81,10 +94,18 @@ Write-Host "Product: $product"
 Write-Host "Signature status: $($signature.Status)"
 Write-Host "Signer: $subject"
 
+if ($file.Length -lt 1MB) {
+    throw "Downloaded payload is unexpectedly small: $($file.Length) bytes"
+}
 if ($signature.Status -ne 'Valid') {
     throw "Official installer candidate does not have a valid Authenticode signature: $($signature.Status)"
+}
+if (-not $signature.SignerCertificate) {
+    throw 'Installer has no signer certificate.'
 }
 
 "installer_url=$preferred" >> $env:GITHUB_OUTPUT
 "sha256=$hash" >> $env:GITHUB_OUTPUT
 "version=$version" >> $env:GITHUB_OUTPUT
+"product=$product" >> $env:GITHUB_OUTPUT
+"signer=$subject" >> $env:GITHUB_OUTPUT
