@@ -273,7 +273,7 @@ mod tests {
         command.args([
             "/d",
             "/c",
-            "echo. & echo UUCconptyprobeBpayload & echo UUCconptyprobeE0Z",
+            "echo.&echo UUCconptyprobeBpayload&echo UUCconptyprobeE0Z",
         ]);
         let mut child = slave.spawn_command(command).unwrap();
         let mut writer = master.take_writer().unwrap();

@@ -50,7 +50,7 @@ pub fn wrap_job(remote_root: &str, shell_command: &str, nonce: &str) -> Result<S
     let command = shell_quote(shell_command);
 
     Ok(format!(
-        "printf '\\n%s%s%s' 'UUC' '{nonce}' 'B'; ( cd -- {root} && eval {command} ); __uu_status=$?; printf '\\n%s%s%s%d%s' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\n"
+        "printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; ( cd -- {root} && eval {command} ); __uu_status=$?; printf '\\r\\n%s%s%s%d%s' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\n"
     ))
 }
 
@@ -59,7 +59,7 @@ pub fn wrap_job(remote_root: &str, shell_command: &str, nonce: &str) -> Result<S
 pub fn wrap_pwd_probe(nonce: &str) -> Result<String> {
     validate_nonce(nonce)?;
     Ok(format!(
-        "printf '\\n%s%s%s' 'UUC' '{nonce}' 'B'; pwd; __uu_status=$?; printf '\\n%s%s%s%d%s' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\n"
+        "printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; pwd; __uu_status=$?; printf '\\r\\n%s%s%s%d%s' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\n"
     ))
 }
 
@@ -89,8 +89,8 @@ impl CompletionDecoder {
     pub fn new(nonce: &str) -> Result<Self> {
         validate_nonce(nonce)?;
 
-        let start_marker = format!("\nUUC{nonce}B").into_bytes();
-        let end_prefix = format!("\nUUC{nonce}E").into_bytes();
+        let start_marker = format!("\r\nUUC{nonce}B").into_bytes();
+        let end_prefix = format!("\r\nUUC{nonce}E").into_bytes();
 
         Ok(Self {
             start_marker,
@@ -165,40 +165,23 @@ impl CompletionDecoder {
                 let status = status_text.parse::<i32>().map_err(|_| {
                     anyhow!("invalid exit status in completion marker: {status_text}")
                 })?;
-                let output_end = without_protocol_carriage_return(&self.pending[..start]);
-                let output = self.pending[..output_end].to_vec();
+                let output = self.pending[..start].to_vec();
                 self.pending.clear();
                 self.completed = Some(status);
                 return Ok(output);
             }
 
-            let output_end = without_protocol_carriage_return(&self.pending[..start]);
-            let output = self.pending[..output_end].to_vec();
+            let output = self.pending[..start].to_vec();
             self.pending.drain(..start);
             return Ok(output);
         }
 
-        let mut keep = longest_suffix_prefix(&self.pending, &self.end_prefix);
-        if keep == 0 && self.pending.ends_with(b"\r") {
-            keep = 1;
-        } else if keep > 0
-            && self.pending.len() > keep
-            && self.pending[self.pending.len() - keep - 1] == b'\r'
-        {
-            keep += 1;
-        }
+        let keep = longest_suffix_prefix(&self.pending, &self.end_prefix);
         let emit_len = self.pending.len().saturating_sub(keep);
         Ok(self.pending.drain(..emit_len).collect())
     }
 }
 
-fn without_protocol_carriage_return(bytes: &[u8]) -> usize {
-    if bytes.ends_with(b"\r") {
-        bytes.len() - 1
-    } else {
-        bytes.len()
-    }
-}
 
 fn longest_suffix_prefix(bytes: &[u8], prefix: &[u8]) -> usize {
     let max = bytes.len().min(prefix.len().saturating_sub(1));
@@ -263,10 +246,10 @@ mod tests {
             "AbC123",
         )
         .unwrap();
-        assert!(wrapped.contains("printf '\\n%s%s%s' 'UUC' 'AbC123' 'B'"));
+        assert!(wrapped.contains("printf '\\r\\n%s%s%s' 'UUC' 'AbC123' 'B'"));
         assert!(wrapped.contains("( cd -- '/home/user/my project' && eval "));
         assert!(wrapped.contains("'cd src && export X=1 && exit 7'"));
-        assert!(wrapped.contains("printf '\\n%s%s%s%d%s' 'UUC' 'AbC123' 'E'"));
+        assert!(wrapped.contains("printf '\\r\\n%s%s%s%d%s' 'UUC' 'AbC123' 'E'"));
         assert!(!wrapped.contains("UUCAbC123B"));
         assert!(!wrapped.contains("UUCAbC123E"));
     }
@@ -274,10 +257,10 @@ mod tests {
     #[test]
     fn pwd_probe_runs_without_changing_remote_root() {
         let script = wrap_pwd_probe("abc123").unwrap();
-        assert!(script.contains("printf '\\n%s%s%s' 'UUC' 'abc123' 'B'"));
+        assert!(script.contains("printf '\\r\\n%s%s%s' 'UUC' 'abc123' 'B'"));
         assert!(script.contains("; pwd;"));
         assert!(!script.contains("cd --"));
-        assert!(script.contains("printf '\\n%s%s%s%d%s' 'UUC' 'abc123' 'E'"));
+        assert!(script.contains("printf '\\r\\n%s%s%s%d%s' 'UUC' 'abc123' 'E'"));
         assert!(!script.contains("UUCabc123B"));
     }
 
@@ -296,7 +279,7 @@ mod tests {
         let end = b"\r\nUUCabc123E17Zprompt$ ";
         let mut received = Vec::new();
 
-        received.extend(decoder.push(b"prompt$ printf '\\n%s%s%s' 'UUC' 'abc123' 'B'\r\n").unwrap());
+        received.extend(decoder.push(b"prompt$ printf '\\r\\n%s%s%s' 'UUC' 'abc123' 'B'\r\n").unwrap());
         received.extend(decoder.push(&start[..8]).unwrap());
         received.extend(decoder.push(&start[8..]).unwrap());
         received.extend(decoder.push(b"hello ").unwrap());
@@ -311,7 +294,7 @@ mod tests {
     #[test]
     fn decoder_ignores_echoed_split_marker_before_start() {
         let mut decoder = CompletionDecoder::new("nonce").unwrap();
-        let echo = b"printf '\\n%s%s%s' 'UUC' 'nonce' 'B'\r\n";
+        let echo = b"printf '\\r\\n%s%s%s' 'UUC' 'nonce' 'B'\r\n";
         assert!(decoder.push(echo).unwrap().is_empty());
         assert!(!decoder.started());
 
@@ -347,13 +330,16 @@ mod tests {
     }
 
     #[test]
-    fn end_marker_drops_only_its_separator_newline() {
-        let mut decoder = CompletionDecoder::new("nonce").unwrap();
-        decoder.push(b"\r\nUUCnonceB").unwrap();
-        let received = decoder
-            .push(b"payload\r\n\r\nUUCnonceE0Z")
-            .unwrap();
-        assert_eq!(received, b"payload\r\n");
-        assert_eq!(decoder.completed(), Some(0));
+    fn end_marker_preserves_output_bytes_before_its_crlf_separator() {
+        for (output, expected) in [
+            (&b"plain\r\n\r\nUUCnonceE0Z"[..], &b"plain\r\n"[..]),
+            (&b"plain\r\r\nUUCnonceE0Z"[..], &b"plain\r"[..]),
+            (&b"plain\r\nUUCnonceE0Z"[..], &b"plain"[..]),
+        ] {
+            let mut decoder = CompletionDecoder::new("nonce").unwrap();
+            decoder.push(b"\r\nUUCnonceB").unwrap();
+            assert_eq!(decoder.push(output).unwrap(), expected);
+            assert_eq!(decoder.completed(), Some(0));
+        }
     }
 }
