@@ -12,7 +12,9 @@ use std::sync::{
 };
 use std::thread;
 use std::time::Duration;
-use uu_cli::authorization::{binding_candidates, classify_session, fingerprint_baseline, SessionDecision};
+use uu_cli::authorization::{
+    binding_candidates, classify_session, fingerprint_baseline, SessionDecision,
+};
 use uu_cli::cli::Command;
 use uu_cli::config::ConfigStore;
 use uu_cli::inventory::{discover_inventory, is_eligible_session, InventorySnapshot};
@@ -194,12 +196,19 @@ fn interaction_lock(store: &ConfigStore) -> Result<File> {
 fn sessions(snapshot: &InventorySnapshot) -> Result<Vec<SessionInfo>> {
     let eligible: Vec<_> = snapshot.eligible_sessions().into_iter().cloned().collect();
     check_instance_support(&eligible)?;
-    Ok(eligible.into_iter().filter(|s| s.authorization_fingerprint().is_some()).collect())
+    Ok(eligible
+        .into_iter()
+        .filter(|s| s.authorization_fingerprint().is_some())
+        .collect())
 }
 
 fn check_instance_support(current: &[SessionInfo]) -> Result<()> {
     let eligible: Vec<_> = current.iter().filter(|s| is_eligible_session(s)).collect();
-    if !eligible.is_empty() && eligible.iter().all(|s| s.authorization_fingerprint().is_none()) {
+    if !eligible.is_empty()
+        && eligible
+            .iter()
+            .all(|s| s.authorization_fingerprint().is_none())
+    {
         bail!("official UU Terminal instance identity is unavailable (createdAt/device/name); this client cannot safely authorize these Terminals");
     }
     Ok(())
@@ -318,8 +327,12 @@ fn setup(store: &ConfigStore, force: bool) -> Result<()> {
         let snapshot = discover_inventory(&cli)?;
         let current = sessions(&snapshot)?;
         let config = store.load()?;
-        let candidates = binding_candidates(&current, &config.authorized_workers,
-            &config.declined_workers, waiting.then_some(&baseline));
+        let candidates = binding_candidates(
+            &current,
+            &config.authorized_workers,
+            &config.declined_workers,
+            waiting.then_some(&baseline),
+        );
         if candidates.is_empty() {
             if !waiting {
                 println!("请在官方 UU 中打开目标设备的 Terminal；接下来打开的 Terminal 将用于本次请求。Ctrl+C取消。");
@@ -335,12 +348,21 @@ fn setup(store: &ConfigStore, force: bool) -> Result<()> {
             .filter(|s| s.device_identity == selected)
             .collect();
         let name = selected_sessions[0].device_name.clone();
-        let mut accepted = selected_sessions.iter().any(|s| config.is_session_authorized(s));
+        let mut accepted = selected_sessions
+            .iter()
+            .any(|s| config.is_session_authorized(s));
         for session in selected_sessions {
             if config.is_session_authorized(session) {
                 continue;
             }
-            if waiting && classify_session(session, &config.authorized_workers, &config.declined_workers, Some(&baseline)) == SessionDecision::AutoAuthorizeForPendingRequest {
+            if waiting
+                && classify_session(
+                    session,
+                    &config.authorized_workers,
+                    &config.declined_workers,
+                    Some(&baseline),
+                ) == SessionDecision::AutoAuthorizeForPendingRequest
+            {
                 store.update(|config| {
                     config.authorize_session(session);
                     Ok(())

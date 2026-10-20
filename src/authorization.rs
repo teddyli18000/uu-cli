@@ -59,11 +59,19 @@ pub fn binding_candidates(
     declined: &[String],
     waiting: Option<&HashSet<String>>,
 ) -> Vec<SessionInfo> {
-    sessions.iter().filter(|session| match classify_session(session, authorized, declined, waiting) {
-        SessionDecision::Authorized | SessionDecision::AutoAuthorizeForPendingRequest => true,
-        SessionDecision::Prompt => waiting.is_none(),
-        SessionDecision::Declined | SessionDecision::Unverifiable => false,
-    }).cloned().collect()
+    sessions
+        .iter()
+        .filter(
+            |session| match classify_session(session, authorized, declined, waiting) {
+                SessionDecision::Authorized | SessionDecision::AutoAuthorizeForPendingRequest => {
+                    true
+                }
+                SessionDecision::Prompt => waiting.is_none(),
+                SessionDecision::Declined | SessionDecision::Unverifiable => false,
+            },
+        )
+        .cloned()
+        .collect()
 }
 
 /// Select a newly opened instance for a request that already told the user to
@@ -219,9 +227,15 @@ mod tests {
         other.device_identity = "other-device".into();
         let authorized = vec![old.authorization_fingerprint().unwrap()];
         let current = vec![old.clone(), other.clone()];
-        assert_eq!(binding_candidates(&current, &authorized, &[], None), current);
+        assert_eq!(
+            binding_candidates(&current, &authorized, &[], None),
+            current
+        );
         let baseline = fingerprint_baseline([&old]);
-        assert_eq!(binding_candidates(&current, &authorized, &[], Some(&baseline)), current);
+        assert_eq!(
+            binding_candidates(&current, &authorized, &[], Some(&baseline)),
+            current
+        );
     }
 
     #[test]
@@ -231,5 +245,4 @@ mod tests {
         let decisions = vec![declined.authorization_fingerprint().unwrap()];
         assert!(binding_candidates(&[declined, unknown], &[], &decisions, None).is_empty());
     }
-
 }
