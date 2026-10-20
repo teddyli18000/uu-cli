@@ -28,7 +28,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build uu-cli release candidate
         shell: pwsh
-        run: cargo build --release --locked
+        run: cargo build --release
       - name: Discover and verify official Windows installer
         id: probe
         shell: pwsh
