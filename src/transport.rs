@@ -2,7 +2,7 @@
 
 use crate::runner::{run_framed_job, JobResult, JobRunError};
 use anyhow::{bail, Context, Result};
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize, PtySystem};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::Path;
