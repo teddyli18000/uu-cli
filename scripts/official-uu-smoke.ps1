@@ -14,9 +14,6 @@ Write-Host "Page bytes: $([Text.Encoding]::UTF8.GetByteCount($html))"
 $baseUri = [Uri]$pageUrl
 $candidates = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
 
-# The official page currently exposes a stable NetEase redirect in its JSON-LD,
-# e.g. downloadUrl=https://adl.netease.com/d/g/uuremote/c/gw?type=pc.
-# Do not hard-code the resolved installer file itself; rediscover the public link each run.
 $patterns = @(
     '(?i)https?://[^\s\"''<>]+?\.exe(?:\?[^\s\"''<>]*)?',
     '(?i)[\"'']downloadUrl[\"'']\s*:\s*[\"'']([^\"'']+)[\"'']',
@@ -33,17 +30,12 @@ foreach ($pattern in $patterns) {
                 [void]$candidates.Add($uri.AbsoluteUri)
             }
         } catch {
-            # Keep scanning; malformed unrelated JS strings are expected.
         }
     }
 }
 
 Write-Host "Download candidates: $($candidates.Count)"
 $candidates | Sort-Object | ForEach-Object { Write-Host "  $_" }
-
-if ($candidates.Count -eq 0) {
-    throw 'Could not discover any download URL from the official page HTML.'
-}
 
 function Test-NetEaseHost([string]$url) {
     try {
@@ -57,7 +49,6 @@ function Test-NetEaseHost([string]$url) {
     }
 }
 
-# Prefer exactly the Windows route advertised by the official page.
 $preferred = $candidates |
     Where-Object {
         if (-not (Test-NetEaseHost $_)) { return $false }
@@ -77,8 +68,77 @@ if (-not $preferred) {
 }
 
 Write-Host "Selected Windows endpoint: $preferred"
+
+# The public adl endpoint can itself be a small HTML redirect/landing page. Resolve it
+# without executing anything, then only accept a signed PE as the installer.
+$downloadResponse = Invoke-WebRequest -Uri $preferred -MaximumRedirection 8 -UseBasicParsing
+$finalUri = $downloadResponse.BaseResponse.RequestMessage.RequestUri.AbsoluteUri
+$contentType = [string]$downloadResponse.Headers['Content-Type']
+$contentDisposition = [string]$downloadResponse.Headers['Content-Disposition']
+Write-Host "Endpoint final URI: $finalUri"
+Write-Host "Endpoint content type: $contentType"
+Write-Host "Endpoint content disposition: $contentDisposition"
+
+$payloadBytes = $downloadResponse.RawContentStream.ToArray()
 $installer = Join-Path $env:RUNNER_TEMP 'uuyc-installer.exe'
-Invoke-WebRequest -Uri $preferred -OutFile $installer -MaximumRedirection 8 -UseBasicParsing
+
+# MZ means we already have a PE installer.
+$isPe = $payloadBytes.Length -ge 2 -and $payloadBytes[0] -eq 0x4D -and $payloadBytes[1] -eq 0x5A
+if ($isPe) {
+    [IO.File]::WriteAllBytes($installer, $payloadBytes)
+} else {
+    $landing = [Text.Encoding]::UTF8.GetString($payloadBytes)
+    Write-Host "Endpoint returned HTML/text bytes: $($payloadBytes.Length)"
+
+    $landingUrls = New-Object System.Collections.Generic.HashSet[string] ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($match in [regex]::Matches($landing, '(?i)https?://[^\s\"''<>]+')) {
+        $raw = $match.Value.TrimEnd(')', ']', '}', ',', ';')
+        try {
+            $uri = [Uri]$raw
+            if ($uri.Scheme -in @('http', 'https')) {
+                [void]$landingUrls.Add($uri.AbsoluteUri)
+            }
+        } catch {
+        }
+    }
+
+    Write-Host "Landing page URLs: $($landingUrls.Count)"
+    $landingUrls | Sort-Object | ForEach-Object { Write-Host "  $_" }
+
+    $binaryCandidates = $landingUrls |
+        Where-Object {
+            if (-not (Test-NetEaseHost $_)) { return $false }
+            $u = [Uri]$_
+            $s = $u.AbsoluteUri.ToLowerInvariant()
+            return $s.Contains('uuremote') -or $s.EndsWith('.exe') -or $s.Contains('.exe?')
+        } |
+        Sort-Object
+
+    $resolved = $null
+    foreach ($candidate in $binaryCandidates) {
+        Write-Host "Probing landing candidate: $candidate"
+        try {
+            $probe = Invoke-WebRequest -Uri $candidate -MaximumRedirection 8 -UseBasicParsing
+            $bytes = $probe.RawContentStream.ToArray()
+            if ($bytes.Length -ge 2 -and $bytes[0] -eq 0x4D -and $bytes[1] -eq 0x5A) {
+                $resolved = $candidate
+                [IO.File]::WriteAllBytes($installer, $bytes)
+                break
+            }
+        } catch {
+            Write-Host "  probe failed: $($_.Exception.Message)"
+        }
+    }
+
+    if (-not $resolved) {
+        $excerpt = ($landing -replace '\s+', ' ')
+        if ($excerpt.Length -gt 2500) { $excerpt = $excerpt.Substring(0, 2500) }
+        Write-Host "Landing excerpt: $excerpt"
+        throw 'Official Windows endpoint returned a landing page, but no signed installer URL could yet be resolved from it.'
+    }
+
+    Write-Host "Resolved installer candidate: $resolved"
+}
 
 $hash = (Get-FileHash -Path $installer -Algorithm SHA256).Hash
 $file = Get-Item $installer
