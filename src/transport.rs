@@ -238,7 +238,6 @@ mod tests {
     use crate::job::CompletionDecoder;
     use crate::runner::{initialize_conpty, PumpRead};
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-    use std::io::Write;
     use std::time::{Duration, Instant};
 
     const PROBE: &[u8] =
@@ -277,7 +276,7 @@ mod tests {
             "echo. & echo UUCconptyprobeBpayload & echo UUCconptyprobeE0Z",
         ]);
         let mut child = slave.spawn_command(command).unwrap();
-        let writer = master.take_writer().unwrap();
+        let mut writer = master.take_writer().unwrap();
         let reader = master.try_clone_reader().unwrap();
         drop(slave);
         let mut reader = ReadPump::spawn(reader);
