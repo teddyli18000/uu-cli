@@ -247,7 +247,10 @@ impl<'a> PwdRecordReader<'a> {
             .copied()
             .ok_or_else(|| anyhow!("pwd probe cursor sequence was incomplete"))?;
         if !matches!(final_byte, b'A'..=b'H' | b'd' | b'f') {
-            bail!("pwd probe contained an unsupported cursor sequence");
+            bail!(
+                "pwd probe contained an unsupported cursor sequence: {:02x?}",
+                &self.bytes[start..=self.offset]
+            );
         }
         self.offset += 1;
         if self.offset - start > PWD_MAX_CSI_BYTES {
