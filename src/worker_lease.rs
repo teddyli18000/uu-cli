@@ -43,6 +43,7 @@ impl WorkerLease {
         let state_path = runtime_dir.join(format!("{key}.inflight"));
         let lock_file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&lock_path)
