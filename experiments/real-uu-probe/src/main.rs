@@ -179,7 +179,7 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
         }
     });
     logs.note(
-        "Local controls: pwd hello exit7 second unicode stream sleep interrupt interrupt-key after status quit",
+        "Local controls: pwd hello exit7 second unicode stream sleep interrupt interrupt-key after status quit; guard-<command> selects the job-guard experiment",
     )?;
     let mut startup = Vec::new();
     let mut all_rx = Vec::new();
@@ -337,7 +337,9 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
                 logs.note("No send: previous command completion has not been observed")?;
                 continue;
             }
-            let shell = match control {
+            let guarded = control.starts_with("guard-");
+            let command_name = control.strip_prefix("guard-").unwrap_or(control);
+            let shell = match command_name {
                 "pwd" => "pwd",
                 "hello" => "printf 'hello-uu\\n'",
                 "exit7" => "sh -c 'exit 7'",
@@ -354,14 +356,20 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
             sequence += 1;
             let nonce = format!("probe{:x}{sequence:x}", std::process::id());
             let escaped = format!("'{}'", shell.replace('\'', "'\"'\"'"));
-            // Candidate framing, no remote-root cd and no product decoder/recovery.
-            let wrapper = format!("printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; ( eval {escaped} ); __uu_status=$?; printf '\\r\\n%s%s%s%d%s' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\r");
+            // Baseline candidate retained for comparison. The guard experiment
+            // changes only this dedicated shell's monitor baseline and per-job
+            // traps. Inner eval cannot replace the shell that owns the EXIT trap.
+            let wrapper = if guarded {
+                format!("set +m; ( trap '__uu_status=$?; printf \"\\r\\n%s%s%s%d%s\\r\\n\" UUC {nonce} E \"$__uu_status\" Z' EXIT; trap 'exit 130' INT; printf '\\r\\n%s%s%s\\r\\n' UUC {nonce} B; ( eval {escaped} ) )\r")
+            } else {
+                format!("printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; ( eval {escaped} ); __uu_status=$?; printf '\\r\\n%s%s%s%d%s' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\r")
+            };
             logs.note(&format!(
                 "Command {control} sending once: {shell}; nonce={nonce}"
             ))?;
             logs.event(
                 "command",
-                json!({"label":control,"shell":shell,"nonce":nonce}),
+                json!({"label":control,"shell":shell,"nonce":nonce,"guarded":guarded}),
             )?;
             pending = Some((nonce, control.to_string(), Instant::now()));
             any_command_sent = true;

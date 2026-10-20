@@ -119,6 +119,17 @@
 - Next diagnostic is read-only remote shell flags, `monitor`, `stty` and shell
   PID/process-group/foreground-group/session metadata. No remote settings changed.
 
+## Remote shell diagnostic (user-run, official UI)
+
+- `shell-flags=himBHs`, `monitor on`.
+- `stty`: `intr = ^C`, `isig icanon iexten echo echoctl`; no disabled interrupt
+  character or disabled signal generation observed. No `stty` changes made.
+- Shell PID = PGID = SID, state `Ss`; foreground PGID differed while the `ps`
+  diagnostic itself was the foreground command. This snapshot alone does not show
+  which process group received the earlier interrupts.
+- Signal delivery to the actual foreground job remains unverified. The remote
+  host implementation/version has not yet been identified in this experiment.
+
 ## Conclusion
 
 - Attach handoff is demonstrated in this environment: a live official attachment

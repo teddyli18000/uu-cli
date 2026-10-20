@@ -26,6 +26,14 @@ It requires the startup `ESC[?9001h` request and a pending command. No console m
 or official process configuration is changed. Neither form asserts cancellation.
 Protocol reference: [Microsoft Terminal input encoder](https://github.com/microsoft/terminal/blob/main/src/terminal/input/terminalInput.cpp).
 
+`guard-<command>` selects a separate job-guard experiment with the same fixed
+command whitelist. It runs `set +m` in the explicitly surrendered dedicated shell
+as a worker baseline, then uses an isolated guard subshell with INT/EXIT traps and
+an inner command subshell. END and BEGIN have trailing newlines. This intentionally
+changes job-control mode only in that dedicated shell; it is not a default product
+repair or a change to remote system/UU settings. Cancellation still needs a matching
+END and observed prompt/reuse; no pending state is cleared by the interrupt itself.
+
 `human.log` contains milestones; `raw.jsonl` contains timestamped TX/RX hex and
 process-state events before any interpretation. Cursor inheritance DSR is logged
 and answered only before a shell command is sent. Raw RX is never stripped or
