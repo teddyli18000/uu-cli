@@ -441,10 +441,13 @@ mod tests {
     fn generic_command_success_preserves_vendor_error_on_zero_exit() {
         let output = Output {
             status: status(0),
-            stdout: br#"{"success":false,"data":null,"error":{"code":409,"message":"busy"}}"#.to_vec(),
+            stdout: br#"{"success":false,"data":null,"error":{"code":409,"message":"busy"}}"#
+                .to_vec(),
             stderr: vec![],
         };
-        let error = ensure_command_success(&output, "test").unwrap_err().to_string();
+        let error = ensure_command_success(&output, "test")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("409"));
         assert!(error.contains("busy"));
     }
