@@ -40,6 +40,14 @@ impl Config {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceInfo {
+    pub device_identity: String,
+    pub device_name: String,
+    pub is_online: bool,
+    pub platform: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionInfo {
     pub device_identity: String,
     pub device_name: String,
