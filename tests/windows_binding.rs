@@ -201,7 +201,7 @@ impl Running {
             stderr,
         }
     }
-    fn finish(mut self, timeout: Duration) -> Output {
+    fn finish(mut self, timeout: Duration, diagnostics: &Workspace) -> Output {
         let deadline = Instant::now() + timeout;
         let mut timed_out = false;
         loop {
@@ -229,9 +229,12 @@ impl Running {
             .expect("read stderr");
         assert!(
             !timed_out,
-            "uu timed out; stdout={}\nstderr={}",
+            "uu timed out; stdout={}\nstderr={}\nconsole transcript:\n{}\nfixture events:\n{}",
             String::from_utf8_lossy(&stdout),
-            String::from_utf8_lossy(&stderr)
+            String::from_utf8_lossy(&stderr),
+            fs::read_to_string(&diagnostics.transcript)
+                .unwrap_or_else(|error| format!("<unavailable: {error}>")),
+            serde_json::to_string_pretty(&read_events(&diagnostics.events)).unwrap()
         );
         Output {
             status,
@@ -334,7 +337,7 @@ fn windows_first_binding_uses_isolated_console_and_preserves_job_stdin() {
     wait_for_available_terminal(&test.events, Duration::from_secs(20));
     drive(&test, running.pid, "Remote root [", "enter");
 
-    let output = running.finish(Duration::from_secs(90));
+    let output = running.finish(Duration::from_secs(90), &test);
     assert_success(&output, "first uu command");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -399,7 +402,7 @@ fn windows_first_binding_uses_isolated_console_and_preserves_job_stdin() {
     nested.current_dir(&test.nested).arg(format!(
         "test \"$(pwd)\" = {quoted_root} && printf ROOT-REUSE-OK"
     ));
-    let reused = Running::start(nested, b"").finish(Duration::from_secs(60));
+    let reused = Running::start(nested, b"").finish(Duration::from_secs(60), &test);
     assert_success(&reused, "nested-directory reuse");
     assert!(String::from_utf8_lossy(&reused.stdout).contains("ROOT-REUSE-OK"));
     let all = read_events(&test.events);
@@ -414,4 +417,58 @@ fn windows_first_binding_uses_isolated_console_and_preserves_job_stdin() {
     );
     assert_eq!(all_dispatches[2]["deviceId"], DEVICE_ID);
     assert_eq!(all_dispatches[2]["createdAt"], CREATED_AT);
+}
+
+#[test]
+fn windows_escape_alone_cancels_root_without_binding_or_business_dispatch() {
+    let test = Workspace::new();
+    fs::create_dir_all(test._temp.path().join("remote-root")).unwrap();
+    assert!(
+        !test.config.exists(),
+        "config must not exist before uu starts"
+    );
+    let bash = bash_path();
+    let mut command = base_command(&test, &bash);
+    command.arg("printf CANCEL_MUST_NOT_RUN");
+    let running = Running::start(command, b"");
+
+    drive(&test, running.pid, "Ctrl+C", "wait");
+    atomic_fixture(
+        &test.fixture,
+        &json!({"devices": [{
+            "deviceId": DEVICE_ID, "deviceName": DEVICE_NAME, "isOnline": true,
+            "terminals": [{"name": SESSION_NAME, "shell": "bash", "state": "detached",
+                "createdAt": CREATED_AT, "attachable": true}]
+        }]}),
+    );
+    wait_for_available_terminal(&test.events, Duration::from_secs(20));
+    drive(&test, running.pid, "Remote root [", "escape");
+
+    let output = running.finish(Duration::from_secs(15), &test);
+    assert!(
+        !output.status.success(),
+        "Esc-only root cancellation should fail the pending command"
+    );
+    if test.config.exists() {
+        let config: Value = serde_json::from_slice(&fs::read(&test.config).unwrap()).unwrap();
+        assert_eq!(
+            config["bindings"].as_array().map_or(0, Vec::len),
+            0,
+            "cancelling root selection must not save a workspace binding"
+        );
+    }
+    let events = read_events(&test.events);
+    let dispatches: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "dispatch")
+        .collect();
+    assert_eq!(
+        dispatches.len(),
+        1,
+        "root cancellation may capture pwd but must not dispatch the business command: {events:#?}"
+    );
+    assert!(dispatches[0]["wrapper"]
+        .as_str()
+        .unwrap()
+        .starts_with("printf '\\r\\n%s%s%s' 'UUC'"));
 }
