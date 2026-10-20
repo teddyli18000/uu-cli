@@ -120,9 +120,15 @@ mod tests {
 
     #[test]
     fn put_and_get_are_strict() {
-        assert!(matches!(parse(v(&["put", "a", "b"])), Ok(Command::Put { .. })));
+        assert!(matches!(
+            parse(v(&["put", "a", "b"])),
+            Ok(Command::Put { .. })
+        ));
         assert!(parse(v(&["put", "a"])).is_err());
-        assert!(matches!(parse(v(&["get", "a", "b"])), Ok(Command::Get { .. })));
+        assert!(matches!(
+            parse(v(&["get", "a", "b"])),
+            Ok(Command::Get { .. })
+        ));
         assert!(parse(v(&["get", "a", "b", "c"])).is_err());
     }
 }
