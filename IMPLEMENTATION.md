@@ -1,328 +1,181 @@
-# Implementation blueprint
+# Implementation contract
 
-这份文档把 `ARCHITECTURE.md` 变成可以直接执行的工程任务。原则：先做最小闭环，再补完整性；任何内部复杂度都不能泄漏到用户体验。
+这不是逐步教程，也不规定语言、模块、IPC、进程模型或具体 Windows API。
 
-## 1. 技术选择
+实现者应自行选择最简单、最可靠、最可维护的方案。这里仅定义 **最终必须实现的行为、兼容性和安全边界**。如果实机证据表明某个既有设想不是最优，允许改变内部实现，但不得破坏 `DESIGN.md` 的公共体验。
 
-v1 建议使用 **Rust stable**。
+## 1. 最终目标
 
-原因：
-
-- 单文件原生 Windows 可执行程序；
-- Win32 / ConPTY / named pipe / process monitoring 都可直接调用；
-- 低空闲占用，适合轻量 broker；
-- 类型系统适合处理 session/job/IPC 状态，减少并发误用；
-- installer 可继续独立选择 Inno Setup / WiX，不影响核心代码。
-
-依赖尽量克制。优先标准库 + `windows` crate + `serde/serde_json` + 小型错误处理/CLI 参数库；除非真实需要，不引入重量级异步框架。
-
-## 2. 一个二进制，两种内部角色
-
-对用户只安装：
-
-```text
-uu.exe
-```
-
-公开调用：
+在一台正常安装并登录官方网易 UU 远程的 Windows 电脑上，用户应能在任意本地项目中直接使用：
 
 ```powershell
 uu <command...>
-uu put ...
-uu get ...
+uu put <local> <remote>
+uu get <remote> <local>
+```
+
+首次配置和诊断最多需要：
+
+```powershell
 uu bind
 uu list
 ```
 
-内部允许隐藏模式：
+Codex 的日常心智模型只有一个：**本地命令前加 `uu`，就是在当前 workspace 绑定的远端工作目录执行。**
+
+## 2. Workspace binding
+
+一个本地 workspace v1 绑定：
 
 ```text
-uu.exe --internal-broker
+remote device + remote root
 ```
-
-这个参数不属于公共 API，不写进用户文档。
-
-CLI 负责：
-
-- 解析当前 cwd；
-- 找 workspace binding；
-- 把 job 请求发给 broker；
-- 转发 stdin/stdout；
-- 返回远端 exit code 或本地错误。
-
-Broker 负责：
-
-- 单实例；
-- UU 进程状态；
-- session discovery；
-- workspace/config；
-- terminal worker pool；
-- busy/idle/queue；
-- attach/PTY；
-- completion marker；
-- 输出流回传；
-- 必要的 PowerShell 交互提示。
-
-## 3. 推荐代码结构
-
-```text
-src/
-  main.rs
-  cli.rs
-  broker.rs
-  ipc.rs
-  config.rs
-  workspace.rs
-  uu/
-    mod.rs
-    install.rs
-    devices.rs
-    sessions.rs
-    terminal.rs
-  scheduler.rs
-  job.rs
-  marker.rs
-  prompt.rs
-  process_watch.rs
-  file_transfer.rs   # Phase 2 前可以只有接口/placeholder
-```
-
-不要建立大量抽象层。每个模块都应该能回答一个清晰问题。
-
-## 4. 数据模型
-
-只保存最小状态。
-
-```text
-WorkspaceBinding
-  local_root
-  device_identity
-  device_name
-  remote_root
-
-Worker
-  device_identity
-  session_name / validated internal session reference
-  state = idle | leased | unavailable
-
-Job
-  id
-  workspace_root
-  device_identity
-  command
-  worker
-  state = queued | sent | running | finished | unknown
-```
-
-不要持久化 busy 状态。Broker 重启后重新发现 session，并把不确定的旧 job 视为不可自动重放。
-
-## 5. Workspace lookup
-
-实现顺序：
-
-1. 从 cwd 向上查本地配置中的最近 binding；
-2. 找到即使用；
-3. 没找到时计算建议 root：Git root 优先，否则 cwd；
-4. 进入自动 bind 流程。
-
-绑定信息保存在 `%LOCALAPPDATA%\uu-cli\config.json` 或等价用户配置文件。
-
-配置更新必须原子写入：写临时文件后 rename/replace，避免崩溃留下半个 JSON。
-
-## 6. Session discovery
-
-第一版优先复用已经验证的官方 `uuyc-cli term ... ls --json` 管理面，不提前重写底层协议。
 
 要求：
 
-- 自动定位官方安装目录中的 CLI；
-- 不假设把 `uuyc-cli.exe` 复制到项目目录还能工作；
-- 解析本地 JSON wrapper；
-- 至少取得 device identity、device name、session name/state；
-- 发现/解析失败要区分“UU 未运行”“未登录/设备不可用”“没有 session”“官方版本不兼容”。
+- Git 仓库中默认以 Git root 作为 workspace；非 Git 目录使用合理的最近根目录/当前目录；
+- 子目录调用 `uu` 能稳定找到正确 binding；
+- binding 放在用户侧，不污染项目仓库；
+- v1 一个 workspace 只绑定一台远端设备；
+- Codex 不选择、不看到裸 `deviceId`；
+- 多设备同时存在时，由用户通过极短的人类交互选择一次，之后记住。
 
-后续只有当官方 CLI 包装成为明确瓶颈时才考虑更底层路径。
+## 3. Terminal 的产品语义
 
-## 7. 第一次 bind UX
+官方 UU Terminal 由用户自己打开。`uu-cli` 负责发现已经存在的 Terminal，并把被允许使用的 Terminal 当成 worker。
 
-### 情况 A：当前没有可用官方 Terminal
+Terminal 只是执行资源，不是 Agent 的长期上下文：
 
-普通命令例如：
+- 一个 worker 同时最多执行一个 job；
+- 长任务持续占用原 worker，输出实时返回；
+- 其他命令可使用其他空闲 worker；
+- worker 全忙时等待，不抢占；
+- 绝不跨设备调度；
+- 具体 session name/id 不应成为日常用户概念。
+
+### 新 Terminal 的交互
+
+目标是尽量无感：
+
+- 当某个 `uu` 调用正在等待可用 Terminal 时，用户刚打开的目标设备 Terminal 应被自动发现并继续原请求；
+- 如果新 Terminal 的归属完全明确，可以直接加入对应 worker pool；
+- 如果存在歧义（多个设备、多个 workspace、或无法判断是否供 uu-cli 使用），允许自动弹出一个非常短的 PowerShell 选择窗口；
+- 选择器优先提供默认项和数字键/Enter 操作，不展示协议字段；
+- 不反复询问已经确认过的同一绑定/Terminal；
+- 用户明确不交给 uu-cli 的 Terminal 不得被使用。
+
+交互设计以“几秒内完成、不需要理解 UU 内部机制”为标准。
+
+## 4. Shell context
+
+这是硬契约：**不同 `uu` 调用之间不保证共享 shell-local 状态。**
+
+因此 Agent/用户不能依赖上一条命令留下的：
+
+- `cd`；
+- `export`；
+- `source` / virtualenv；
+- alias；
+- 其他只存在于某个 shell 进程内的状态。
+
+需要连续状态时放在同一次调用中，例如：
 
 ```powershell
-uu git status
+uu "cd src && source .venv/bin/activate && python main.py"
 ```
 
-应进入等待/提示：
+每个普通 job 从 workspace 的 `remote root` 开始。后续 Skill 必须明确写出这一点。
 
-```text
-uu-cli · D:\projects\aic
-当前没有可用的 UU Terminal。
-请在网易 UU 远程中打开目标设备的“终端远控”。
-等待中…  Ctrl+C 取消
+## 5. 命令行为
+
+`uu <command>` 应尽量表现得像直接在远端 shell 中执行：
+
+- 输出实时可见；
+- 长任务不因工具自己的短超时被截断；
+- 能可靠判断一次调用的完成边界和 exit code；
+- PTY stdout/stderr 如果天然合流，不伪造不存在的分离；
+- Ctrl+C/取消行为尽量符合普通终端预期；
+- 已经发送到远端的命令，连接异常后不得自动在另一个 Terminal 重放；
+- 无法确认执行结果时明确返回未知状态，而不是猜测成功或再次执行。
+
+具体如何实现命令边界、attach、恢复和并发，由实现者根据现有研究和实机结果决定。
+
+## 6. 不干扰官方 UU — 硬边界
+
+`uu-cli` 是官方 UU 的旁路辅助工具，不是它的补丁或替代品。
+
+必须满足：
+
+- 不修改、替换、注入、patch 官方 UU/GameViewer 二进制；
+- 不修改官方 UU 的账号、登录、设备、更新、启动等配置；
+- 不保存或导出 UU 密码、Token、Cookie、local-host token 等认证材料；
+- 不杀死、关闭、重命名或偷偷接管用户未授权给 uu-cli 的 Terminal；
+- 不改变用户正在手工操作的 Terminal 的输入/状态；
+- 不因为 uu-cli 崩溃、升级、卸载而破坏 UU 自身功能；
+- 不依赖签名伪造、认证绕过、GUI 自动点击或进程注入；
+- 如果某种官方 attach/reuse 行为会明显影响用户当前 UU 窗口，必须换更安全的实现或要求使用专门提供给 uu-cli 的 Terminal，不能静默干扰。
+
+研究和调用官方已存在的本地互操作接口可以，但必须保持上述边界。
+
+## 7. 尽可能在任何正常电脑上可用
+
+目标不是“只在开发者这台电脑能跑”，而是：
+
+> 在官方 UU Remote 本身能够正常工作的受支持 Windows 电脑上，安装 uu-cli 后无需手工改路径、改源码或配置开发环境即可使用。
+
+因此实现必须尽量做到：
+
+- 自动发现官方 UU 安装位置和相关组件，不硬编码开发机路径；
+- 不硬编码用户名、盘符、deviceId、session name、安装版本或本机目录；
+- 优先能力探测/兼容性检测，而不是只认一个精确版本号；
+- 不要求用户安装 Python、Rust、Node、WSL 等开发运行时；
+- 安装和日常运行尽量使用普通用户权限，不无故要求管理员；
+- 配置只保存在当前用户合理的应用数据目录；
+- 升级能够保留有效 binding，卸载只清理 uu-cli 自己的内容；
+- 官方 UU 不在预期位置、版本行为变化或缺少能力时，给出明确诊断，而不是静默失效；
+- 对不同机器上的路径、设备名、Windows 用户名、显示语言等差异保持稳健。
+
+发布前至少应在“干净机器/干净用户配置”场景验证安装和首次使用，而不能依赖开发机遗留状态。
+
+## 8. 后台生命周期与资源占用
+
+用户希望：官方 UU 在用时，uu-cli 随时可用；没有任务或没有可用 Terminal 时，资源占用尽可能低。
+
+实现方式自由，但最终必须满足：
+
+- 用户不需要手工启动/停止第二个服务；
+- 自动发现新打开的官方 Terminal；
+- 空闲时 CPU 接近 0，不做高频轮询或持续 spawn 官方 CLI；
+- 没有必要时不维持昂贵连接；
+- 无多余 GUI、tray、常驻可见 console；
+- 只有真正需要用户选择时才弹短 PowerShell 交互；
+- 后台组件缺失/崩溃后，下一次 `uu` 能自动恢复或给出可理解错误；
+- uu-cli 的后台生命周期不能拖累或阻止官方 UU 正常启动、退出、升级。
+
+是否采用 broker、watcher、事件监听、lazy process 或其他结构，由实现者自行决定。
+
+## 9. 文件传输
+
+公共接口固定：
+
+```powershell
+uu put <local> <remote>
+uu get <remote> <local>
 ```
 
-Broker 在等待期间低成本监听/刷新。一旦 session 出现继续流程，不要求用户重新执行命令。
+必须：
 
-### 情况 B：只发现一台设备
+- 任意二进制安全；
+- 成功/失败语义明确；
+- 不完整传输不能报告成功；
+- 尽可能复用官方稳定能力；
+- 内部传输机制不暴露给 Agent。
 
-显示最短确认：
+如果原生路径不可复用，实现者可自行选择可靠 fallback，但不要为了实现方便改变公共接口或破坏文件完整性。
 
-```text
-发现 AIC-Car-1 · 3 terminals
-绑定到 D:\projects\aic ? [Enter]
-```
+## 10. Agent Skill
 
-然后从一个 terminal 获取 `pwd`：
-
-```text
-远端目录 /home/pi/aic  [Enter 确认 / 输入修改]
-```
-
-完成 binding 后继续原来的 job。
-
-### 情况 C：发现多台设备
-
-```text
-发现多个远端设备：
-  [1] AIC-Car-1   3 terminals
-  [2] AIC-Car-2   2 terminals
-选择 [1]:
-```
-
-只让用户看 friendly name 和数量；内部保存稳定 identity。
-
-## 8. 新 Terminal 的自动发现
-
-Broker 需要尽量无感地发现用户后来手动打开的新官方 Terminal。
-
-优先策略：
-
-1. 监听官方 `uuyc-cli.exe` / 相关 terminal host 进程启动事件；
-2. 事件出现后刷新 session list；
-3. 如果 Windows 事件监听在某版本不稳定，再使用低频 + 指数退避 polling；
-4. 不允许每秒永久 spawn 官方 CLI。
-
-发现新 session：
-
-- 已绑定设备、且用户允许该设备自动加入 → 自动加入 worker pool；
-- 否则弹一次简短 PowerShell 提示：
-
-```text
-AIC-Car-1 新终端 bash-4
-[Enter] 加入 uu workers    [S] 跳过
-```
-
-必要时用官方 rename 为 worker 加内部唯一标识；如果 rename 在真实测试中会影响用户体验，则只保存在本地 registry/config，并重新评估稳定识别方式。
-
-## 9. Scheduler
-
-Scheduler 只做三件事：
-
-1. 按 workspace binding 找到正确 device pool；
-2. 找 idle worker；
-3. lease 到 job 完成。
-
-没有 idle worker：FIFO 排队。
-
-不能：
-
-- 抢占正在运行的命令；
-- 把同一个 worker 同时给两个 job；
-- 自动把 job 切到别的 device；
-- 已发送后因为网络错误自动重放。
-
-## 10. Command wrapping
-
-普通命令必须每次从 `remote_root` 开始。
-
-概念模板：
-
-```bash
-cd -- '<remote_root>' && { <user-command>; }; __uu_emit_marker <nonce> "$?"
-```
-
-实际实现必须正确处理 shell quoting；不要直接字符串拼接未经转义的路径/nonce。
-
-completion marker：
-
-- 每 job 随机 nonce；
-- 不能与普通输出轻易碰撞；
-- 流式解析，marker 可以跨 frame 边界；
-- 返回给用户前剥离；
-- marker 内的 status 映射为本地进程 exit code。
-
-用户命令不能因为 wrapper 而被执行两次。
-
-## 11. 输出与长任务
-
-PTY 输出实时流回调用 `uu` 的进程。
-
-- 不等整个命令结束后一次性返回；
-- 不尝试伪造 stdout/stderr 分离；
-- 长任务 worker 持续 leased；
-- 另一个 job 使用其他 idle worker；
-- Ctrl+C 第一目标是中断当前远端前台 job，不是杀 broker；
-- 如果 attach/连接断掉且不知道命令结果，job 标记 `unknown`，不自动重跑。
-
-## 12. 本地 IPC
-
-CLI ↔ broker 使用当前用户作用域 Windows named pipe。
-
-协议保持小：
-
-```text
-hello/version
-run_job
-stdin
-cancel
-stdout_chunk
-job_exit
-error
-bind/list control
-```
-
-要求：
-
-- 带 protocol version；
-- 限制同一登录用户；
-- frame 有明确长度，不用 newline 猜边界；
-- 输出流允许 backpressure；
-- broker 挂掉时 CLI 给短错误并可重启一次 broker。
-
-## 13. Broker lifecycle / 占用
-
-用户希望“UU 开着时自动可用，没事时尽量没有占用”。在不修改官方 UU 的约束下，推荐：
-
-- 安装一个 user-level auto-start broker/watcher；
-- broker 没有 console/tray；
-- UU 不运行：只等待进程事件/低频检查；
-- UU 运行但没有 terminal/job：不 attach，不保持无意义网络连接；
-- 有 terminal/job：才建立需要的管理/terminal 连接；
-- `uu` 被调用但 broker 不在：CLI 自己拉起 broker；
-- 后续如果找到可靠、不修改 UU 的启动事件机制，可以再把常驻 watcher 去掉。
-
-不要为了追求“进程绝对为 0”而牺牲自动发现；也不要用高频轮询换自动感。
-
-## 14. `uu list`
-
-只做诊断：
-
-```text
-Workspace  D:\projects\aic
-Remote     AIC-Car-1 · /home/pi/aic
-Workers    3
-
-  1   busy   python3 train.py
-  2   idle
-  3   idle
-```
-
-可额外显示未接纳 session，但不要暴露协议字段或要求用户操作 session id。
-
-## 15. Agent Skill contract
-
-Skill 必须极短，只告诉 Agent：
+Skill 要极短，只教三件事：
 
 ```text
 远端执行：uu <command>
@@ -330,82 +183,27 @@ Skill 必须极短，只告诉 Agent：
 下载：uu get <remote> <local>
 ```
 
-并明确一条硬规则：
+再加一条硬规则：
 
-> 不要依赖不同 `uu` 调用之间的 shell-local 状态。需要 `cd` / `source` / `export` 连续生效时，把它们放在同一条 shell 命令中。每次普通 `uu` 调用都从该 workspace 绑定的 remote root 开始。
+> 不要依赖不同 `uu` 调用之间的 shell-local 状态；需要连续 `cd/source/export` 时放进同一条命令。普通 job 从 workspace 的 remote root 开始。
 
-Agent 不选择 deviceId、不选择 session、不管理 worker。
+Agent 不管理 deviceId、session、worker 或 uu-cli 后台生命周期。
 
-## 16. 实施顺序
+## 11. 完成标准
 
-### M0 — repository scaffold
+实现者自行决定开发顺序和代码结构，但 v1 完成前必须在真实 Windows + 官方 UU 环境证明：
 
-- Rust workspace / build；
-- CLI 参数；
-- config/workspace 模块；
-- named pipe skeleton；
-- unit tests。
+- 全新 workspace 可以完成首次 binding；
+- 多设备同时开 Terminal 时不会误绑；
+- 新开 Terminal 能自动发现，必要时交互简单；
+- 多个 Terminal 能安全并发调度；
+- 长任务实时输出且不阻塞其他 worker；
+- 不依赖 Terminal 的历史 `cd/source/export` 状态；
+- 已发送命令不会因内部恢复逻辑重复执行；
+- `put/get` 二进制 round-trip 一致；
+- UU 重启、Terminal 消失、网络异常、后台组件重启时行为可理解且不串设备；
+- 空闲占用低；
+- 安装、升级、卸载不影响官方 UU；
+- 在至少一台非开发机/干净环境上完成从安装到使用的验证。
 
-### M1 — discovery + bind
-
-- 找官方 UU/uuyc-cli；
-- `term ls --json`；
-- workspace root；
-- device grouping；
-- first-bind PowerShell UX；
-- `uu list`。
-
-### M2 — one worker shell
-
-- attach 一个已有 session；
-- run `pwd`；
-- marker + exit code；
-- streaming output；
-- Ctrl+C；
-- no-replay error semantics。
-
-### M3 — worker pool
-
-- 多 terminal discovery；
-- adopt/ignore；
-- idle/busy lease；
-- 多并发 `uu`；
-- queue；
-- long-running jobs。
-
-### M4 — file transfer
-
-先完成原生文件入口研究，再实现 `put/get`。不要提前把 base64 固化成架构。
-
-### M5 — lifecycle + installer
-
-- broker auto-start / low-idle watcher；
-- recovery；
-- user-scope installer；
-- PATH；
-- uninstall；
-- version compatibility diagnostics。
-
-## 17. 开发职责
-
-建议明确分工，避免两个 Agent 同时改同一块：
-
-### Cloud / ChatGPT
-
-- 维护产品与架构文档；
-- 维护任务拆分和验收标准；
-- review 每个 PR；
-- 做不依赖真实 Windows UU 的核心设计、测试策略和代码审查；
-- 根据本地实测结果及时修改 spec。
-
-### Local Codex
-
-作为主要实现者：
-
-- 在真实 Windows + 官方 UU 环境开发；
-- 实现 Win32 / ConPTY / process watcher / named pipe / uuyc-cli interop；
-- 跑真实 session/并发/长任务/重连测试；
-- 构建 installer 并在本机安装/卸载验证；
-- 每个 milestone 单独 PR，附真实测试结果。
-
-这样云端不假装拥有本地 UU 环境，本地 Codex 也不临时改产品设计。实现严格以 `DESIGN.md`、`ARCHITECTURE.md`、本文件和 `AGENTS.md` 为准。
+只要满足这些目标和 `DESIGN.md` 的公共契约，实现者有充分自由选择技术方案。
