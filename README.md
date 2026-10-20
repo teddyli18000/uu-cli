@@ -15,8 +15,6 @@ uu python3 main.py --debug
 uu "cd ~/aic && pytest -q"
 ```
 
-`uu` 自己负责选择已配置的默认设备、建立或复用远端终端，然后把后面的命令交给远端 shell。用户和 Agent 不需要先打开 UU Terminal，也不需要管理 session。
-
 文件传输只保留两个直观命令：
 
 ```powershell
@@ -33,7 +31,23 @@ uu use <device>
 
 选定默认设备后，日常执行仍然只是 `uu <command...>`。目标设备离线时明确失败，不自动切换到其他设备。
 
-除此之外，不扩展一套新的 shell、进程管理或任务 API。
+## 当前 Windows UU 限制
+
+对当前分析的官方 Windows UU 4.43.x，外部程序可以管理/附着已有 terminal session，但**没有可复用的零窗口、零点击 terminal launcher 入口**。官方 GUI 在创建终端时会先在主程序进程内注册本地 host/token，然后再启动官方 CLI；这个注册入口没有暴露给普通外部客户端。
+
+因此 v1 采用一个很小的人工 bootstrap：
+
+```text
+启动并登录 Windows UU
+        ↓
+用户在 UU 中为目标设备打开一次官方 Terminal
+        ↓
+之后 Codex / 用户直接使用 `uu ...`
+```
+
+`uu-cli` 不要求用户管理 session，也不会自己弹出 UU Terminal。只要存在可复用的官方 terminal session，`uu` 就负责发现、附着/复用并执行命令；如果当前没有可用 session，明确提示用户在 UU 中打开一次终端，而不是偷偷操作 GUI。
+
+如果未来官方 UU 暴露稳定的 headless host/register 接口，可以移除这一步，而不改变 `uu / put / get` 公共语法。
 
 ## 核心约定
 
@@ -42,29 +56,30 @@ uu use <device>
 - `uu get <remote> <local>`：把远端文件取回本地。
 - `uu devices`：查看可用设备和当前默认目标。
 - `uu use <device>`：修改默认目标设备。
-- 长时间运行、交互输入、stdout/stderr、退出码应尽可能表现得像直接在远端 shell 中运行。
-- 主控 Windows 上不弹控制台、不弹 UU 工具窗口、不提供托盘 UI。
-- 终端创建、attach、复用、并发等内部细节不暴露给使用者。
+- 长时间运行、交互输入和退出码应尽可能表现得像直接在远端 shell 中运行。
+- 官方 terminal 是单一 PTY 字节流；stdout/stderr 不保证可区分。
+- 主控 Windows 上 `uu-cli` 自己不弹控制台、不弹辅助 GUI、不提供托盘 UI。
+- terminal attach、复用、命令边界、并发等内部细节不暴露给使用者。
 
 ## 生命周期
 
 用户不管理 `uu-cli` 的启动和停止。
 
-理想行为：
+v1 的正常状态是：
 
 ```text
-Windows UU Remote 启动
+Windows UU Remote 启动并登录
         ↓
-uu-cli 后台能力静默可用
+用户打开一次目标设备的官方 Terminal
+        ↓
+`uu-cli` 可复用该 session
         ↓
 Codex / 用户随时执行 `uu ...`
         ↓
-Windows UU Remote 完全退出
-        ↓
-uu-cli 后台能力随之退出
+UU / session 失效时 `uu` 明确报错
 ```
 
-不设计 `uu start` / `uu stop`。具体如何跟随 UU 生命周期、如何连接 UU、如何复用会话，由实现根据实际 Windows UU 行为决定，不在产品层预设。
+不设计 `uu start` / `uu stop`。如果实现需要后台 helper，它不得独立于官方 UU 长期常驻。
 
 ## 安装体验
 
@@ -83,7 +98,7 @@ uu-cli-setup.exe
 - 不修改或替换官方 UU Remote；
 - 默认不要求管理员权限，除非某项能力确实无法在用户权限下完成。
 
-卸载必须同样简单：支持 Windows「已安装的应用」正常卸载，并允许安装程序执行卸载模式。卸载只清理 `uu-cli` 自己安装的文件、配置和集成，不删除 UU Remote、不清除 UU 登录状态。
+卸载只清理 `uu-cli` 自己安装的文件、配置和集成，不删除 UU Remote、不清除 UU 登录状态。
 
 ## 非目标
 
@@ -92,6 +107,7 @@ uu-cli-setup.exe
 - UU 账号登录或扫码登录；
 - 密码、Token、Cookie 等凭据管理；
 - 绕过 UU 的认证或权限控制；
+- 注入/伪造官方客户端来绕过 terminal host registration；
 - 重新实现完整 UU 云协议；
 - 为 Codex 设计一套新的任务/进程/开发工具 API；
 - 运行时 GUI、托盘、常驻窗口；
@@ -110,6 +126,6 @@ Skill 只负责告诉 Agent：
 下载：uu get <remote> <local>
 ```
 
-能力必须来自 CLI 本身，而不是依赖 Skill 里的复杂提示词或脚本。
+如果 `uu` 报告“没有可用的官方 terminal session”，这是一个需要用户在 UU GUI 中打开一次 Terminal 的明确前置条件，而不是 Agent 自己去点 GUI。
 
-更具体的产品边界见 [DESIGN.md](DESIGN.md)，实现阶段规则见 [AGENTS.md](AGENTS.md)，阶段规划见 [ROADMAP.md](ROADMAP.md)。终端互操作研究见 [docs/terminal.md](docs/terminal.md)。
+更具体的产品边界见 [DESIGN.md](DESIGN.md)，实现阶段规则见 [AGENTS.md](AGENTS.md)，阶段规划见 [ROADMAP.md](ROADMAP.md)。终端研究见 `docs/` 下的互操作笔记。
