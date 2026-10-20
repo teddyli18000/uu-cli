@@ -47,6 +47,15 @@ impl InventorySnapshot {
             .filter(|session| is_eligible_session(session))
             .collect()
     }
+
+    pub fn live_sessions_for(&self, device_identity: &str) -> Vec<&SessionInfo> {
+        self.devices
+            .iter()
+            .filter(|device| device.device.device_identity == device_identity)
+            .flat_map(|device| device.sessions.iter())
+            .filter(|session| is_live_session(session))
+            .collect()
+    }
 }
 
 /// Discover devices first, then query terminal sessions per online device.
@@ -94,8 +103,19 @@ pub fn discover_inventory(provider: &impl InventoryProvider) -> Result<Inventory
     })
 }
 
+/// A live shell may be either currently connected (`running`) or retained by the
+/// remote after its controller detached (`detached`). Both are valid instances to
+/// authorize. `exited`/unknown states are never reused.
+pub fn is_live_session(session: &SessionInfo) -> bool {
+    session.state.eq_ignore_ascii_case("running")
+        || session.state.eq_ignore_ascii_case("detached")
+}
+
+/// A worker is immediately schedulable only when it is live and the official CLI
+/// does not explicitly mark it non-attachable. A live non-attachable session is
+/// treated as busy capacity, not as a missing/replaced authorization.
 pub fn is_eligible_session(session: &SessionInfo) -> bool {
-    session.state.eq_ignore_ascii_case("running") && session.attachable != Some(false)
+    is_live_session(session) && session.attachable != Some(false)
 }
 
 #[cfg(test)]
@@ -190,16 +210,31 @@ mod tests {
     }
 
     #[test]
-    fn only_running_attachable_sessions_are_eligible() {
-        let mut running = session("a", "run");
-        let mut stopped = session("a", "stop");
-        stopped.state = "stopped".into();
-        let mut blocked = session("a", "blocked");
-        blocked.attachable = Some(false);
-        assert!(is_eligible_session(&running));
-        assert!(!is_eligible_session(&stopped));
-        assert!(!is_eligible_session(&blocked));
-        running.attachable = None;
-        assert!(is_eligible_session(&running));
+    fn running_and_detached_sessions_are_live() {
+        let running = session("a", "run");
+        let mut detached = session("a", "detached");
+        detached.state = "detached".into();
+        let mut exited = session("a", "exited");
+        exited.state = "exited".into();
+        assert!(is_live_session(&running));
+        assert!(is_live_session(&detached));
+        assert!(!is_live_session(&exited));
+    }
+
+    #[test]
+    fn live_non_attachable_session_is_busy_not_eligible() {
+        let mut busy = session("a", "busy");
+        busy.attachable = Some(false);
+        assert!(is_live_session(&busy));
+        assert!(!is_eligible_session(&busy));
+    }
+
+    #[test]
+    fn detached_attachable_session_is_eligible() {
+        let mut detached = session("a", "detached");
+        detached.state = "detached".into();
+        assert!(is_eligible_session(&detached));
+        detached.attachable = None;
+        assert!(is_eligible_session(&detached));
     }
 }
