@@ -96,9 +96,28 @@
 
 - User opened a fresh official Terminal and ran `sleep 30`, then physically pressed
   Ctrl+C after about two seconds. User reported no response and no prompt return.
+- User subsequently confirmed `sleep 30` finished naturally and the prompt returned,
+  then closed that test tab. Query identified a new detached `bash-4` instance.
 - Thus the failure is also reported through the official UI; it cannot currently
-  be attributed solely to the probe's ConPTY ETX representation. Natural completion
-  and the fresh session's handoff are still awaiting confirmation.
+  be attributed solely to the probe's ConPTY ETX representation.
+
+## Observed — round 4, Win32 Ctrl+C key events
+
+- Fresh `bash-4` after the confirmed manual baseline; one successful attach.
+  [Build 39423730079](https://github.com/teddyli18000/uu-cli/actions/runs/39423730079)
+  (`ef50264`) passed Windows format, clippy and release build.
+- Candidate wrapper and ConPTY settings unchanged. `sleep 30` dispatched at
+  12.562 s; BEGIN observed at 12.662 s.
+- At 17.681 s, wrote the requested Win32 input protocol's four-event sequence:
+  Ctrl down; C down/up with ETX and Ctrl modifier; Ctrl up. Every byte is in local
+  raw logs. No GUI key injection or console-mode change was used.
+- No immediate RX. At 42.654 s CRLF returned, then prompt at 42.664 s. No END or
+  exit code was observed. Thus the sleep again lasted about 30 seconds; neither
+  input representation has demonstrated cancellation.
+- No subsequent command was sent. Probe disconnected normally, retaining pending
+  state as unknown. Its local attach child was confirmed gone.
+- Next diagnostic is read-only remote shell flags, `monitor`, `stty` and shell
+  PID/process-group/foreground-group/session metadata. No remote settings changed.
 
 ## Conclusion
 
@@ -112,9 +131,9 @@
 - Sequential commands, status 7, Unicode characters and delayed output have been
   observed in one attachment. The visible-token observer is instrumentation, not
   a product output-normalization fix or proof of arbitrary binary/text fidelity.
-- Next bounded observation: compare a manual official-window Ctrl+C baseline with
-  explicit Win32 Ctrl+C key events on a fresh dedicated Terminal. Keep wrapper and
-  output observation unchanged to isolate the input representation first.
+- Manual official-window Ctrl+C, probe ETX and explicit Win32 key events all failed
+  to demonstrate immediate interruption. Diagnose the actual remote signal and
+  foreground-job setup before changing command framing or adding transport retries.
 - Official attach accepts a session name, not an atomic instance identifier;
   name + createdAt preflight detects replacements before attach but cannot prove
   an atomic guarantee across the query/attach interval.
