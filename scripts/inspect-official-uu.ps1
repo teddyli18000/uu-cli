@@ -94,5 +94,7 @@ foreach ($cli in $cliCandidates) {
     Invoke-ReadOnlyCliProbe -CliPath $cli.FullName -Arguments @('version')
     Invoke-ReadOnlyCliProbe -CliPath $cli.FullName -Arguments @('--help')
     Invoke-ReadOnlyCliProbe -CliPath $cli.FullName -Arguments @('term', '--help')
-    Invoke-ReadOnlyCliProbe -CliPath $cli.FullName -Arguments @('term', 'open', '--help')
+    Invoke-ReadOnlyCliProbe -CliPath $cli.FullName -Arguments @('term', 'new', '--help')
+    Invoke-ReadOnlyCliProbe -CliPath $cli.FullName -Arguments @('term', 'attach', '--help')
+    Invoke-ReadOnlyCliProbe -CliPath $cli.FullName -Arguments @('term', 'ls', '--help')
 }
