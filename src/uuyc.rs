@@ -1,3 +1,4 @@
+use crate::discovery::locate_official_cli;
 use crate::model::SessionInfo;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
@@ -5,12 +6,23 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliVersionInfo {
+    pub cli_version: String,
+    pub app_version: Option<String>,
+    pub message: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct OfficialCli {
     path: PathBuf,
 }
 
 impl OfficialCli {
+    pub fn locate() -> Result<Self> {
+        Self::new(locate_official_cli()?)
+    }
+
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
         if !path.is_file() {
@@ -21,6 +33,11 @@ impl OfficialCli {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    pub fn version(&self) -> Result<CliVersionInfo> {
+        let output = self.run([OsStr::new("version")])?;
+        parse_version_output(&output)
     }
 
     pub fn list_sessions(&self, device_identity: &str) -> Result<Vec<SessionInfo>> {
@@ -83,6 +100,52 @@ struct SessionItem {
     state: String,
     created_at: Option<String>,
     attachable: Option<bool>,
+}
+
+fn parse_version_output(output: &Output) -> Result<CliVersionInfo> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = if stdout.trim().is_empty() {
+        stderr.as_ref()
+    } else {
+        stdout.as_ref()
+    };
+
+    let mut cli_version = None;
+    let mut app_version = None;
+    let mut message = None;
+
+    for line in combined.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim();
+        match key {
+            "cliVersion" if !value.is_empty() && value != "null" => {
+                cli_version = Some(value.to_owned())
+            }
+            "appVersion" if !value.is_empty() && value != "null" => {
+                app_version = Some(value.to_owned())
+            }
+            "message" if !value.is_empty() && value != "null" => message = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+
+    let cli_version = cli_version.ok_or_else(|| {
+        anyhow!(
+            "unexpected output from official UU CLI version command (exit {:?}): {}",
+            output.status.code(),
+            concise_error(&stdout, &stderr)
+        )
+    })?;
+
+    Ok(CliVersionInfo {
+        cli_version,
+        app_version,
+        message,
+    })
 }
 
 fn parse_session_output(output: &Output) -> Result<Vec<SessionInfo>> {
@@ -170,6 +233,22 @@ mod tests {
     #[cfg(windows)]
     fn status(code: u32) -> ExitStatus {
         ExitStatus::from_raw(code)
+    }
+
+    #[test]
+    fn parses_observed_version_output_when_main_app_is_stopped() {
+        let output = Output {
+            status: status(0),
+            stdout: b"cliVersion: 4.43.0.3607\nbuildNumber: null\nappVersion: null\nmessage: Main application is not running\n".to_vec(),
+            stderr: vec![],
+        };
+        let version = parse_version_output(&output).unwrap();
+        assert_eq!(version.cli_version, "4.43.0.3607");
+        assert_eq!(version.app_version, None);
+        assert_eq!(
+            version.message.as_deref(),
+            Some("Main application is not running")
+        );
     }
 
     #[test]
