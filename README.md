@@ -22,7 +22,7 @@ uu put .\main.py ~/aic/main.py
 uu get ~/aic/result.csv .\result.csv
 ```
 
-诊断/首次配置只保留：
+首次配置/诊断最多保留：
 
 ```powershell
 uu bind
@@ -41,7 +41,7 @@ uu list
 该设备上的 UU Terminal worker pool
 ```
 
-用户通过官方 UU 手工打开 Terminal；`uu-cli` 自动发现这些已有 session，把可用 Terminal 当成执行槽。开 1 个 Terminal 就有 1 个 worker，开 3 个就可以让最多 3 个前台 job 并行。
+用户通过官方 UU 手工打开 Terminal；`uu-cli` 自动发现这些已有 session，把被允许使用的 Terminal 当成执行槽。开 1 个 Terminal 就有 1 个 worker，开 3 个就可以让最多 3 个前台 job 并行。
 
 Terminal 本身不属于 Codex，也不作为长期 shell 上下文。具体某条命令落到哪个 session，由 `uu-cli` 内部调度。
 
@@ -55,16 +55,15 @@ Terminal 本身不属于 Codex，也不作为长期 shell 上下文。具体某�
 uu git status
 ```
 
-如果还没有 binding，`uu-cli` 会：
+如果还没有 binding，`uu-cli` 会自动确定 workspace、发现用户打开的 Terminal，并在需要时做一次很短的人类选择。
 
-1. 自动确定 workspace 根目录：Git root 优先，否则当前目录；
-2. 等待/发现你在官方 UU 中打开的 Terminal；
-3. 如果只涉及一台远端设备，尽量一键确认；
-4. 如果多台设备都有 Terminal，弹出一个简短 PowerShell 选择器让你选一次；
-5. 记录该 workspace 的设备和 remote root；
-6. 继续执行原来的命令。
+- Git 仓库默认使用 Git root；
+- 只有一台明确设备时尽量自动完成；
+- 多台设备同时有 Terminal 时，弹一个简单 PowerShell 选择器；
+- 用户只选择友好设备名，不接触裸 `deviceId`；
+- binding 完成后，原命令继续执行，不要求重跑。
 
-Codex 不接触裸 `deviceId`，也不需要管理 session name/id。
+如果后续新打开 Terminal，`uu-cli` 应自动发现。归属明确时尽量自动处理；有歧义或无法判断是否供 uu-cli 使用时，再弹一个几秒内能完成的 PowerShell 选择。
 
 ## 多个 Terminal
 
@@ -77,9 +76,7 @@ AIC-Car-1
   terminal 3  idle
 ```
 
-`uu-cli` 自动调度空闲 worker。长任务持续占用自己的 terminal，并实时把输出返回给调用它的 Codex；其他命令使用其他空闲 worker。没有空闲 worker 时排队。
-
-新开的 Terminal 会被自动发现；必要时只弹一次简短确认，决定是否把它加入 uu-cli 的 worker pool。
+`uu-cli` 自动调度空闲 worker。长任务持续占用自己的 terminal，并实时把输出返回给调用它的 Codex；其他命令使用其他空闲 worker。没有空闲 worker 时等待。
 
 ## 很重要：不同 `uu` 调用不共享 shell-local 状态
 
@@ -99,21 +96,43 @@ uu python main.py
 uu "cd src && source .venv/bin/activate && python main.py"
 ```
 
-每条普通 `uu` job 都从当前 workspace 绑定的 `remote root` 开始。后续 Codex Skill 会把这条规则写死。
+每条普通 `uu` job 都从当前 workspace 绑定的 `remote root` 开始。后续 Codex Skill 会明确写出这条规则。
+
+## 不干扰官方 UU
+
+`uu-cli` 是旁路辅助工具，不修改或替代官方 UU。
+
+它不能：
+
+- 修改/注入/patch 官方 UU 或 GameViewer；
+- 改 UU 登录、账号、设备、更新、启动配置；
+- 保存密码、Token、Cookie 等认证材料；
+- kill、rename 或偷偷接管用户没有交给 uu-cli 的 Terminal；
+- 改变用户正在手工使用的 Terminal；
+- 因自身崩溃、升级或卸载影响 UU 的正常使用。
+
+如果某种 attach/reuse 方法会明显干扰官方 UI，就必须换更安全的方案或只使用用户明确提供给 uu-cli 的专用 Terminal。
+
+## 尽可能任何正常电脑都能用
+
+目标不是只在开发机可用，而是：**只要官方 UU Remote 本身能在该 Windows 电脑正常工作，uu-cli 就应尽量做到安装后直接可用。**
+
+因此实现不能硬编码开发机路径、用户名、盘符、deviceId 或精确安装目录；应自动发现官方 UU 和所需组件，尽量使用普通用户权限，不要求用户额外安装 Python/Rust/Node/WSL 等开发环境。
+
+发布前必须在非开发机或干净用户环境验证从安装、首次绑定到实际执行的完整流程。
 
 ## 自动发现与占用
 
-v1 允许一个极轻的用户级 broker，用来：
+产品要求是：官方 UU 在用时，`uu-cli` 随时可用；没有任务或没有 Terminal 时，资源占用尽可能低。
 
-- 发现官方 UU 是否运行；
-- 发现新打开的 Terminal；
-- 协调多个 Codex/多个并发 `uu` 调用；
-- 维护 worker busy/idle；
-- 必要时弹出短 PowerShell 选择器。
+内部可以有轻量后台组件，也可以采用其他实现。无论如何都必须：
 
-它没有 GUI、tray 或可见 console。UU 没运行、没有 Terminal、没有任务时尽可能只等待，不保持无意义连接，也不高频轮询。
-
-`uu` 被调用但 broker 不在时，CLI 可以自己拉起它，因此后台组件不是用户需要管理的第二套服务。
+- 自动发现新开的官方 Terminal；
+- 空闲时 CPU 接近 0，不高频轮询；
+- 无 tray、额外 GUI 或常驻可见 console；
+- 只有真正需要用户选择时才弹短 PowerShell 交互；
+- 用户不需要手工管理第二个服务；
+- 不拖累 UU 的启动、退出和升级。
 
 ## 当前 Windows UU 限制
 
@@ -128,7 +147,7 @@ v1 允许一个极轻的用户级 broker，用来：
 
 ## 非目标
 
-本项目不做：
+本项目 v1 不做：
 
 - UU 账号登录或凭据管理；
 - 注入/签名绕过；
@@ -137,13 +156,13 @@ v1 允许一个极轻的用户级 broker，用来：
 - Git/Python/CMake 专用远程 API；
 - 面向用户的 session 管理；
 - 自动点击 UU GUI 创建 Terminal；
-- v1 中一个 workspace 同时驱动多台远端设备。
+- 一个 workspace 同时驱动多台远端设备。
 
 ## 文档
 
 - [DESIGN.md](DESIGN.md)：产品契约与边界
-- [ARCHITECTURE.md](ARCHITECTURE.md)：workspace / device / terminal pool 架构
-- [IMPLEMENTATION.md](IMPLEMENTATION.md)：可以直接执行的工程蓝图
-- [ROADMAP.md](ROADMAP.md)：阶段与验收
+- [ARCHITECTURE.md](ARCHITECTURE.md)：workspace / device / terminal pool 的概念架构
+- [IMPLEMENTATION.md](IMPLEMENTATION.md)：实现目标、兼容性和验收契约；不规定具体技术方案
+- [ROADMAP.md](ROADMAP.md)：阶段目标与验收
 - [AGENTS.md](AGENTS.md)：给实现 Agent 的硬规则
 - `docs/`、`proto/terminal.proto`：Windows UU terminal 互操作研究
