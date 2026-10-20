@@ -189,8 +189,10 @@ Windows workspace key 至少验证：
 
 ### 独立真机命令通道观察
 
-用户提供已登录的官方 UU 和明确交出的专用 Linux/bash Terminal。观察结果见 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)；原始收发字节和真实设备标识只保存在本地忽略目录。
+用户提供已登录的官方 UU 和明确交出的专用 Linux/bash Terminal。观察结果见 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)；早期原始收发字节及真实设备标识只保存在本地忽略目录。
 
-[探针 Actions 39427353688](https://github.com/teddyli18000/uu-cli/actions/runs/39427353688) 编译了生产提交 79fa6fbc0c8d3dbb4ebf50c2589e684bd5d85d37 的实际命令包装器和 console decoder。通过官方 CLI/ConPTY，已观察到同一附着中的退出码 0/7、Unicode、两秒间隔实时输出、sleep 中断返回 130 和中断后继续执行。
+[探针 Actions 39431629252](https://github.com/teddyli18000/uu-cli/actions/runs/39431629252) 编译生产提交 3c2e44725b8f80ac09c593482ebcc964190c27c6 未修改的 job/runner/transport 模块。通过真实官方 CLI/ConPTY，实际 transport attach 后立即调用目录捕获，约 400 ms 验证并读回预期绝对路径；随后同一附着内完成退出码 0/7、Unicode、两秒间隔实时输出。sleep 30 在两秒时排入 Interrupt，实际 runner 于发送命令后 2.064 秒返回 130，中断后下一条命令成功。
 
-这项证据只覆盖独立探针中的实际包装/解析模块与官方传输。完整 runner、绑定/授权交互、断线恢复及其他 release gate 仍需逐项验收；不据此宣称 v1 完成。
+探针释放自己的本地 attach 子进程，无未完成任务。查询确认原远端实例仍在且 detached，另一未授权运行中 Terminal 的身份/状态未变，探针从未连接它。本轮记录实际 API 输出及时间点；transport 私有 RX/TX 未导出，不把 API 日志称作原始字节日志。
+
+这证明当前模块组成的最小命令闭环。完整 CLI、绑定/授权交互、真实断线恢复、多 worker、真实文件传输及其他 release gate 仍需逐项验收；不据此宣称 v1 完成。ConPTY 输出保持 presentation bytes，不承诺等于远端原始字节流。
