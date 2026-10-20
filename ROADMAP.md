@@ -2,11 +2,9 @@
 
 `uu-cli` 的路线只有一个判断标准：**让 `uu <command>` 像本地命令一样自然，并且不要求用户理解 UU 的内部机制。**
 
-这不是功能清单，而是实现顺序和决策门槛。前一阶段没有被证据证明之前，不为了“完整”提前做后一阶段。
+当前 Windows UU 4.43.x 的研究已经把 terminal 的主要边界查清：已有 session 可以管理/附着/复用，但第一个 terminal session 的 host registration 只存在于官方 GUI launcher 内，没有可复用的外部 headless 入口。因此 v1 接受一个人工 bootstrap：用户在 UU 中为目标设备打开一次官方 Terminal，之后 `uu` 负责复用。
 
-## 当前状态
-
-已经确定的产品契约：
+## 当前产品契约
 
 ```powershell
 uu <command...>
@@ -17,58 +15,71 @@ uu devices
 uu use <device>
 ```
 
-已经完成的研究基础：
+正常工作流：
 
-- Windows 官方 UU 4.43.x 的终端通道互操作笔记：`docs/terminal.md`
-- 终端相关 `gv_pb` 子集：`proto/terminal.proto`
-- 已确认官方客户端存在终端新建、附着、列表、终止等能力
+```text
+UU 已运行并登录
+  ↓
+用户为目标设备打开一次官方 Terminal
+  ↓
+uu-cli 发现并复用 session
+  ↓
+Codex / 用户只执行 uu ...
+```
 
-仍未决定：
-
-- 最终终端实现是否直接包装官方 CLI、调用更底层本地接口，或自行实现已确认的通道子集；
-- 文件传输最稳定的本地入口；
-- 后台 helper 是否必要；
-- UU 生命周期联动的最佳实现方式；
-- 安装器技术选型。
-
-这些问题必须由实机证据决定，而不是先画架构再找理由。
+没有可用 session 时，`uu` 明确提示用户打开一次官方 Terminal；不自动点 GUI，不尝试绕过官方 host registration。
 
 ---
 
 ## Phase 0 — Research / interoperability
 
-目标：把“官方 Windows UU 到底已经提供了什么”弄清楚。
+### Terminal — CLOSED for v1
 
-### Terminal
+已完成的主要结论：
 
-当前已有较完整基础，但实现前还要验证最小闭环：
+- TERM / RPC / session 管理的关键协议行为已记录；
+- 官方 CLI 能查询、附着、终止已有 session；
+- terminal 是持续 PTY 字节流，不存在客户端可达的逐命令 exec/exit-code API；
+- 单次 `uu` 调用需要客户端内部 marker/sentinel 来识别命令完成和 `$?`；
+- 官方 GUI 创建 terminal 前会在主程序进程内注册 local host/token；
+- `windows_terminal`、`new_console`、`detached_process` 都属于同一个 GUI launcher 链；
+- launcher 没有 CLI / IPC / deeplink 外部调用入口；
+- v1 不继续投入时间逆向 headless host registration，也不采用注入、伪造签名等脆弱路线。
 
-1. 不打开 UU GUI Terminal 的情况下，能否从本地程序直接建立远端终端；
-2. 新建、attach、detach、退出的真实生命周期；
-3. stdin/stdout/stderr/exit code 能拿到什么程度；
-4. 长任务与 Ctrl-C 的行为；
-5. 并行多个终端的边界；
-6. UU 完全退出后通道如何失效。
+研究资料见 `docs/` 和 `proto/terminal.proto`。
 
-**通过门槛：** 能证明后台程序可以稳定完成“一条命令 → 远端 shell → 输出返回”，且主控端无窗口。
+### File transfer — NEXT RESEARCH PRIORITY
 
-### File transfer
+只回答 `uu put/get` 真正需要的问题：
 
-单独分析 UU GUI 的文件上传/下载路径，回答：
+1. Windows 官方 UU 哪个组件发起原生文件上传/下载；
+2. 是否存在可复用的本地 CLI / IPC / RPC 入口；
+3. 是否要求 GUI 文件面板已经打开；
+4. 请求、进度、完成、覆盖和失败语义；
+5. 能否无辅助窗口传输任意二进制文件；
+6. 如果原生入口不可复用，最小可靠 fallback 是什么。
 
-1. 本地哪个组件真正执行文件传输；
-2. 是否存在可复用的本地 IPC / RPC / 内部接口；
-3. 上传和下载的请求、进度、完成、错误语义；
-4. 是否可以完全无 GUI；
-5. 大文件、覆盖、取消、失败恢复如何表现。
+**通过门槛：** 最小原型可以把任意二进制文件传到远端再取回，并逐字节一致。
 
-**通过门槛：** 能以最小原型把任意二进制文件从主控端传到远端再取回，并验证字节一致。
+> 不预设 terminal + base64 为正式方案。只有确认原生文件通道不可复用后才评估 fallback，公共接口始终是 `uu put/get`。
 
-> 不把 terminal + base64 当作正式文件传输方案，除非研究证明原生路径不可用；即使需要 fallback，也不能改变 `uu put/get` 公共接口。
+### Device identity — PARALLEL RESEARCH
+
+产品 UX 已定，只需确认实现字段：
+
+- `device list` 实际返回哪些身份字段；
+- 哪个字段在 UU 重启、设备改名、重新登录后稳定；
+- 在线/离线状态来源；
+- 同名设备如何可靠区分；
+- 默认目标持久化保存什么最安全。
+
+**通过门槛：** 多设备时不会因为名字相似或 ID 不稳定而把命令发错设备。
 
 ---
 
 ## Phase 1 — Minimal shell prototype
+
+前置条件：用户已在官方 UU 中为目标设备打开一个可复用 terminal session。
 
 只证明：
 
@@ -79,18 +90,18 @@ uu "cd ~/project && python3 main.py"
 
 必须做到：
 
-- 无手工打开 UU Terminal；
-- 主控端无弹窗；
-- 自动建立或复用远端 terminal；
+- 自动发现当前默认设备的已有 terminal；
+- 自动 attach / reuse，不暴露 session name/id；
+- 没有可用 session 时明确提示人工 bootstrap；
+- 不自动弹 UU GUI；
 - 命令尽量原样交给远端 shell；
-- stdout/stderr 可供 Agent 直接消费；
-- 远端退出码尽可能映射到本地；
-- Ctrl-C 不把内部状态搞坏；
+- 使用带随机 nonce 的内部 completion marker 获取单次命令边界与 exit code；
+- marker 不泄漏到用户输出；
+- PTY 合流输出可供 Agent 直接消费；
+- Ctrl-C 不把 session 状态搞坏；
 - 长任务不被短超时截断。
 
-这一阶段不做安装器、不做漂亮配置、不做额外命令。
-
-**通过门槛：** Codex 原本会运行的普通 shell 命令，只需前面增加 `uu` 即可远程执行。
+**通过门槛：** 在 terminal bootstrap 完成后，Codex 原本会运行的普通 shell 命令只需前面增加 `uu` 即可远程执行。
 
 ---
 
@@ -125,8 +136,6 @@ uu devices
 uu use <device>
 ```
 
-目标不是“设备管理”，而是解决多设备账号下 `uu` 到底发给谁。
-
 要求：
 
 - 首次只有一台设备时尽量零操作；
@@ -134,34 +143,26 @@ uu use <device>
 - 默认目标持久保存；
 - 日常命令仍不带设备参数；
 - 默认目标离线时明确失败；
-- 不自动 failover 到别的设备；
-- 不因为同名/近似名猜设备。
+- 不自动 failover；
+- 不因为同名/近似名猜设备；
+- 当前目标没有可复用 terminal 时，只提示为该目标打开一次官方 Terminal。
 
-**通过门槛：** 多台在线设备时，命令不会误执行到错误机器。
+**通过门槛：** 多台在线设备时，命令和 terminal session 都不会匹配到错误机器。
 
 ---
 
-## Phase 4 — Background lifecycle
+## Phase 4 — Runtime lifecycle
 
-只在前面功能链路明确后决定是否真的需要后台 helper。
-
-外部行为固定：
-
-```text
-官方 UU 启动 → uu-cli 自动可用
-官方 UU 完全退出 → uu-cli 不再独立常驻
-```
+实现前先判断是否真的需要后台 helper。优先无常驻设计。
 
 要求：
 
 - 无 `uu start/stop`；
-- 无 console / GUI / tray；
-- UU 重启后自动恢复；
-- helper 崩溃不破坏官方 UU；
-- UU 崩溃/强退后不留孤儿后台；
-- 不为了实现方便安装一个永远常驻的独立服务。
-
-**通过门槛：** 用户正常开关 UU 即可，不需要意识到第二个进程体系。
+- 无额外 GUI / tray；
+- UU 关闭后不留下独立后台服务；
+- session 失效能被检测并清楚报错；
+- UU 重启后允许用户重新完成一次 Terminal bootstrap，然后继续使用；
+- helper 崩溃不能破坏官方 UU。
 
 ---
 
@@ -178,32 +179,21 @@ uu-cli-setup.exe
 - user-scope 优先；
 - 安装 `uu`；
 - 写入当前用户 PATH；
-- 安装必要后台集成；
 - 首次需要时选择默认设备；
-- 注册 Windows 标准卸载项。
+- 注册 Windows 标准卸载项；
+- 如果当前没有 terminal session，在首次执行时给出简短 bootstrap 提示，而不是安装器自动操纵 GUI。
 
-升级：
+升级：保留合理配置，不重复污染 PATH，不留下旧 helper。
 
-- 原地升级；
-- 保留合理配置；
-- 不重复污染 PATH；
-- 不留下旧 helper。
-
-卸载：
-
-- 移除项目自身文件；
-- 移除 PATH 和生命周期集成；
-- 移除项目自身配置；
-- 不退出、不卸载、不清空官方 UU；
-- 不破坏 UU 登录状态。
-
-**通过门槛：** 干净 Windows 用户环境中“安装一次 → 直接用 → 标准卸载后恢复原状”。
+卸载：只移除项目自身文件、配置、PATH 和集成；不影响官方 UU 或登录状态。
 
 ---
 
 ## v1 freeze
 
-达到以下条件后才考虑 v1：
+前置条件：用户已为默认目标打开一个官方 Terminal。
+
+然后：
 
 ```powershell
 uu devices
@@ -214,18 +204,19 @@ uu put .\test.bin ~/test.bin
 uu get ~/test.bin .\roundtrip.bin
 ```
 
-并同时满足：
+并满足：
 
-- 无手工 UU Terminal 操作；
-- 主控端无额外窗口；
+- 用户不需要管理 session，只需要完成一次官方 Terminal bootstrap；
+- `uu-cli` 不自动操作 GUI、不弹辅助窗口；
 - 命令/文件都到正确默认设备；
+- 单次命令结束和 exit code 可可靠识别；
 - 输出适合人和 Agent 直接消费；
 - 长任务可用；
 - 文件字节一致；
 - UU 退出后无独立残留；
 - 安装/升级/卸载干净。
 
-在这之前不扩：MCP、Web UI、tray、专用 Git/Python API、用户可见 session 管理、远程桌面自动化等。
+在这之前不扩：MCP、Web UI、tray、专用 Git/Python API、用户可见 session 管理、GUI 自动化等。
 
 ## 设计纪律
 
