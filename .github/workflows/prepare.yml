@@ -1,5 +1,8 @@
 name: Prepare implementation
 on:
+  push:
+    branches: ['impl/v1-bootstrap']
+    paths: ['.github/workflows/prepare.yml']
   workflow_dispatch:
 permissions:
   contents: write
