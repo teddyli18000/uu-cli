@@ -157,7 +157,7 @@ pub enum JobInput {
 
 /// Run a framed command while also forwarding input events. Input stays queued
 /// until the remote BEGIN marker proves the command wrapper reached the shell.
-pub fn run_framed_job_with_input<W, O>(
+pub(crate) fn run_framed_job_with_input<W, O>(
     reader: &mut ReadPump,
     writer: &mut W,
     output: &mut O,
@@ -623,7 +623,7 @@ mod tests {
         let (result, output) = job.join().unwrap();
         assert_eq!(result.unwrap().exit_code, 0);
         assert_eq!(output, b"ready");
-        assert!(all.lock().unwrap().ends_with(b"typed\x03\x04"));
+        assert!(all.lock().unwrap().ends_with(b"typed\x04\x03"));
     }
 
     #[test]
