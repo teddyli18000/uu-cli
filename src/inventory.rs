@@ -107,8 +107,7 @@ pub fn discover_inventory(provider: &impl InventoryProvider) -> Result<Inventory
 /// remote after its controller detached (`detached`). Both are valid instances to
 /// authorize. `exited`/unknown states are never reused.
 pub fn is_live_session(session: &SessionInfo) -> bool {
-    session.state.eq_ignore_ascii_case("running")
-        || session.state.eq_ignore_ascii_case("detached")
+    session.state.eq_ignore_ascii_case("running") || session.state.eq_ignore_ascii_case("detached")
 }
 
 /// A worker is immediately schedulable only when it is live and the official CLI
