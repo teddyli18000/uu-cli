@@ -45,7 +45,7 @@ device B → workers B1 B2
 
 不同设备的 worker 绝不能混用。
 
-首次绑定时如果多台设备都有可用 Terminal，只让用户通过简短 PowerShell 选择一次 friendly name；内部保存经过验证的稳定 identity。Codex 不直接选择 deviceId。
+首次绑定时如果多台设备都有可用 Terminal，只让用户通过简短人类选择器选择一次 friendly name；内部保存经过验证的稳定 identity。Codex 不直接选择 deviceId。
 
 ## 4. Terminal worker pool
 
@@ -74,7 +74,7 @@ device A
 
 ### 5.1 有请求正在等待
 
-如果某个 `uu` 请求正在等待一个明确目标设备的 worker，而用户此时从官方 UU 打开该设备 Terminal，这个动作本身已经构成足够强的上下文：新 Terminal 可以直接用于满足这个等待请求，避免再弹第二轮确认。
+如果 `uu` 已经明确告诉用户“请打开目标设备 Terminal；新打开的 Terminal 将用于本次请求”，那么用户随后打开匹配 Terminal 的动作本身就是本次授权。
 
 如果 workspace 尚未绑定，而用户被提示“打开你想使用设备的 Terminal”，等待期间唯一新出现的 Terminal 可以同时完成：
 
@@ -85,26 +85,27 @@ identify device
 → continue original command
 ```
 
-不要让用户重新运行原命令。
+不要让用户重新运行原命令，也不要再弹第二个“是否交给 uu-cli”确认。
+
+若同时出现多个候选设备/Terminal，则只弹一次短选择，不能猜。
 
 ### 5.2 没有请求正在等待
 
-如果设备已经设置“新 Terminal 自动加入”，直接加入 pool。
-
-否则弹一个短 PowerShell 交互：
+新 Terminal 必须经过一次极短授权：
 
 ```text
 AIC-Car-1 新终端已打开
-[Enter] 交给 uu-cli   [N] 不使用   [A] 此设备以后自动加入
+[Enter] 交给 uu-cli    [N] 保留手动使用
 ```
 
-`N` 只表示该 session 不交给 uu-cli；之后不得偷偷调度。`A` 是 device-level 偏好，因为 worker pool 本来就属于 device。
-
-多个 Terminal 短时间出现时应合并提示，不连续开多个窗口。
+- Enter 后加入 device pool；
+- `N`、Esc、关闭或取消都视为不授权；
+- v1 不提供“以后这个设备所有新 Terminal 都自动接管”的永久策略；
+- 多个 Terminal 短时间出现时应在同一个交互窗口里顺序/批量处理，避免多个窗口抢焦点。
 
 ### 5.3 不存在“同设备多个 workspace 的 Terminal 归属问题”
 
-同设备多个 workspace 共享同一 worker pool，job 自己携带 `remote_root`。因此新 Terminal 不需要再问“属于哪个 workspace”。这能显著减少交互和错误分支。
+同设备多个 workspace 共享同一 worker pool，job 自己携带 `remote_root`。因此新 Terminal 不需要再问“属于哪个 workspace”。
 
 ## 6. Interaction channel
 
@@ -113,16 +114,17 @@ AIC-Car-1 新终端已打开
 ```text
 Codex / shell ── uu stdin/stdout ── remote job
                        │
-                       └── human decision → short separate pwsh when required
+                       └── human decision → short separate interaction when required
 ```
 
 要求：
 
 - 正常 `uu` stdout 不混入选择菜单；
 - 工具诊断走 stderr；
-- PowerShell 选择器不能消费原命令 stdin；
+- 选择器不能消费原命令 stdin；
 - 被 pipe/Agent 调用时，也不能因为需要人选择而把菜单文本伪装成远端输出；
-- 当前环境无法安全展示交互时，不猜选择结果。
+- 当前环境无法安全展示交互时，不猜选择结果；
+- 不依赖 PowerShell 7 必须存在：可以优先使用 `pwsh`，但必须能回退系统自带 Windows PowerShell 或项目自己的最小原生交互。
 
 ## 7. Shell-state isolation
 
@@ -232,7 +234,7 @@ uu get <remote> <local>
 - 不永久高频 polling/spawn 官方组件；
 - 不需要时不保持昂贵连接；
 - 无 tray、额外 GUI 或常驻可见 console；
-- 需要用户决定时可以弹短 PowerShell；
+- 需要用户决定时可以弹短人类交互；
 - 后台能力失效后，下一次 `uu` 可以恢复或给出明确错误。
 
 “随 UU 一起可用”是产品语义，不要求通过 hook/patch 强行让两个进程严格同生共死。
@@ -266,7 +268,7 @@ uu get <remote> <local>
 
 因此设备 identity、安装路径、用户目录、盘符、session 名、UU 版本差异都必须通过运行时发现/兼容性逻辑处理，而不是写死在代码里。
 
-安装后不应要求 Python/Rust/Node/WSL 等开发运行时。
+安装后不应要求 Python/Rust/Node/PowerShell 7/WSL 等开发运行时。
 
 ## 14. Validation architecture
 
@@ -300,6 +302,12 @@ uu get <remote> <local>
 ```powershell
 uu bind
 uu list
+```
+
+保留词冲突时使用：
+
+```powershell
+uu -- <remote command...>
 ```
 
 `uu list` 可以展示：
