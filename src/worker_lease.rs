@@ -126,7 +126,7 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
     {
         // ERROR_LOCK_VIOLATION: Windows reports a non-blocking file-lock
         // collision as raw OS error 33 rather than ErrorKind::WouldBlock.
-        return error.raw_os_error() == Some(33);
+        error.raw_os_error() == Some(33)
     }
     #[cfg(not(windows))]
     {
