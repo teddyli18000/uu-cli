@@ -46,7 +46,7 @@ impl TermPty {
         let raw_reader = master
             .try_clone_reader()
             .context("failed to open UU terminal PTY reader")?;
-        let mut writer = master
+        let writer = master
             .take_writer()
             .context("failed to open UU terminal PTY writer")?;
         drop(slave);
@@ -284,7 +284,7 @@ mod tests {
         command.args(["conpty_child_writes_osc", "--nocapture"]);
         command.env("UUCLI_CONPTY_OSC_CHILD", "1");
         let mut child = slave.spawn_command(command).unwrap();
-        let mut writer = master.take_writer().unwrap();
+        let writer = master.take_writer().unwrap();
         let reader = master.try_clone_reader().unwrap();
         drop(slave);
         let mut reader = ReadPump::spawn(reader);
