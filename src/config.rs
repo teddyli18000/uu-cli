@@ -1,7 +1,8 @@
 use crate::model::Config;
 use anyhow::{anyhow, Context, Result};
+use fs2::FileExt;
 use std::env;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -35,6 +36,76 @@ impl ConfigStore {
     }
 
     pub fn load(&self) -> Result<Config> {
+        let lock = self.open_lock()?;
+        lock.lock_shared().context("cannot lock uu-cli config for reading")?;
+        let result = self.load_unlocked();
+        let unlock = FileExt::unlock(&lock).context("cannot unlock uu-cli config");
+        result.and(unlock.map(|_| ())).and_then(|_| self.load_unlocked())
+    }
+
+    pub fn save(&self, config: &Config) -> Result<()> {
+        let lock = self.open_lock()?;
+        lock.lock_exclusive()
+            .context("cannot lock uu-cli config for writing")?;
+        let result = self.save_unlocked(config);
+        let unlock = FileExt::unlock(&lock).context("cannot unlock uu-cli config");
+        match (result, unlock) {
+            (Err(error), _) => Err(error),
+            (Ok(()), Err(error)) => Err(error),
+            (Ok(()), Ok(())) => Ok(()),
+        }
+    }
+
+    /// Atomically reload, mutate, and save configuration under one cross-process
+    /// lock. Runtime paths that add/remove workers or workspace bindings must use
+    /// this instead of saving a stale snapshot, otherwise concurrent `uu` calls
+    /// can silently overwrite each other's state.
+    pub fn update<F>(&self, mutate: F) -> Result<Config>
+    where
+        F: FnOnce(&mut Config) -> Result<()>,
+    {
+        let lock = self.open_lock()?;
+        lock.lock_exclusive()
+            .context("cannot lock uu-cli config for update")?;
+
+        let result = (|| {
+            let mut config = self.load_unlocked()?;
+            mutate(&mut config)?;
+            self.save_unlocked(&config)?;
+            Ok(config)
+        })();
+
+        let unlock = FileExt::unlock(&lock).context("cannot unlock uu-cli config");
+        match (result, unlock) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(config), Ok(())) => Ok(config),
+        }
+    }
+
+    fn open_lock(&self) -> Result<File> {
+        let parent = self
+            .path
+            .parent()
+            .ok_or_else(|| anyhow!("config path has no parent"))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+        let file_name = self
+            .path
+            .file_name()
+            .ok_or_else(|| anyhow!("config path has no file name"))?
+            .to_string_lossy();
+        let lock_path = parent.join(format!(".{file_name}.lock"));
+        OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("cannot open config lock {}", lock_path.display()))
+    }
+
+    fn load_unlocked(&self) -> Result<Config> {
         match fs::read(&self.path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .with_context(|| format!("invalid config {}", self.path.display())),
@@ -43,22 +114,24 @@ impl ConfigStore {
         }
     }
 
-    pub fn save(&self, config: &Config) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("cannot create {}", parent.display()))?;
-        }
-
+    fn save_unlocked(&self, config: &Config) -> Result<()> {
         let parent = self
             .path
             .parent()
             .ok_or_else(|| anyhow!("config path has no parent"))?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+
         let file_name = self
             .path
             .file_name()
             .ok_or_else(|| anyhow!("config path has no file name"))?
             .to_string_lossy();
-        let temp = parent.join(format!(".{file_name}.{}.tmp", std::process::id()));
+        let temp = parent.join(format!(
+            ".{file_name}.{}.{}.tmp",
+            std::process::id(),
+            unique_suffix()
+        ));
         let backup = parent.join(format!(".{file_name}.bak"));
         let data = serde_json::to_vec_pretty(config)?;
 
@@ -94,6 +167,14 @@ impl ConfigStore {
     }
 }
 
+fn unique_suffix() -> u128 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,5 +204,35 @@ mod tests {
 
         store.save(&config).unwrap();
         assert_eq!(store.load().unwrap(), config);
+    }
+
+    #[test]
+    fn transactional_updates_preserve_prior_mutations() {
+        let tmp = TempDir::new().unwrap();
+        let store = ConfigStore::at(tmp.path().join("cfg").join("config.json"));
+
+        store
+            .update(|config| {
+                config.remember_owned_worker("device-1", "uu-one");
+                Ok(())
+            })
+            .unwrap();
+        store
+            .update(|config| {
+                config.remember_owned_worker("device-1", "uu-two");
+                Ok(())
+            })
+            .unwrap();
+
+        let config = store.load().unwrap();
+        assert_eq!(config.owned_workers.len(), 2);
+        assert!(config
+            .owned_workers
+            .iter()
+            .any(|worker| worker.session_name == "uu-one"));
+        assert!(config
+            .owned_workers
+            .iter()
+            .any(|worker| worker.session_name == "uu-two"));
     }
 }
