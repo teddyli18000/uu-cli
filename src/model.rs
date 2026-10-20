@@ -14,6 +14,8 @@ pub struct Config {
     pub version: u32,
     #[serde(default)]
     pub bindings: Vec<WorkspaceBinding>,
+    #[serde(default)]
+    pub authorized_workers: Vec<String>,
 }
 
 impl Default for Config {
@@ -21,6 +23,7 @@ impl Default for Config {
         Self {
             version: 1,
             bindings: Vec::new(),
+            authorized_workers: Vec::new(),
         }
     }
 }
@@ -36,6 +39,24 @@ impl Config {
         } else {
             self.bindings.push(binding);
         }
+    }
+
+    pub fn authorize_session(&mut self, session: &SessionInfo) -> bool {
+        let Some(fingerprint) = session.authorization_fingerprint() else {
+            return false;
+        };
+        if self.authorized_workers.iter().any(|item| item == &fingerprint) {
+            return true;
+        }
+        self.authorized_workers.push(fingerprint);
+        true
+    }
+
+    pub fn is_session_authorized(&self, session: &SessionInfo) -> bool {
+        let Some(fingerprint) = session.authorization_fingerprint() else {
+            return false;
+        };
+        self.authorized_workers.iter().any(|item| item == &fingerprint)
     }
 }
 
@@ -78,33 +99,47 @@ impl SessionInfo {
 mod tests {
     use super::*;
 
-    #[test]
-    fn session_name_alone_is_not_authorization_identity() {
-        let session = SessionInfo {
+    fn session(created_at: Option<&str>) -> SessionInfo {
+        SessionInfo {
             device_identity: "device-1".into(),
             device_name: "car".into(),
             session_name: "bash-3".into(),
             shell: Some("/bin/bash".into()),
             state: "running".into(),
-            created_at: None,
+            created_at: created_at.map(str::to_owned),
             attachable: Some(true),
-        };
-        assert_eq!(session.authorization_fingerprint(), None);
+        }
+    }
+
+    #[test]
+    fn session_name_alone_is_not_authorization_identity() {
+        assert_eq!(session(None).authorization_fingerprint(), None);
     }
 
     #[test]
     fn fingerprint_includes_device_identity_and_creation_instance() {
-        let a = SessionInfo {
-            device_identity: "device-1".into(),
-            device_name: "car".into(),
-            session_name: "bash-3".into(),
-            shell: Some("/bin/bash".into()),
-            state: "running".into(),
-            created_at: Some("2026-10-19T17:27:45Z".into()),
-            attachable: Some(true),
-        };
+        let a = session(Some("2026-10-19T17:27:45Z"));
         let mut b = a.clone();
         b.created_at = Some("2026-10-20T17:27:45Z".into());
         assert_ne!(a.authorization_fingerprint(), b.authorization_fingerprint());
+    }
+
+    #[test]
+    fn authorization_is_for_one_session_instance_only() {
+        let a = session(Some("2026-10-19T17:27:45Z"));
+        let mut replacement = a.clone();
+        replacement.created_at = Some("2026-10-20T17:27:45Z".into());
+
+        let mut config = Config::default();
+        assert!(config.authorize_session(&a));
+        assert!(config.is_session_authorized(&a));
+        assert!(!config.is_session_authorized(&replacement));
+    }
+
+    #[test]
+    fn cannot_persist_ambiguous_session_authorization() {
+        let mut config = Config::default();
+        assert!(!config.authorize_session(&session(None)));
+        assert!(config.authorized_workers.is_empty());
     }
 }
