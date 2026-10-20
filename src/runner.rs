@@ -152,7 +152,6 @@ where
     )
 }
 
-
 fn run_prepared_job<R, W, O>(
     reader: &mut R,
     writer: &mut W,
@@ -255,34 +254,7 @@ where
     )
 }
 
-/// Run a framed command while also forwarding input events. Input stays queued
-/// until the remote BEGIN marker proves the command wrapper reached the shell.
-// The production PTY caller is Windows-only; Linux exercises the nonce-specific core.
-#[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn run_framed_job_with_input<W, O>(
-    reader: &mut ReadPump,
-    writer: &mut W,
-    output: &mut O,
-    remote_root: &str,
-    shell_command: &str,
-    input: &Receiver<JobInput>,
-) -> Result<JobResult, JobRunError>
-where
-    W: Write,
-    O: Write + ?Sized,
-{
-    let nonce = next_nonce();
-    run_framed_job_with_input_and_nonce(
-        reader,
-        writer,
-        output,
-        remote_root,
-        shell_command,
-        &nonce,
-        input,
-    )
-}
-
+#[cfg(test)]
 pub(crate) fn run_framed_job_with_input_and_nonce<W, O>(
     reader: &mut ReadPump,
     writer: &mut W,
@@ -395,7 +367,11 @@ where
         }
 
         let wait = child_exit_deadline
-            .map(|deadline| deadline.saturating_duration_since(Instant::now()).min(INPUT_POLL))
+            .map(|deadline| {
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(INPUT_POLL)
+            })
             .unwrap_or(INPUT_POLL);
         match reader
             .read_event_timeout(wait)
@@ -957,7 +933,10 @@ mod tests {
             drop(_remote_tx);
             let (unknown, elapsed) = outcome
                 .unwrap_or_else(|error| panic!("{path} path did not notice child exit: {error}"));
-            assert!(unknown, "{path} path should report an unknown result without a completion marker");
+            assert!(
+                unknown,
+                "{path} path should report an unknown result without a completion marker"
+            );
             assert!(
                 elapsed >= Duration::from_millis(200) && elapsed < Duration::from_secs(1),
                 "{path} path should drain for at most 250 ms after child exit, took {elapsed:?}"
