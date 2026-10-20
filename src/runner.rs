@@ -11,7 +11,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::thread;
 #[cfg(any(windows, test))]
 use std::thread::JoinHandle;
-#[cfg(any(windows, test))]
+#[cfg(test)]
 use std::time::Instant;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -391,8 +391,8 @@ fn longest_suffix_prefix(bytes: &[u8], prefix: &[u8]) -> usize {
     0
 }
 
-/// Drain a ConPTY fixture during tests, answering cursor queries while
-/// preserving all other bytes for the job framing decoder.
+/// Decode terminal bytes and answer ConPTY startup DSR queries until the
+/// remote job BEGIN marker has been recognized.
 #[cfg(any(windows, test))]
 fn decode_job_bytes<W: Write + ?Sized>(
     decoder: &mut CompletionDecoder,
@@ -417,6 +417,7 @@ fn decode_job_bytes<W: Write + ?Sized>(
     Ok(visible)
 }
 
+/// Drain a ConPTY fixture in tests while preserving all bytes other than DSR queries.
 #[cfg(test)]
 pub(crate) fn initialize_conpty(
     reader: &mut ReadPump,
