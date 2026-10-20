@@ -1,7 +1,7 @@
 use anyhow::{bail, Result};
 use std::collections::HashSet;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 const CLI_NAME: &str = "uuyc-cli.exe";
 
@@ -121,6 +121,7 @@ fn windows_registry_install_roots() -> Vec<PathBuf> {
     roots
 }
 
+#[cfg(any(windows, test))]
 fn looks_like_uu_remote(display_name: &str, publisher: &str) -> bool {
     let display = display_name.to_ascii_lowercase();
     let publisher = publisher.to_ascii_lowercase();
@@ -128,6 +129,7 @@ fn looks_like_uu_remote(display_name: &str, publisher: &str) -> bool {
         || (publisher.contains("netease") && display.contains("uu"))
 }
 
+#[cfg(any(windows, test))]
 fn parse_uninstall_executable(command: &str) -> Option<PathBuf> {
     let command = command.trim();
     if command.is_empty() {
@@ -151,7 +153,10 @@ mod tests {
     #[test]
     fn recognizes_observed_uu_remote_registry_entry() {
         assert!(looks_like_uu_remote("UU远程", "Netease"));
-        assert!(looks_like_uu_remote("UU Remote", "NetEase (Hangzhou) Network Co., Ltd"));
+        assert!(looks_like_uu_remote(
+            "UU Remote",
+            "NetEase (Hangzhou) Network Co., Ltd"
+        ));
         assert!(!looks_like_uu_remote("Some Other Tool", "Example Corp"));
     }
 
@@ -175,11 +180,13 @@ mod tests {
 
     #[test]
     fn program_files_candidate_shape_matches_observed_install() {
-        let root = Path::new(r"C:\Program Files")
+        let root = std::path::Path::new(r"C:\Program Files")
             .join("Netease")
             .join("GameViewer")
             .join("bin")
             .join(CLI_NAME);
-        assert!(root.to_string_lossy().ends_with(r"Netease\GameViewer\bin\uuyc-cli.exe"));
+        assert!(root
+            .to_string_lossy()
+            .ends_with(r"Netease\GameViewer\bin\uuyc-cli.exe"));
     }
 }
