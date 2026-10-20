@@ -37,7 +37,7 @@ local workspace
 
 从子目录执行 `uu` 时，使用最近的 workspace binding。
 
-同一台远端设备可以被多个本地 workspace 绑定；这些 workspace 可以共享该设备的 Terminal worker pool。每个 job 使用自己 workspace 的 `remote_root`，因此不需要把 Terminal 再按 workspace 切成多套。
+同一台远端设备可以被多个本地 workspace 绑定；这些 workspace 共享该设备的 Terminal worker pool。每个 job 使用自己 workspace 的 `remote_root`，因此不需要把 Terminal 再按 workspace 切成多套。
 
 ## 3. Terminal 是设备级执行资源，不是 Agent 上下文
 
@@ -101,45 +101,46 @@ UU 已运行并登录
 
 `uu-cli` 不自动点击 GUI，不注入 GameViewer，不伪造签名，不绕过 host registration。
 
-## 6. 交互逻辑 — 没有歧义就不问
-
-所有自动交互遵循一个规则：**能安全确定就自动；只有真正需要人做决定时才弹 PowerShell；同一个决定只问一次。**
+## 6. 交互逻辑 — 没有歧义就不问，同一个决定只问一次
 
 ### 6.1 Workspace 尚未绑定，用户执行 `uu ...`
 
-- 已经只有一台明确设备有可用 worker：选择该设备，不要求用户输入 deviceId；
-- 多台设备都有可用 worker：弹一次设备选择，以 friendly name + terminal 数量展示；
-- 当前没有 worker：`uu` 等待，并提示用户在官方 UU 中打开目标设备 Terminal；用户打开后原请求继续，不要求重新运行命令；
-- 如果等待期间新开的 Terminal 唯一明确了目标设备，应把“选择设备 + 允许这个 Terminal + 继续原 job”合并处理，不连续弹多轮确认。
+- 已经只有一台明确设备有已授权 worker：选择该设备，不要求用户输入 deviceId；
+- 多台设备都有已授权 worker：弹一次设备选择，以 friendly name + terminal 数量展示；
+- 当前没有 worker：`uu` 等待，并明确提示“请在官方 UU 中打开想使用设备的 Terminal；新打开的 Terminal 将用于本次请求”；用户随后打开的唯一匹配 Terminal 视为对本次请求的明确授权，原命令继续，不要求重跑，也不再弹第二个“是否交给 uu-cli”确认；
+- 如果等待期间同时出现多个设备/多个新 Terminal，才弹一次短选择，不能猜。
 
 第一次 binding 还需要 `remote_root`。默认值可以来自所选远端 Terminal 当前 `pwd`；用户只需 Enter 接受或输入正确目录。之后不重复询问。
 
-### 6.2 已绑定 workspace，新 Terminal 出现
+### 6.2 没有请求正在等待，新 Terminal 出现
 
-Terminal pool 属于 device，而不是 workspace，所以**同一设备存在多个 workspace 不构成歧义**。
+发现不等于可以静默接管。
 
-- 如果有一个正在等待该设备 worker 的 `uu` 请求，新 Terminal 可以直接满足该请求；不再额外弹“是否加入”窗口；
-- 如果没有等待请求，并且该设备已设置“以后自动加入”，直接加入 pool；
-- 否则弹一个很短的 PowerShell 提示，例如：
+弹一个很短的人类确认：
 
 ```text
 AIC-Car-1 新终端已打开
-[Enter] 交给 uu-cli   [N] 不使用   [A] 此设备以后自动加入
+[Enter] 交给 uu-cli    [N] 保留手动使用
 ```
 
-- `N` 后该 session 不得被调度；
-- `A` 是设备级偏好，不是 workspace 级偏好；
-- 短时间连续出现多个新 Terminal 时应尽量合并成一次处理，避免连弹多个窗口。
+规则：
+
+- Enter 后该 session 成为该 device pool 的 worker；
+- `N`、Esc、关闭窗口或取消都视为 **不使用**；
+- v1 不提供“以后该设备所有新 Terminal 都自动接管”的永久开关，避免用户未来手动开的 Terminal 被无感抢走；
+- 短时间连续出现多个新 Terminal 时应在同一个交互窗口里顺序/批量处理，避免连续弹多个窗口；
+- 同一设备存在多个 workspace **不构成歧义**，因为 pool 属于 device。
 
 ### 6.3 交互与命令 I/O 必须分离
 
 人类选择窗口不能污染正常 `uu` 的 stdout，也不能偷走远端命令 stdin。
 
-这意味着：
+要求：
 
 - `uu <command>` 的 stdout 尽量只保留远端输出；
 - 工具错误/状态提示走 stderr；
-- 需要人类选择时可以由后台能力弹独立的短 `pwsh`，而不是把菜单插进一个可能正在被 Codex 或 pipe 使用的命令流；
+- 需要人类选择时使用独立的短 PowerShell/console 交互，而不是把菜单插进一个可能正在被 Codex 或 pipe 使用的命令流；
+- 不能把 PowerShell 7 (`pwsh`) 当作用户必须预装的运行时：若存在可优先使用，否则可回退系统自带 Windows PowerShell 或项目自身的最小原生交互窗口；
 - 如果环境当前不能安全展示交互，宁可等待/给明确错误，也不要猜。
 
 Codex 不接触裸 `deviceId`。
@@ -160,6 +161,14 @@ uu get <remote> <local>
 uu bind
 uu list
 ```
+
+`put/get/bind/list` 是保留入口。为了仍然满足“几乎任意远端命令都只是加 `uu` 前缀”，提供标准 escape：
+
+```powershell
+uu -- <remote command...>
+```
+
+例如远端确实有名为 `list`/`bind`/`put`/`get` 的命令时，用 `uu -- ...` 强制按远端命令执行。
 
 `uu bind` 用于首次或重新建立当前 workspace binding；`uu list` 只给人类查看当前 workspace、remote 和 worker 状态。
 
@@ -214,7 +223,7 @@ uu get remote/path.bin .\roundtrip.bin
 - 不让 uu-cli 崩溃、升级、卸载影响官方 UU 本身；
 - 不依赖签名伪造、认证绕过、GUI 自动点击、进程注入。
 
-当用户明确在 PowerShell 提示中把某个 Terminal 交给 uu-cli 后，该 Terminal 可以被作为专用 worker 使用；在此之前不能静默接管。
+当用户明确把某个 Terminal 交给 uu-cli 后，该 Terminal 才可以作为专用 worker 使用。
 
 如果某种 attach/reuse 方法会明显干扰官方 UU 或用户未授权的 Terminal，必须换更安全的实现。
 
@@ -227,7 +236,7 @@ uu get remote/path.bin .\roundtrip.bin
 - 自动发现官方 UU 安装位置和可用组件；
 - 不硬编码开发机路径、用户名、盘符、deviceId、session 名、精确安装目录；
 - 优先做能力探测和兼容性判断，而不是只认一个固定版本；
-- 不要求用户额外安装 Python、Rust、Node、WSL 等开发运行时；
+- 不要求用户额外安装 Python、Rust、Node、PowerShell 7、WSL 等开发运行时；
 - 尽量以普通用户权限完成安装和运行；
 - 对不同 Windows 用户、路径、设备名、系统语言保持稳健；
 - 在不兼容时给出明确诊断，而不是静默失败。
@@ -245,7 +254,7 @@ uu get remote/path.bin .\roundtrip.bin
 - 空闲时 CPU 接近 0，不永久高频轮询或反复 spawn 官方 CLI；
 - 没必要时不保持昂贵连接；
 - 无 tray、额外 GUI 或常驻可见 console；
-- 只有真正需要用户选择时才弹短 PowerShell 交互；
+- 只有真正需要用户选择时才弹短人类交互；
 - 后台组件异常后，下一次 `uu` 可以恢复或给出明确错误；
 - 不拖累或阻止官方 UU 的启动、退出、升级。
 
