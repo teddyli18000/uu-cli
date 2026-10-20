@@ -203,6 +203,17 @@
 - This mode logs actual API output/milestones, not the private transport's raw
   RX/TX. Earlier rounds retain the separate original-byte observation logs.
 
+## Automated checks after command-channel integration
+
+- Production revision `8e1d3624d33586608d644ed9aced1f342e4a2afd` passed
+  [Windows/Linux CI](https://github.com/teddyli18000/uu-cli/actions/runs/39433019505)
+  and [installer/transfer validation](https://github.com/teddyli18000/uu-cli/actions/runs/39433019285).
+- Windows CLI cases include Unicode/status, dropped-dispatch quarantine/no-replay,
+  unusable components and real Git Bash binary put/get. The latest changes are
+  test-fixture/expectation fixes and documentation; runtime modules match round 7.
+- These checks complement the isolated real-UU command probe. They do not prove
+  real-UU file transfer, the full binding/authorization UX or complete v1 acceptance.
+
 ## Conclusion
 
 - Attach handoff is demonstrated in this environment: a live official attachment
