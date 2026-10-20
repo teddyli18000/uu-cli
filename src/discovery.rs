@@ -184,13 +184,20 @@ mod tests {
 
     #[test]
     fn program_files_candidate_shape_matches_observed_install() {
-        let root = std::path::Path::new(r"C:\Program Files")
+        let root = std::path::Path::new("C:\\Program Files")
             .join("Netease")
             .join("GameViewer")
             .join("bin")
             .join(CLI_NAME);
-        assert!(root
-            .to_string_lossy()
-            .ends_with(r"Netease\GameViewer\bin\uuyc-cli.exe"));
+        let components = root
+            .iter()
+            .map(|part| part.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(components.ends_with(&[
+            "Netease".into(),
+            "GameViewer".into(),
+            "bin".into(),
+            CLI_NAME.into(),
+        ]));
     }
 }
