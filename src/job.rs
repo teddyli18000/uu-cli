@@ -1,4 +1,5 @@
 use anyhow::{anyhow, bail, Context, Result};
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 
 const END_MARKER: u8 = b'Z';
@@ -59,8 +60,202 @@ pub fn wrap_job(remote_root: &str, shell_command: &str, nonce: &str) -> Result<S
 pub fn wrap_pwd_probe(nonce: &str) -> Result<String> {
     validate_nonce(nonce)?;
     Ok(format!(
-        "printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; pwd; __uu_status=$?; printf '\\r\\n%s%s%s%d%s\\r\\n' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\n"
+        "printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; ( set -o pipefail || exit 125; for __uu_tool in pwd od tr wc sha256sum fold; do command -v \"$__uu_tool\" >/dev/null 2>&1 || exit 127; done; __uu_pwd=$(command pwd -P && printf .) || exit $?; __uu_pwd=${{__uu_pwd%.}}; __uu_size=$(printf '%s' \"$__uu_pwd\" | wc -c | tr -d '[:space:]') || exit $?; case \"$__uu_size\" in ''|*[!0-9]*) exit 125;; esac; [ \"$__uu_size\" -ge 1 ] && [ \"$__uu_size\" -le 65536 ] || exit 125; __uu_hash=$(printf '%s' \"$__uu_pwd\" | sha256sum) || exit $?; __uu_hash=${{__uu_hash%% *}}; case \"$__uu_hash\" in *[!0-9a-fA-F]*|'') exit 125;; esac; [ \"${{#__uu_hash}}\" -eq 64 ] || exit 125; __uu_hex=$(printf '%s' \"$__uu_pwd\" | od -An -v -tx1 | tr -d '[:space:]') || exit $?; [ \"${{#__uu_hex}}\" -eq \"$((__uu_size * 2))\" ] || exit 125; __uu_folded=$(printf '%s' \"$__uu_hex\" | fold -w64) || exit $?; printf '\\r\\nPWD1\\r\\n'; __uu_seq=0; printf '%s\\n' \"$__uu_folded\" | while IFS= read -r __uu_chunk; do printf 'D%04d:%s\\r\\n' \"$__uu_seq\" \"$__uu_chunk\" || exit 74; __uu_seq=$((__uu_seq + 1)); done || exit $?; printf 'Z:%s:%s\\r\\n' \"$__uu_size\" \"$__uu_hash\" ); __uu_status=$?; printf '\\r\\n%s%s%s%d%s\\r\\n' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\n"
     ))
+}
+
+const PWD_MAX_BYTES: usize = 64 * 1024;
+const PWD_MAX_OUTPUT_BYTES: usize = 256 * 1024;
+const PWD_HEX_CHUNK_BYTES: usize = 64;
+const PWD_MAX_RECORD_BYTES: usize = 80;
+const PWD_MAX_CSI_BYTES: usize = 32;
+
+/// Decode the bounded ASCII pwd envelope emitted by wrap_pwd_probe.
+///
+/// Hash and length cover pwd -P output including its final LF. Remove exactly
+/// that one command terminator after verification so a path ending in LF remains
+/// intact.
+pub fn decode_pwd_output(output: &[u8]) -> Result<String> {
+    if output.len() > PWD_MAX_OUTPUT_BYTES {
+        bail!("pwd probe output exceeded its limit");
+    }
+
+    let mut records = PwdRecordReader::new(output);
+    if records.next_record()? != Some(&b"PWD1"[..]) {
+        bail!("pwd probe header was missing or invalid");
+    }
+
+    let mut path_output = Vec::new();
+    let mut expected_index = 0usize;
+    let mut previous_chunk_len = PWD_HEX_CHUNK_BYTES;
+    let footer = loop {
+        let record = records
+            .next_record()?
+            .ok_or_else(|| anyhow!("pwd probe footer was missing"))?;
+        if record.starts_with(b"Z:") {
+            break record;
+        }
+        if record.len() > PWD_MAX_RECORD_BYTES || record.len() < 8 || record[0] != b'D' {
+            bail!("pwd probe data record was invalid");
+        }
+        if previous_chunk_len != PWD_HEX_CHUNK_BYTES {
+            bail!("pwd probe had a short non-final data record");
+        }
+        let sequence = &record[1..5];
+        if !sequence.iter().all(u8::is_ascii_digit) || record[5] != b':' {
+            bail!("pwd probe data record sequence was invalid");
+        }
+        let sequence = std::str::from_utf8(sequence)?.parse::<usize>()?;
+        if sequence != expected_index {
+            bail!("pwd probe data records were missing, repeated, or out of order");
+        }
+        let hex = &record[6..];
+        if hex.is_empty() || hex.len() > PWD_HEX_CHUNK_BYTES || hex.len() % 2 != 0 {
+            bail!("pwd probe hex record length was invalid");
+        }
+        append_hex(hex, &mut path_output)?;
+        previous_chunk_len = hex.len();
+        expected_index = expected_index
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("pwd probe record count overflowed"))?;
+    };
+
+    if records.next_record()?.is_some() {
+        bail!("pwd probe had records after its footer");
+    }
+    if footer.len() > PWD_MAX_RECORD_BYTES {
+        bail!("pwd probe footer exceeded its limit");
+    }
+    let footer_fields = &footer[2..];
+    let separator = footer_fields
+        .iter()
+        .position(|byte| *byte == b':')
+        .ok_or_else(|| anyhow!("pwd probe footer format was invalid"))?;
+    let size_text = &footer_fields[..separator];
+    if size_text.is_empty() || !size_text.iter().all(u8::is_ascii_digit) {
+        bail!("pwd probe byte length was not decimal ASCII");
+    }
+    let expected_size = std::str::from_utf8(size_text)
+        .context("pwd probe byte length was not ASCII")?
+        .parse::<usize>()
+        .context("pwd probe byte length was invalid")?;
+    if expected_size > PWD_MAX_BYTES || path_output.len() != expected_size {
+        bail!("pwd probe byte length did not match its records");
+    }
+    let expected_hash = &footer_fields[separator + 1..];
+    if expected_hash.len() != 64 {
+        bail!("pwd probe SHA-256 length was invalid");
+    }
+    let expected_hash = decode_hex(expected_hash)?;
+    if expected_hash.len() != 32 || Sha256::digest(&path_output)[..] != expected_hash[..] {
+        bail!("pwd probe SHA-256 did not match its records");
+    }
+
+    if path_output.last() != Some(&b'\n') {
+        bail!("pwd probe output did not end in the expected LF");
+    }
+    path_output.pop();
+    if path_output.first() != Some(&b'/') || path_output.contains(&0) {
+        bail!("pwd probe path was not an absolute non-NUL path");
+    }
+    String::from_utf8(path_output).context("pwd probe path was not valid UTF-8")
+}
+
+fn append_hex(input: &[u8], output: &mut Vec<u8>) -> Result<()> {
+    if input.len() % 2 != 0 || output.len() + input.len() / 2 > PWD_MAX_BYTES {
+        bail!("pwd probe data exceeded its limit or had odd hex length");
+    }
+    for pair in input.chunks_exact(2) {
+        let high = hex_nibble(pair[0]).ok_or_else(|| anyhow!("pwd probe contained invalid hex"))?;
+        let low = hex_nibble(pair[1]).ok_or_else(|| anyhow!("pwd probe contained invalid hex"))?;
+        output.push((high << 4) | low);
+    }
+    Ok(())
+}
+
+fn decode_hex(input: &[u8]) -> Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(input.len() / 2);
+    append_hex(input, &mut output)?;
+    Ok(output)
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+struct PwdRecordReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> PwdRecordReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn next_record(&mut self) -> Result<Option<&'a [u8]>> {
+        self.skip_boundaries()?;
+        if self.offset == self.bytes.len() {
+            return Ok(None);
+        }
+
+        let start = self.offset;
+        while self.offset < self.bytes.len()
+            && !matches!(self.bytes[self.offset], b'\r' | b'\n')
+        {
+            self.offset += 1;
+        }
+        if self.offset == self.bytes.len() {
+            bail!("pwd probe record was missing its line ending");
+        }
+        let end = self.offset;
+        self.skip_boundaries()?;
+        Ok(Some(&self.bytes[start..end]))
+    }
+
+    fn skip_boundaries(&mut self) -> Result<()> {
+        loop {
+            match self.bytes.get(self.offset).copied() {
+                Some(b'\r' | b'\n') => self.offset += 1,
+                Some(0x1b) => self.skip_cursor_csi()?,
+                _ => return Ok(()),
+            }
+        }
+    }
+
+    fn skip_cursor_csi(&mut self) -> Result<()> {
+        let start = self.offset;
+        if self.bytes.get(start..start + 2) != Some(&b"\x1b["[..]) {
+            bail!("pwd probe contained an unsupported VT sequence at a record boundary");
+        }
+        self.offset += 2;
+        while self.offset < self.bytes.len()
+            && matches!(self.bytes[self.offset], b'0'..=b'9' | b';')
+        {
+            self.offset += 1;
+            if self.offset - start > PWD_MAX_CSI_BYTES {
+                bail!("pwd probe cursor sequence exceeded its limit");
+            }
+        }
+        let final_byte = self
+            .bytes
+            .get(self.offset)
+            .copied()
+            .ok_or_else(|| anyhow!("pwd probe cursor sequence was incomplete"))?;
+        if !matches!(final_byte, b'A'..=b'H' | b'd' | b'f') {
+            bail!("pwd probe contained an unsupported cursor sequence");
+        }
+        self.offset += 1;
+        if self.offset - start > PWD_MAX_CSI_BYTES {
+            bail!("pwd probe cursor sequence exceeded its limit");
+        }
+        Ok(())
+    }
 }
 
 pub fn shell_quote(text: &str) -> String {
@@ -296,7 +491,12 @@ mod tests {
     #[test]
     fn pwd_probe_keeps_its_start_marker_and_terminates_end_marker_with_newline() {
         let script = wrap_pwd_probe("abc123").unwrap();
-        assert!(script.contains("printf '\\r\\n%s%s%s' 'UUC' 'abc123' 'B'; pwd;"));
+        assert!(script.contains("printf '\\r\\n%s%s%s' 'UUC' 'abc123' 'B';"));
+        assert!(script.contains("set -o pipefail || exit 125;"));
+        assert!(script.contains("for __uu_tool in pwd od tr wc sha256sum fold;"));
+        assert!(script.contains("__uu_pwd=$(command pwd -P && printf .)"));
+        assert!(script.contains("PWD1\\r\\n"));
+        assert!(script.contains("sha256sum"));
         assert!(!script.contains("set +m"));
         assert!(!script.contains("cd --"));
         assert!(script.contains("printf '\\r\\n%s%s%s%d%s\\r\\n' 'UUC' 'abc123' 'E'"));
