@@ -2,8 +2,9 @@ use serde_json::{json, Value};
 use std::env;
 use std::error::Error;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::process::{Command, ExitCode, Stdio};
+use std::thread;
 
 const DEVICE_ID: &str = "device-1";
 const DEVICE_NAME: &str = "测试设备";
@@ -88,18 +89,7 @@ fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
     record_event(json!({"event": "attach_started"}))?;
 
     if env::var("UU_TEST_MODE").as_deref() == Ok("bash") {
-        let bash = env::var_os("UU_TEST_BASH")
-            .ok_or("UU_TEST_BASH must name the Git Bash executable for bash mode")?;
-        let status = Command::new(bash)
-            .args(["--noprofile", "--norc"])
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()?;
-        return Ok(status
-            .code()
-            .and_then(|code| u8::try_from(code).ok())
-            .unwrap_or(1));
+        return run_git_bash_attached_terminal();
     }
 
     let mut command = String::new();
@@ -137,6 +127,113 @@ fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
     }
 }
 
+const DSR_RESPONSE: &[u8] = b"\x1b[1;1R";
+
+fn run_git_bash_attached_terminal() -> Result<u8, Box<dyn Error>> {
+    let bash = env::var_os("UU_TEST_BASH")
+        .ok_or("UU_TEST_BASH must name the Git Bash executable for bash mode")?;
+    let mut child = Command::new(bash)
+        .args(["--noprofile", "--norc"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let child_stdin = child.stdin.take().ok_or("Git Bash stdin was not piped")?;
+    let _input_relay = thread::Builder::new()
+        .name("fake-uuyc-git-bash-input".to_owned())
+        .spawn(move || {
+            if let Err(error) = forward_conpty_input(io::stdin(), child_stdin) {
+                eprintln!("fake-uuyc: Git Bash input relay failed: {error}");
+            }
+        })?;
+    let status = child.wait()?;
+    Ok(status
+        .code()
+        .and_then(|code| u8::try_from(code).ok())
+        .unwrap_or(1))
+}
+
+fn forward_conpty_input<R: Read, W: Write>(
+    mut input: R,
+    mut output: W,
+) -> Result<(), Box<dyn Error>> {
+    let mut read_buffer = [0_u8; 4096];
+    let mut possible_dsr = Vec::with_capacity(DSR_RESPONSE.len());
+    let mut pending_cr = false;
+    let mut line = Vec::new();
+
+    loop {
+        let bytes_read = input.read(&mut read_buffer)?;
+        if bytes_read == 0 {
+            break;
+        }
+        for &byte in &read_buffer[..bytes_read] {
+            possible_dsr.push(byte);
+            while !DSR_RESPONSE.starts_with(&possible_dsr) {
+                let forwarded = possible_dsr.remove(0);
+                forward_bash_byte(forwarded, &mut pending_cr, &mut line, &mut output)?;
+            }
+            if possible_dsr.as_slice() == DSR_RESPONSE {
+                possible_dsr.clear();
+            }
+        }
+    }
+
+    for byte in possible_dsr {
+        forward_bash_byte(byte, &mut pending_cr, &mut line, &mut output)?;
+    }
+    if pending_cr {
+        dispatch_bash_line(&mut line, &mut output, true)?;
+    } else if !line.is_empty() {
+        dispatch_bash_line(&mut line, &mut output, false)?;
+    }
+    output.flush()?;
+    Ok(())
+}
+
+fn forward_bash_byte<W: Write>(
+    byte: u8,
+    pending_cr: &mut bool,
+    line: &mut Vec<u8>,
+    output: &mut W,
+) -> Result<(), Box<dyn Error>> {
+    if *pending_cr {
+        *pending_cr = false;
+        dispatch_bash_line(line, output, true)?;
+        if byte == b'\n' {
+            return Ok(());
+        }
+    }
+
+    match byte {
+        b'\r' => *pending_cr = true,
+        b'\n' => dispatch_bash_line(line, output, true)?,
+        _ => line.push(byte),
+    }
+    Ok(())
+}
+
+fn dispatch_bash_line<W: Write>(
+    line: &mut Vec<u8>,
+    output: &mut W,
+    terminated: bool,
+) -> Result<(), Box<dyn Error>> {
+    let input_bytes = line.len() + if terminated { 1 } else { 0 };
+    output.write_all(line)?;
+    if terminated {
+        output.write_all(b"\n")?;
+    }
+    output.flush()?;
+    if !line.is_empty() {
+        record_event(json!({
+            "event": "dispatch",
+            "transport": "git-bash-pipe",
+            "input_bytes": input_bytes
+        }))?;
+    }
+    line.clear();
+    Ok(())
+}
 fn record_dispatch(wrapper: &str) -> Result<(), Box<dyn Error>> {
     record_event(json!({
         "event": "dispatch",

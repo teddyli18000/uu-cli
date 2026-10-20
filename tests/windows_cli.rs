@@ -368,9 +368,14 @@ fn windows_cli_streams_unicode_output_and_propagates_remote_exit_code() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(
-        stdout, "fake output: 你好 世界\r\n",
-        "the complete marker-delimited payload should be preserved exactly"
+    assert!(
+        stdout == "fake output: 你好 世界\r\n"
+            || stdout == "fake output: 你好 世界\x1b[7;1H",
+        "the complete payload should be exact, with either raw CRLF or the observed ConPTY cursor sequence; got {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("UUC"),
+        "completion framing or command echo leaked to stdout: {stdout:?}"
     );
     assert!(
         !stdout.contains("Select target"),
@@ -513,6 +518,18 @@ fn windows_cli_put_get_binary_files_through_git_bash() {
         "uu put 1 MiB+1 binary payload through Git Bash",
     );
     assert_transfer_success(output, "uu put 1 MiB+1 binary payload");
+    let put_dispatches = read_dispatches(&test.log_path);
+    assert!(
+        put_dispatches.iter().any(|dispatch| {
+            dispatch.get("transport").and_then(Value::as_str) == Some("git-bash-pipe")
+                && dispatch
+                    .get("input_bytes")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default()
+                    > 0
+        }),
+        "Git Bash should receive a dispatched command through the piped ConPTY input relay"
+    );
 
     let mut get_payload = uu_command(&test, &fake_cli, "bash");
     get_payload
