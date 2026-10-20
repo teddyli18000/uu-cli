@@ -280,8 +280,8 @@ mod windows {
         let parent: u32 = args[0].parse()?;
         let deadline = Instant::now() + Duration::from_millis(args[1].parse()?);
         let (input, output) = attach(parent, deadline)?;
-        let input = input.into_raw_handle() as Handle;
-        let output = output.into_raw_handle() as Handle;
+        let input = input.into_raw_handle();
+        let output = output.into_raw_handle();
         loop {
             let captured = screen(output)?;
             std::fs::write(Path::new(&args[2]), &captured)?;
