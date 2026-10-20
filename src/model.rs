@@ -45,7 +45,11 @@ impl Config {
         let Some(fingerprint) = session.authorization_fingerprint() else {
             return false;
         };
-        if self.authorized_workers.iter().any(|item| item == &fingerprint) {
+        if self
+            .authorized_workers
+            .iter()
+            .any(|item| item == &fingerprint)
+        {
             return true;
         }
         self.authorized_workers.push(fingerprint);
@@ -56,7 +60,9 @@ impl Config {
         let Some(fingerprint) = session.authorization_fingerprint() else {
             return false;
         };
-        self.authorized_workers.iter().any(|item| item == &fingerprint)
+        self.authorized_workers
+            .iter()
+            .any(|item| item == &fingerprint)
     }
 }
 
