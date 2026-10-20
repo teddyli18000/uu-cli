@@ -1,6 +1,4 @@
 use anyhow::{bail, Context, Result};
-#[cfg(windows)]
-use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -15,7 +13,7 @@ use uu_cli::inventory::{discover_inventory, is_eligible_session, InventorySnapsh
 use uu_cli::job::argv_to_shell;
 use uu_cli::model::{Config, SessionInfo, WorkspaceBinding};
 #[cfg(windows)]
-use uu_cli::transport::OfficialAttachPty;
+use uu_cli::transport::{OfficialAttachPty, OfficialNewPty};
 use uu_cli::uuyc::OfficialCli;
 #[cfg(windows)]
 use uu_cli::worker_lease::{AcquireResult, WorkerLease};
@@ -75,7 +73,7 @@ fn run_list(config: &Config, cwd: &Path) -> Result<()> {
         Ok(cli) => cli,
         Err(_) => {
             println!("UU         not found");
-            println!("Workers    unavailable");
+            println!("Terminals  unavailable");
             return Ok(());
         }
     };
@@ -87,7 +85,7 @@ fn run_list(config: &Config, cwd: &Path) -> Result<()> {
         }
         Err(error) => {
             println!("UU         found · incompatible ({error})");
-            println!("Workers    unavailable");
+            println!("Terminals  unavailable");
             return Ok(());
         }
     }
@@ -95,24 +93,26 @@ fn run_list(config: &Config, cwd: &Path) -> Result<()> {
     let snapshot = match discover_inventory(&cli) {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            println!("Workers    discovery failed ({error})");
+            println!("Terminals  discovery failed ({error})");
             return Ok(());
         }
     };
 
     if let Some(binding) = binding {
-        if let Some(device) = snapshot
+        let Some(device) = snapshot
             .devices
             .iter()
             .find(|item| item.device.device_identity == binding.device_identity)
-        {
-            if let Some(error) = &device.session_error {
-                println!("Workers    unavailable ({error})");
-                return Ok(());
-            }
+        else {
+            println!("Terminals  target unavailable");
+            return Ok(());
+        };
+        if let Some(error) = &device.session_error {
+            println!("Terminals  unavailable ({error})");
+            return Ok(());
         }
         let sessions = snapshot.live_sessions_for(&binding.device_identity);
-        print_bound_workers(config, &sessions);
+        print_bound_terminals(config, &sessions);
         return Ok(());
     }
 
@@ -136,30 +136,30 @@ fn run_list(config: &Config, cwd: &Path) -> Result<()> {
         };
         println!("  {name} · {count} terminal(s)");
     }
-    println!("Workers    {total} open terminals on {device_count} device(s)");
+    println!("Terminals  {total} open on {device_count} device(s)");
     Ok(())
 }
 
-fn print_bound_workers(config: &Config, sessions: &[&SessionInfo]) {
-    let authorized = sessions
+fn print_bound_terminals(config: &Config, sessions: &[&SessionInfo]) {
+    let owned = sessions
         .iter()
-        .filter(|session| config.is_session_authorized(session))
+        .filter(|session| config.is_owned_worker(session))
         .count();
     let ready = sessions
         .iter()
-        .filter(|session| config.is_session_authorized(session) && is_eligible_session(session))
+        .filter(|session| config.is_owned_worker(session) && is_eligible_session(session))
         .count();
-    println!(
-        "Workers    {ready} ready / {authorized} authorized / {} open",
-        sessions.len()
-    );
+    let anchors = sessions.len().saturating_sub(owned);
+    println!("Terminals  {anchors} user/anchor · {owned} uu-cli worker(s) · {ready} ready");
     for session in sessions {
-        let status = if !config.is_session_authorized(session) {
-            "not authorized"
-        } else if is_eligible_session(session) {
-            "ready"
+        let status = if config.is_owned_worker(session) {
+            if is_eligible_session(session) {
+                "uu-cli worker · ready"
+            } else {
+                "uu-cli worker · busy"
+            }
         } else {
-            "busy"
+            "user/anchor · untouched"
         };
         println!("  {} · {status}", session.session_name);
     }
@@ -214,7 +214,7 @@ fn launch_binding_console(cwd: &Path) -> Result<()> {
 fn run_bind(store: &ConfigStore, config: &mut Config, cwd: &Path) -> Result<()> {
     let local_root = suggest_root(cwd)?;
     let cli = OfficialCli::locate().context("official UU Remote is required for `uu bind`")?;
-    let (snapshot, candidate) = wait_for_bind_target(&cli)?;
+    let (_snapshot, candidate) = wait_for_bind_target(&cli)?;
 
     let previous_root = resolve_binding(config, &local_root)
         .filter(|binding| binding.device_identity == candidate.device_identity)
@@ -226,22 +226,6 @@ fn run_bind(store: &ConfigStore, config: &mut Config, cwd: &Path) -> Result<()> 
     );
     let remote_root = prompt_remote_root(previous_root.as_deref())?;
 
-    let sessions = snapshot.live_sessions_for(&candidate.device_identity);
-    let stable_sessions: Vec<&SessionInfo> = sessions
-        .into_iter()
-        .filter(|session| session.authorization_fingerprint().is_some())
-        .collect();
-    if stable_sessions.is_empty() {
-        bail!("the open Terminal sessions do not expose a stable identity; refusing to persist an unsafe worker authorization");
-    }
-
-    let mut authorized = 0usize;
-    for session in stable_sessions {
-        if config.authorize_session(session) {
-            authorized += 1;
-        }
-    }
-
     config.upsert_binding(WorkspaceBinding {
         local_root: local_root.clone(),
         device_identity: candidate.device_identity,
@@ -252,7 +236,7 @@ fn run_bind(store: &ConfigStore, config: &mut Config, cwd: &Path) -> Result<()> 
 
     println!("Bound      {}", local_root.display());
     println!("Remote     {} · {remote_root}", candidate.device_name);
-    println!("Workers    {authorized} authorized");
+    println!("Terminal   existing GUI terminals remain untouched");
     Ok(())
 }
 
@@ -355,27 +339,51 @@ fn run_remote(
     {
         let cli =
             OfficialCli::locate().context("official UU Remote is required for remote execution")?;
-        let initial = discover_inventory(&cli)?;
-        validate_bound_device(&initial, &binding)?;
-        let mut seen = initial
-            .live_sessions_for(&binding.device_identity)
-            .into_iter()
-            .map(session_instance_key)
-            .collect::<HashSet<_>>();
-        let mut local_wait_announced = false;
+        let mut activation_hint_printed = false;
 
         loop {
-            let workers = wait_for_available_workers(&cli, store, config, &binding, &mut seen)?;
-            let mut attach_errors = Vec::new();
-            let mut blocked_locally = false;
+            let snapshot = discover_inventory(&cli)?;
+            let device = bound_device(&snapshot, &binding)?;
+            if let Some(error) = &device.session_error {
+                if needs_terminal_activation(error) {
+                    if !activation_hint_printed {
+                        eprintln!(
+                            "UU terminal channel is not active on {}. Open one Terminal for this device in official UU Remote; uu is waiting. Ctrl+C cancels.",
+                            binding.device_name
+                        );
+                        activation_hint_printed = true;
+                    }
+                    thread::sleep(Duration::from_millis(900));
+                    continue;
+                }
+                bail!(
+                    "cannot query terminal sessions on {}: {error}",
+                    binding.device_name
+                );
+            }
 
-            for worker in &workers {
+            let live = snapshot.live_sessions_for(&binding.device_identity);
+            if config.forget_missing_owned_workers(
+                &binding.device_identity,
+                live.iter().copied(),
+            ) {
+                store.save(config)?;
+            }
+
+            let owned_ready = snapshot
+                .eligible_sessions_for(&binding.device_identity)
+                .into_iter()
+                .filter(|session| config.is_owned_worker(session))
+                .cloned()
+                .collect::<Vec<_>>();
+
+            for worker in &owned_ready {
+                if worker.authorization_fingerprint().is_none() {
+                    continue;
+                }
                 let mut lease = match WorkerLease::try_acquire(store.path(), worker)? {
                     AcquireResult::Acquired(lease) => lease,
-                    AcquireResult::Busy | AcquireResult::Quarantined => {
-                        blocked_locally = true;
-                        continue;
-                    }
+                    AcquireResult::Busy | AcquireResult::Quarantined => continue,
                 };
 
                 let mut transport = match OfficialAttachPty::attach(
@@ -384,10 +392,7 @@ fn run_remote(
                     &worker.session_name,
                 ) {
                     Ok(transport) => transport,
-                    Err(error) => {
-                        attach_errors.push(format!("{}: {error:#}", worker.session_name));
-                        continue;
-                    }
+                    Err(_) => continue,
                 };
 
                 lease.mark_in_flight()?;
@@ -396,16 +401,11 @@ fn run_remote(
                 match transport.run_job(&mut output, &binding.remote_root, &shell_command) {
                     Ok(result) => {
                         lease.complete()?;
-                        return u8::try_from(result.exit_code).with_context(|| {
-                            format!(
-                                "remote shell returned invalid exit code {}",
-                                result.exit_code
-                            )
-                        });
+                        return normalize_exit_code(result.exit_code);
                     }
                     Err(error) if error.is_unknown() => {
                         bail!(
-                            "{error}; not retrying on another Terminal because the command may already be running"
+                            "{error}; not retrying because the command may already be running"
                         );
                     }
                     Err(error) => {
@@ -415,91 +415,71 @@ fn run_remote(
                 }
             }
 
-            if blocked_locally {
-                if !local_wait_announced {
-                    eprintln!(
-                        "All ready uu-cli Terminals on {} are already in use or quarantined. uu is waiting; open another Terminal for more capacity. Ctrl+C cancels.",
+            match OfficialNewPty::create(cli.path(), &binding.device_identity) {
+                Ok(mut transport) => {
+                    let session_name = transport.session_name().to_owned();
+                    let stdout = io::stdout();
+                    let mut output = stdout.lock();
+                    match transport.run_job(&mut output, &binding.remote_root, &shell_command) {
+                        Ok(result) => {
+                            config.remember_owned_worker(&binding.device_identity, &session_name);
+                            store.save(config)?;
+                            return normalize_exit_code(result.exit_code);
+                        }
+                        Err(error) if error.is_unknown() => {
+                            bail!(
+                                "{error}; not retrying because the command may already be running"
+                            );
+                        }
+                        Err(error) => {
+                            let _ = cli.kill_session(&binding.device_identity, &session_name);
+                            return Err(anyhow::Error::new(error));
+                        }
+                    }
+                }
+                Err(error) if needs_terminal_activation(&format!("{error:#}")) => {
+                    if !activation_hint_printed {
+                        eprintln!(
+                            "UU terminal channel is not active on {}. Open one Terminal for this device in official UU Remote; uu is waiting. Ctrl+C cancels.",
+                            binding.device_name
+                        );
+                        activation_hint_printed = true;
+                    }
+                    thread::sleep(Duration::from_millis(900));
+                }
+                Err(error) => {
+                    bail!(
+                        "cannot create a uu-cli worker on {}: {error:#}",
                         binding.device_name
                     );
-                    local_wait_announced = true;
                 }
-                thread::sleep(Duration::from_millis(750));
-                continue;
             }
-
-            bail!(
-                "no authorized Terminal could be attached on {}: {}",
-                binding.device_name,
-                attach_errors.join(" | ")
-            )
         }
     }
 }
 
+fn normalize_exit_code(exit_code: i32) -> Result<u8> {
+    u8::try_from(exit_code)
+        .with_context(|| format!("remote shell returned invalid exit code {exit_code}"))
+}
+
+fn needs_terminal_activation(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    text.contains("版本过低")
+        || text.contains("版本不匹配")
+        || text.contains("不再兼容")
+        || text.contains("协议版本")
+        || text.contains("通道未激活")
+        || lower.contains("terminal channel")
+        || lower.contains("terminal not active")
+        || lower.contains("open terminal")
+}
+
 #[cfg(windows)]
-fn wait_for_available_workers(
-    cli: &OfficialCli,
-    store: &ConfigStore,
-    config: &mut Config,
+fn bound_device<'a>(
+    snapshot: &'a InventorySnapshot,
     binding: &WorkspaceBinding,
-    seen: &mut HashSet<String>,
-) -> Result<Vec<SessionInfo>> {
-    let mut announced_wait = false;
-
-    loop {
-        let snapshot = discover_inventory(cli)?;
-        validate_bound_device(&snapshot, binding)?;
-
-        let live = snapshot.live_sessions_for(&binding.device_identity);
-        let mut changed = false;
-        for session in live {
-            let key = session_instance_key(session);
-            if !seen.insert(key) {
-                continue;
-            }
-            if session.authorization_fingerprint().is_some() && config.authorize_session(session) {
-                changed = true;
-            }
-        }
-        if changed {
-            store.save(config)?;
-        }
-
-        let ready = snapshot
-            .eligible_sessions_for(&binding.device_identity)
-            .into_iter()
-            .filter(|session| config.is_session_authorized(session))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !ready.is_empty() {
-            return Ok(ready);
-        }
-
-        if !announced_wait {
-            let authorized_live = snapshot
-                .live_sessions_for(&binding.device_identity)
-                .into_iter()
-                .any(|session| config.is_session_authorized(session));
-            if authorized_live {
-                eprintln!(
-                    "All uu-cli Terminals on {} are busy. uu is waiting; open another Terminal in official UU Remote for more capacity. Ctrl+C cancels.",
-                    binding.device_name
-                );
-            } else {
-                eprintln!(
-                    "No uu-cli Terminal is available on {}. Open a new Terminal in official UU Remote now; uu will use it for this request. Ctrl+C cancels.",
-                    binding.device_name
-                );
-            }
-            announced_wait = true;
-        }
-
-        thread::sleep(Duration::from_millis(750));
-    }
-}
-
-#[cfg(windows)]
-fn validate_bound_device(snapshot: &InventorySnapshot, binding: &WorkspaceBinding) -> Result<()> {
+) -> Result<&'a uu_cli::inventory::DeviceInventory> {
     let device = snapshot
         .devices
         .iter()
@@ -513,21 +493,20 @@ fn validate_bound_device(snapshot: &InventorySnapshot, binding: &WorkspaceBindin
     if !device.device.is_online {
         bail!("bound target {} is offline", binding.device_name);
     }
-    if let Some(error) = &device.session_error {
-        bail!(
-            "cannot query terminal workers on {}: {error}",
-            binding.device_name
-        );
-    }
-    Ok(())
+    Ok(device)
 }
 
-#[cfg(windows)]
-fn session_instance_key(session: &SessionInfo) -> String {
-    format!(
-        "{}\u{1f}{}\u{1f}{}",
-        session.device_identity,
-        session.session_name,
-        session.created_at.as_deref().unwrap_or("")
-    )
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognizes_observed_channel_activation_failures() {
+        assert!(needs_terminal_activation(
+            "主控端版本过低，被控端不再兼容此协议版本"
+        ));
+        assert!(needs_terminal_activation("terminal channel not active"));
+        assert!(!needs_terminal_activation("Main application is not running"));
+        assert!(!needs_terminal_activation("device is offline"));
+    }
 }
