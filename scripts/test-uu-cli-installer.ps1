@@ -173,169 +173,53 @@ function Wait-ForInstalledWatcher {
     $watchers = @()
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     $sampleCount = 0
-    $countSamples = @{ Zero = 0; One = 0; Multiple = 0 }
+    $counts = @{ Zero = 0; One = 0; Multiple = 0 }
     $history = @{}
-    $observers = @{}
 
-    try {
-        do {
-            $sampleCount++
-            $sampleTime = [DateTime]::UtcNow
-            $watchers = @(Get-InstalledWatcherProcesses -UuExecutable $UuExecutable -BackgroundExecutable $BackgroundExecutable)
-            if ($watchers.Count -eq 0) {
-                $countSamples.Zero++
+    do {
+        $sampleCount++
+        $sampleTime = [DateTime]::UtcNow
+        $watchers = @(Get-InstalledWatcherProcesses -UuExecutable $UuExecutable -BackgroundExecutable $BackgroundExecutable)
+        if ($watchers.Count -eq 0) { $counts.Zero = $counts.Zero + 1 }
+        elseif ($watchers.Count -eq 1) { $counts.One = $counts.One + 1 }
+        else { $counts.Multiple = $counts.Multiple + 1 }
+
+        foreach ($process in $watchers) {
+            $processId = [int]$process.ProcessId
+            $created = [string]$process.CreationDate
+            $identity = '{0}|{1}' -f $processId, $created
+            $snapshot = @{
+                Handles = $process.HandleCount
+                Kernel100ns = $process.KernelModeTime
+                User100ns = $process.UserModeTime
             }
-            elseif ($watchers.Count -eq 1) {
-                $countSamples.One++
-            }
-            else {
-                $countSamples.Multiple++
-            }
-
-            $seenThisSample = @{}
-            foreach ($process in $watchers) {
-                $processId = [int]$process.ProcessId
-                $creationDate = [string]$process.CreationDate
-                $identity = '{0}|{1}' -f $processId, $creationDate
-                $seenThisSample[$identity] = $true
-
-                if (-not $history.ContainsKey($identity)) {
-                    $observer = $null
-                    try {
-                        $observer = [Diagnostics.Process]::GetProcessById($processId)
-                    }
-                    catch {
-                    }
-                    $observers[$identity] = $observer
-                    $parentName = $null
-                    $parentExecutablePath = $null
-                    try {
-                        $parentId = [int]$process.ParentProcessId
-                        if ($parentId -gt 0) {
-                            $parent = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $parentId" -ErrorAction Stop | Select-Object -First 1
-                            if ($null -ne $parent) {
-                                $parentName = [string]$parent.Name
-                                $parentExecutablePath = [string]$parent.ExecutablePath
-                            }
-                        }
-                    }
-                    catch {
-                    }
-                    $history[$identity] = [pscustomobject]@{
-                        ProcessId = $processId
-                        CreationDate = $creationDate
-                        ParentProcessId = $process.ParentProcessId
-                        ParentName = $parentName
-                        ParentExecutablePath = $parentExecutablePath
-                        Name = [string]$process.Name
-                        ExecutablePath = [string]$process.ExecutablePath
-                        CommandLine = [string]$process.CommandLine
-                        FirstObservedUtc = $sampleTime.ToString('o')
-                        LastObservedUtc = $sampleTime.ToString('o')
-                        LastSeenSample = $sampleCount
-                        Samples = 0
-                        FirstHandleCount = $process.HandleCount
-                        LastHandleCount = $process.HandleCount
-                        FirstKernelModeTime = $process.KernelModeTime
-                        LastKernelModeTime = $process.KernelModeTime
-                        FirstUserModeTime = $process.UserModeTime
-                        LastUserModeTime = $process.UserModeTime
-                        Status = $process.Status
-                        TerminationDate = $process.TerminationDate
-                        ExitObserved = $null
-                        ExitCode = $null
-                        HasExitedAtDeadline = $null
-                        ObserverStartTimeUtc = $null
-                    }
-                    if ($null -ne $observer) {
-                        try {
-                            $history[$identity].ObserverStartTimeUtc = $observer.StartTime.ToUniversalTime().ToString('o')
-                        }
-                        catch {
-                        }
-                    }
-                }
-
-                $record = $history[$identity]
-                $record.LastObservedUtc = $sampleTime.ToString('o')
-                $record.LastSeenSample = $sampleCount
-                $record.Samples++
-                $record.LastHandleCount = $process.HandleCount
-                $record.LastKernelModeTime = $process.KernelModeTime
-                $record.LastUserModeTime = $process.UserModeTime
-                $record.Status = $process.Status
-                $record.TerminationDate = $process.TerminationDate
-            }
-
-            foreach ($identity in @($history.Keys)) {
-                $record = $history[$identity]
-                if (-not $seenThisSample.ContainsKey($identity) -and $null -eq $record.ExitObserved) {
-                    $record.ExitObserved = $sampleTime.ToString('o')
-                    $observer = $observers[$identity]
-                    if ($null -ne $observer) {
-                        try {
-                            $observer.Refresh()
-                            if ($observer.HasExited) {
-                                $record.ExitCode = $observer.ExitCode
-                            }
-                            else {
-                                $record.ExitCode = 'PID may have been reused or process observation unavailable'
-                            }
-                        }
-                        catch {
-                            $record.ExitCode = 'unavailable: ' + $_.Exception.Message
-                        }
-                    }
-                    else {
-                        $record.ExitCode = 'unavailable: process handle could not be opened'
-                    }
+            if (-not $history.ContainsKey($identity)) {
+                $history[$identity] = [pscustomobject]@{
+                    PID = $processId; Created = $created; ParentPID = $process.ParentProcessId
+                    Samples = 0; FirstUtc = $sampleTime.ToString('o'); LastUtc = $sampleTime.ToString('o')
+                    First = $snapshot; Last = $snapshot
                 }
             }
-
-            if ($watchers.Count -eq 1 -and
-                [IO.Path]::GetFullPath([string]$watchers[0].ExecutablePath) -ieq [IO.Path]::GetFullPath($BackgroundExecutable)) {
-                return $watchers[0]
-            }
-            Start-Sleep -Milliseconds 250
-        } while ([DateTime]::UtcNow -lt $deadline)
-
-        foreach ($identity in @($history.Keys)) {
-            $observer = $observers[$identity]
-            if ($null -ne $observer) {
-                try {
-                    $observer.Refresh()
-                    $history[$identity].HasExitedAtDeadline = [bool]$observer.HasExited
-                    if ($observer.HasExited) {
-                        $history[$identity].ExitCode = $observer.ExitCode
-                    }
-                }
-                catch {
-                    $history[$identity].HasExitedAtDeadline = 'unavailable: ' + $_.Exception.Message
-                }
-            }
+            $record = $history[$identity]
+            $record.Samples = $record.Samples + 1
+            $record.LastUtc = $sampleTime.ToString('o')
+            $record.Last = $snapshot
         }
 
-        $details = @(
-            foreach ($identity in @($history.Keys | Sort-Object)) {
-                $record = $history[$identity]
-                'PID={0}; Created={1}; Name={2}; Path={3}; CommandLine={4}; ParentPID={5}; ParentName={6}; ParentPath={7}; Samples={8}/{9}; First={10}; Last={11}; Handles={12}->{13}; Kernel100ns={14}->{15}; User100ns={16}->{17}; Status={18}; TerminationDate={19}; ExitObserved={20}; ExitCode={21}; HasExitedAtDeadline={22}; ObserverStartUtc={23}' -f $record.ProcessId, $record.CreationDate, $record.Name, $record.ExecutablePath, $record.CommandLine, $record.ParentProcessId, $record.ParentName, $record.ParentExecutablePath, $record.Samples, $sampleCount, $record.FirstObservedUtc, $record.LastObservedUtc, $record.FirstHandleCount, $record.LastHandleCount, $record.FirstKernelModeTime, $record.LastKernelModeTime, $record.FirstUserModeTime, $record.LastUserModeTime, $record.Status, $record.TerminationDate, $record.ExitObserved, $record.ExitCode, $record.HasExitedAtDeadline, $record.ObserverStartTimeUtc
-            }
-        )
-        Write-Host ('Watcher samples: {0}; zero={1}; one={2}; multiple={3}.' -f $sampleCount, $countSamples.Zero, $countSamples.One, $countSamples.Multiple)
-        foreach ($detail in $details) {
-            Write-Host ('Watcher process history: ' + $detail)
+        if ($watchers.Count -eq 1 -and
+            [IO.Path]::GetFullPath([string]$watchers[0].ExecutablePath) -ieq [IO.Path]::GetFullPath($BackgroundExecutable)) {
+            return $watchers[0]
         }
-        throw "Expected exactly one watcher at '$BackgroundExecutable', found $($watchers.Count)."
+        Start-Sleep -Milliseconds 250
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    $snapshot = [pscustomobject]@{
+        Samples = $sampleCount; Counts = $counts
+        Processes = @($history.Values | Sort-Object PID, Created)
     }
-    finally {
-        foreach ($observer in $observers.Values) {
-            if ($null -ne $observer) {
-                $observer.Dispose()
-            }
-        }
-    }
+    Write-Host ('Watcher failure snapshot: ' + ($snapshot | ConvertTo-Json -Depth 5 -Compress))
+    throw "Expected exactly one watcher at '$BackgroundExecutable', found $($watchers.Count)."
 }
-
 function Assert-IdleWatcher {
     param(
         [Parameter(Mandatory = $true)]$Watcher,
