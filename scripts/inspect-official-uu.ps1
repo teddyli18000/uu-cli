@@ -44,6 +44,31 @@ $files |
         Write-Host "  $relative [$($_.Length) bytes]"
     }
 
+function Invoke-ReadOnlyCliProbe {
+    param(
+        [Parameter(Mandatory=$true)][string]$CliPath,
+        [Parameter(Mandatory=$true)][string[]]$Arguments,
+        [int]$TimeoutMs = 10000
+    )
+
+    $tag = (($Arguments -join '-') -replace '[^A-Za-z0-9_-]', '_')
+    if (-not $tag) { $tag = 'root' }
+    $stdout = Join-Path $env:RUNNER_TEMP "uuyc-cli-$tag.out.txt"
+    $stderr = Join-Path $env:RUNNER_TEMP "uuyc-cli-$tag.err.txt"
+    Remove-Item $stdout, $stderr -ErrorAction SilentlyContinue
+
+    Write-Host "  probe: uuyc-cli $($Arguments -join ' ')"
+    $process = Start-Process -FilePath $CliPath -ArgumentList $Arguments -WorkingDirectory (Split-Path -Parent $CliPath) -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    if (-not $process.WaitForExit($TimeoutMs)) {
+        $process.Kill($true)
+        Write-Host '    timed out and was terminated.'
+        return
+    }
+    Write-Host "    exit: $($process.ExitCode)"
+    if (Test-Path $stdout) { Get-Content $stdout | Select-Object -First 120 | ForEach-Object { Write-Host "    stdout: $_" } }
+    if (Test-Path $stderr) { Get-Content $stderr | Select-Object -First 120 | ForEach-Object { Write-Host "    stderr: $_" } }
+}
+
 $cliCandidates = @($files | Where-Object { $_.Name -ieq 'uuyc-cli.exe' })
 Write-Host "uuyc-cli.exe candidates: $($cliCandidates.Count)"
 
@@ -63,17 +88,11 @@ foreach ($cli in $cliCandidates) {
         continue
     }
 
-    # `version` is a read-only local command. Bound its runtime so CI cannot hang.
-    $stdout = Join-Path $env:RUNNER_TEMP 'uuyc-cli-version.out.txt'
-    $stderr = Join-Path $env:RUNNER_TEMP 'uuyc-cli-version.err.txt'
-    Remove-Item $stdout, $stderr -ErrorAction SilentlyContinue
-    $process = Start-Process -FilePath $cli.FullName -ArgumentList @('version') -WorkingDirectory $cli.DirectoryName -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-    if (-not $process.WaitForExit(10000)) {
-        $process.Kill($true)
-        Write-Host '  version command timed out and was terminated.'
-        continue
-    }
-    Write-Host "  version exit: $($process.ExitCode)"
-    if (Test-Path $stdout) { Get-Content $stdout | ForEach-Object { Write-Host "  stdout: $_" } }
-    if (Test-Path $stderr) { Get-Content $stderr | ForEach-Object { Write-Host "  stderr: $_" } }
+    # All probes below are local/read-only. The hosted runner has no UU account or
+    # remote device. We capture current vendor command shapes rather than hard-code
+    # assumptions from an older release.
+    Invoke-ReadOnlyCliProbe -CliPath $cli.FullName -Arguments @('version')
+    Invoke-ReadOnlyCliProbe -CliPath $cli.FullName -Arguments @('--help')
+    Invoke-ReadOnlyCliProbe -CliPath $cli.FullName -Arguments @('term', '--help')
+    Invoke-ReadOnlyCliProbe -CliPath $cli.FullName -Arguments @('term', 'open', '--help')
 }
