@@ -190,7 +190,7 @@ fn forward_conpty_input<R: Read, W: Write>(
 ) -> Result<(), Box<dyn Error>> {
     let mut read_buffer = [0_u8; 4096];
     let mut possible_dsr = Vec::with_capacity(DSR_RESPONSE.len());
-    let mut pending_cr = false;
+    let mut swallow_next_lf = false;
     let mut line = Vec::new();
 
     loop {
@@ -202,7 +202,7 @@ fn forward_conpty_input<R: Read, W: Write>(
             possible_dsr.push(byte);
             while !DSR_RESPONSE.starts_with(&possible_dsr) {
                 let forwarded = possible_dsr.remove(0);
-                forward_bash_byte(forwarded, &mut pending_cr, &mut line, &mut output)?;
+                forward_bash_byte(forwarded, &mut swallow_next_lf, &mut line, &mut output)?;
             }
             if possible_dsr.as_slice() == DSR_RESPONSE {
                 possible_dsr.clear();
@@ -211,11 +211,9 @@ fn forward_conpty_input<R: Read, W: Write>(
     }
 
     for byte in possible_dsr {
-        forward_bash_byte(byte, &mut pending_cr, &mut line, &mut output)?;
+        forward_bash_byte(byte, &mut swallow_next_lf, &mut line, &mut output)?;
     }
-    if pending_cr {
-        dispatch_bash_line(&mut line, &mut output, true)?;
-    } else if !line.is_empty() {
+    if !line.is_empty() {
         dispatch_bash_line(&mut line, &mut output, false)?;
     }
     output.flush()?;
@@ -224,20 +222,22 @@ fn forward_conpty_input<R: Read, W: Write>(
 
 fn forward_bash_byte<W: Write>(
     byte: u8,
-    pending_cr: &mut bool,
+    swallow_next_lf: &mut bool,
     line: &mut Vec<u8>,
     output: &mut W,
 ) -> Result<(), Box<dyn Error>> {
-    if *pending_cr {
-        *pending_cr = false;
-        dispatch_bash_line(line, output, true)?;
+    if *swallow_next_lf {
+        *swallow_next_lf = false;
         if byte == b'\n' {
             return Ok(());
         }
     }
 
     match byte {
-        b'\r' => *pending_cr = true,
+        b'\r' => {
+            dispatch_bash_line(line, output, true)?;
+            *swallow_next_lf = true;
+        }
         b'\n' => dispatch_bash_line(line, output, true)?,
         _ => line.push(byte),
     }
