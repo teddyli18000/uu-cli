@@ -205,14 +205,6 @@ impl<'a> PwdRecordReader<'a> {
         }
 
         let start = self.offset;
-        // ConPTY toggles cursor visibility between protocol records.
-        // Match only these exact controls; never remove controls from payload hex.
-        for control in [b"\x1b[?25l", b"\x1b[?25h"] {
-            if self.bytes.get(start..start + control.len()) == Some(control.as_slice()) {
-                self.offset += control.len();
-                return Ok(());
-            }
-        }
         while self.offset < self.bytes.len()
             && !matches!(self.bytes[self.offset], b'\r' | b'\n' | 0x1b)
         {

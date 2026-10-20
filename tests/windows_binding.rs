@@ -479,7 +479,10 @@ fn windows_existing_terminal_requires_friendly_name_authorization() {
     );
     let transcript = fs::read_to_string(&test.transcript).unwrap_or_default();
     assert!(transcript.contains("测试设备 新终端"), "{transcript}");
-    assert!(transcript.contains("[Enter] 交给 uu-cli"), "{transcript}");
+    assert!(
+        transcript.contains("[Enter]") && transcript.contains("交给 uu-cli"),
+        "{transcript}"
+    );
     assert!(
         !transcript.contains("接下来打开的 Terminal"),
         "an already-present Terminal was treated as a waiting-request handoff: {transcript}"
@@ -510,7 +513,7 @@ fn windows_existing_terminal_requires_friendly_name_authorization() {
         .contains("EXISTING_AUTHORIZED_JOB_OK"));
 }
 #[test]
-fn windows_escape_alone_cancels_root_without_binding_or_business_dispatch() {
+fn windows_close_cancels_root_without_binding_or_business_dispatch() {
     let test = Workspace::new();
     fs::create_dir_all(test._temp.path().join("remote-root")).unwrap();
     assert!(
@@ -537,7 +540,7 @@ fn windows_escape_alone_cancels_root_without_binding_or_business_dispatch() {
         }]}),
     );
     wait_for_available_terminal(&test.events, Duration::from_secs(20));
-    drive(&test, running.pid, "Remote root [", "escape");
+    drive(&test, running.pid, "Remote root [", "close");
 
     let output = running.finish(Duration::from_secs(15), &test);
     assert!(

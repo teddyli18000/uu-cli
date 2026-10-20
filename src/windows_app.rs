@@ -215,62 +215,13 @@ fn check_instance_support(current: &[SessionInfo]) -> Result<()> {
 }
 
 fn prompt(label: &str) -> Result<String> {
-    use std::ffi::c_void;
-    #[repr(C)]
-    struct ReadControl {
-        length: u32,
-        initial_chars: u32,
-        wakeup_mask: u32,
-        control_key_state: u32,
-    }
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetStdHandle(kind: u32) -> *mut c_void;
-        fn ReadConsoleW(
-            handle: *mut c_void,
-            buffer: *mut u16,
-            count: u32,
-            read: *mut u32,
-            control: *mut ReadControl,
-        ) -> i32;
-    }
     print!("{label}");
     io::stdout().flush()?;
-    let handle = unsafe { GetStdHandle(-10i32 as u32) };
-    let mut line = Vec::new();
-    loop {
-        let mut buffer = [0u16; 1024];
-        let mut count = 0;
-        // Keep native line editing, but return immediately when Esc is pressed.
-        let mut control = ReadControl {
-            length: std::mem::size_of::<ReadControl>() as u32,
-            initial_chars: 0,
-            wakeup_mask: 1 << 27,
-            control_key_state: 0,
-        };
-        if unsafe {
-            ReadConsoleW(
-                handle,
-                buffer.as_mut_ptr(),
-                buffer.len() as u32,
-                &mut count,
-                &mut control,
-            )
-        } == 0
-        {
-            return Err(io::Error::last_os_error().into());
-        }
-        if count == 0 {
-            bail!("decision window input closed");
-        }
-        line.extend_from_slice(&buffer[..count as usize]);
-        if line.iter().any(|ch| matches!(*ch, 10 | 13 | 27)) {
-            return Ok(String::from_utf16(&line)
-                .context("invalid Unicode in decision input")?
-                .trim()
-                .to_owned());
-        }
+    let mut line = String::new();
+    if io::stdin().read_line(&mut line)? == 0 {
+        bail!("decision window input closed");
     }
+    Ok(line.trim().to_owned())
 }
 
 fn accept_one(store: &ConfigStore, session: &SessionInfo) -> Result<bool> {
@@ -349,7 +300,7 @@ fn choose_device(candidates: &[SessionInfo]) -> Result<String> {
         );
     }
     loop {
-        let answer = prompt("设备编号 (Esc取消): ")?;
+        let answer = prompt("设备编号 (Ctrl+C取消): ")?;
         if answer.contains('\u{1b}') {
             bail!("device selection cancelled");
         }
@@ -436,7 +387,7 @@ fn setup(store: &ConfigStore, force: bool) -> Result<()> {
         capture_pwd(store, &cli, &device_id)?
     };
     let remote_root = loop {
-        let answer = prompt(&format!("Remote root [{default_root}]: "))?;
+        let answer = prompt(&format!("Remote root [{default_root}] (Ctrl+C取消): "))?;
         if answer.contains('\u{1b}') {
             bail!("binding cancelled");
         }
