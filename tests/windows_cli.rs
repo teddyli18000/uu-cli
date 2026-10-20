@@ -339,6 +339,29 @@ fn assert_bytes_equal(expected: &[u8], actual: &[u8], label: &str) {
     }
 }
 
+fn is_expected_fake_output(stdout: &str) -> bool {
+    if stdout == "fake output: 你好 世界\r\n" {
+        return true;
+    }
+    let Some(cursor) = stdout.strip_prefix("fake output: 你好 世界\x1b[") else {
+        return false;
+    };
+    let Some(cursor) = cursor.strip_suffix('H') else {
+        return false;
+    };
+    let Some((row, column)) = cursor.split_once(';') else {
+        return false;
+    };
+    is_bounded_decimal(row, 24) && is_bounded_decimal(column, 120)
+}
+
+fn is_bounded_decimal(value: &str, maximum: u16) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| byte.is_ascii_digit())
+        && value
+            .parse::<u16>()
+            .is_ok_and(|coordinate| (1..=maximum).contains(&coordinate))
+}
 fn read_dispatches(path: &Path) -> Vec<Value> {
     fs::read_to_string(path)
         .expect("fake official CLI should record a dispatch")
@@ -369,9 +392,8 @@ fn windows_cli_streams_unicode_output_and_propagates_remote_exit_code() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout == "fake output: 你好 世界\r\n"
-            || stdout == "fake output: 你好 世界\x1b[7;1H",
-        "the complete payload should be exact, with either raw CRLF or the observed ConPTY cursor sequence; got {stdout:?}"
+        is_expected_fake_output(&stdout),
+        "the full payload should be exact, followed by raw CRLF or one bounded ConPTY cursor sequence; got {stdout:?}"
     );
     assert!(
         !stdout.contains("UUC"),

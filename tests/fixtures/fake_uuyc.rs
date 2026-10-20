@@ -132,13 +132,21 @@ const DSR_RESPONSE: &[u8] = b"\x1b[1;1R";
 fn run_git_bash_attached_terminal() -> Result<u8, Box<dyn Error>> {
     let bash = env::var_os("UU_TEST_BASH")
         .ok_or("UU_TEST_BASH must name the Git Bash executable for bash mode")?;
-    let mut child = Command::new(bash)
+    let mut command = Command::new(bash);
+    command
         .args(["--noprofile", "--norc"])
         .stdin(Stdio::piped())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .spawn()?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = command.spawn()?;
     let child_stdin = child.stdin.take().ok_or("Git Bash stdin was not piped")?;
+    let child_stdout = child.stdout.take().ok_or("Git Bash stdout was not piped")?;
+    let child_stderr = child.stderr.take().ok_or("Git Bash stderr was not piped")?;
     let _input_relay = thread::Builder::new()
         .name("fake-uuyc-git-bash-input".to_owned())
         .spawn(move || {
@@ -146,13 +154,36 @@ fn run_git_bash_attached_terminal() -> Result<u8, Box<dyn Error>> {
                 eprintln!("fake-uuyc: Git Bash input relay failed: {error}");
             }
         })?;
+    let stdout_relay = thread::Builder::new()
+        .name("fake-uuyc-git-bash-stdout".to_owned())
+        .spawn(move || {
+            if let Err(error) = relay_bash_output(child_stdout, io::stdout()) {
+                eprintln!("fake-uuyc: Git Bash stdout relay failed: {error}");
+            }
+        })?;
+    let stderr_relay = thread::Builder::new()
+        .name("fake-uuyc-git-bash-stderr".to_owned())
+        .spawn(move || {
+            if let Err(error) = relay_bash_output(child_stderr, io::stderr()) {
+                eprintln!("fake-uuyc: Git Bash stderr relay failed: {error}");
+            }
+        })?;
     let status = child.wait()?;
+    for relay in [stdout_relay, stderr_relay] {
+        if relay.join().is_err() {
+            eprintln!("fake-uuyc: Git Bash output relay panicked");
+        }
+    }
     Ok(status
         .code()
         .and_then(|code| u8::try_from(code).ok())
         .unwrap_or(1))
 }
 
+fn relay_bash_output<R: Read, W: Write>(mut input: R, mut output: W) -> io::Result<()> {
+    io::copy(&mut input, &mut output)?;
+    output.flush()
+}
 fn forward_conpty_input<R: Read, W: Write>(
     mut input: R,
     mut output: W,
