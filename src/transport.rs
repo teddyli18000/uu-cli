@@ -136,12 +136,12 @@ impl OfficialAttachPty {
     }
 }
 
-/// A uu-cli-owned ephemeral remote terminal created through the official CLI.
+/// A uu-cli-owned remote terminal created through the official CLI.
 ///
 /// One manually opened GUI Terminal may still be required to activate/keep warm
 /// the vendor term channel, but that GUI session is only an anchor: commands run
-/// in this fresh uu-cli-owned session and therefore cannot mutate or occupy the
-/// user's visible shell context.
+/// in this uu-cli-owned Bash session and cannot mutate or occupy the user's GUI
+/// shell context.
 pub struct OfficialNewPty {
     session_name: String,
     inner: TermPty,
@@ -196,10 +196,21 @@ fn attach_args(device_identity: &str, session_name: &str) -> Vec<OsString> {
 }
 
 fn new_args(device_identity: &str, session_name: &str) -> Vec<OsString> {
-    ["term", "-d", device_identity, "new", session_name]
-        .into_iter()
-        .map(OsString::from)
-        .collect()
+    // Current official 4.43.1 defaults `term new` to PowerShell even though Bash
+    // is supported explicitly. v1 targets the Linux AIC host, so never depend on
+    // that Windows-oriented default.
+    [
+        "term",
+        "-d",
+        device_identity,
+        "new",
+        session_name,
+        "--shell",
+        "bash",
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
 }
 
 fn owned_session_name() -> String {
@@ -231,7 +242,7 @@ mod tests {
     }
 
     #[test]
-    fn current_official_new_command_shape_is_exact() {
+    fn current_official_new_command_shape_for_linux_is_exact() {
         assert_eq!(
             new_args("device-123", "uu-job"),
             vec![
@@ -240,6 +251,8 @@ mod tests {
                 OsString::from("device-123"),
                 OsString::from("new"),
                 OsString::from("uu-job"),
+                OsString::from("--shell"),
+                OsString::from("bash"),
             ]
         );
     }
