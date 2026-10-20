@@ -1,23 +1,23 @@
-use crate::inventory::{is_eligible_session, InventorySnapshot};
+use crate::inventory::{is_live_session, InventorySnapshot};
 use crate::model::{DeviceInfo, SessionInfo};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindCandidate {
     pub device_identity: String,
     pub device_name: String,
-    pub eligible_sessions: usize,
+    pub open_sessions: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindDecision {
-    /// No currently usable Terminal exists. The caller should tell the user that
-    /// the next matching Terminal they open will be used for this request, then wait.
+    /// No live Terminal exists. The caller should tell the user that the next
+    /// Terminal they open will be used for this request, then wait.
     WaitForTerminal { online_devices: usize },
-    /// Exactly one remote device currently has one or more usable Terminals.
-    /// Device selection needs no extra prompt; Terminal authorization / remote-root
+    /// Exactly one remote device currently has one or more live Terminals.
+    /// Device selection needs no extra prompt; authorization / remote-root
     /// confirmation can proceed in the same short interaction.
     OneDevice(BindCandidate),
-    /// More than one remote device has usable Terminals. A human must pick the
+    /// More than one remote device has live Terminals. A human must pick the
     /// friendly device once; raw device IDs remain internal.
     ChooseDevice(Vec<BindCandidate>),
 }
@@ -30,15 +30,15 @@ pub fn decide_binding(snapshot: &InventorySnapshot) -> BindDecision {
             if !inventory.device.is_online {
                 return None;
             }
-            let eligible_sessions = inventory
+            let open_sessions = inventory
                 .sessions
                 .iter()
-                .filter(|session| is_eligible_session(session))
+                .filter(|session| is_live_session(session))
                 .count();
-            (eligible_sessions > 0).then(|| BindCandidate {
+            (open_sessions > 0).then(|| BindCandidate {
                 device_identity: inventory.device.device_identity.clone(),
                 device_name: friendly_device_name(&inventory.device),
-                eligible_sessions,
+                open_sessions,
             })
         })
         .collect::<Vec<_>>();
@@ -64,8 +64,8 @@ pub fn decide_binding(snapshot: &InventorySnapshot) -> BindDecision {
 }
 
 /// When a request is already waiting for a Terminal on a known device, opening
-/// a new matching eligible Terminal is the user's explicit authorization for
-/// that request. It must not trigger a second redundant "use this terminal?" prompt.
+/// a new matching live Terminal is the user's explicit authorization for that
+/// request. It must not trigger a second redundant "use this terminal?" prompt.
 pub fn satisfies_waiting_request<'a>(
     expected_device: Option<&str>,
     newly_seen: &'a [SessionInfo],
@@ -73,14 +73,12 @@ pub fn satisfies_waiting_request<'a>(
     match expected_device {
         Some(device_identity) => newly_seen
             .iter()
-            .filter(|session| is_eligible_session(session))
+            .filter(|session| is_live_session(session))
             .find(|session| session.device_identity == device_identity),
         None => {
-            let mut eligible = newly_seen
-                .iter()
-                .filter(|session| is_eligible_session(session));
-            let first = eligible.next()?;
-            if eligible.any(|other| other.device_identity != first.device_identity) {
+            let mut live = newly_seen.iter().filter(|session| is_live_session(session));
+            let first = live.next()?;
+            if live.any(|other| other.device_identity != first.device_identity) {
                 None
             } else {
                 Some(first)
@@ -157,9 +155,41 @@ mod tests {
             BindDecision::OneDevice(BindCandidate {
                 device_identity: "a".into(),
                 device_name: "Car A".into(),
-                eligible_sessions: 1,
+                open_sessions: 1,
             })
         );
+    }
+
+    #[test]
+    fn busy_terminal_is_still_claimable_during_bind() {
+        let mut busy = session("a", "bash-1");
+        busy.attachable = Some(false);
+        let snapshot = InventorySnapshot {
+            devices: vec![inventory(device("a", "Car A", true), vec![busy])],
+        };
+        assert!(matches!(
+            decide_binding(&snapshot),
+            BindDecision::OneDevice(BindCandidate {
+                open_sessions: 1,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn detached_terminal_is_still_claimable_during_bind() {
+        let mut detached = session("a", "bash-1");
+        detached.state = "detached".into();
+        let snapshot = InventorySnapshot {
+            devices: vec![inventory(device("a", "Car A", true), vec![detached])],
+        };
+        assert!(matches!(
+            decide_binding(&snapshot),
+            BindDecision::OneDevice(BindCandidate {
+                open_sessions: 1,
+                ..
+            })
+        ));
     }
 
     #[test]
