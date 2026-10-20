@@ -36,10 +36,10 @@ pub fn argv_to_shell(argv: &[OsString]) -> Result<String> {
 
 /// Build one line injected into an already-open persistent shell.
 ///
-/// A private start marker is emitted before the user command so the client can
-/// discard the PTY's input echo and current prompt. The command then executes in
-/// a subshell, keeping `cd`, `export`, `source`, `exit`, and `exec` from becoming
-/// hidden prerequisites of a later uu job. The end marker carries the exit code.
+/// The dedicated worker permanently disables job control so Ctrl+C reaches the
+/// shell and its foreground job together. A guard subshell owns completion and
+/// interrupt traps; the job runs in a nested subshell so its shell state, traps,
+/// exit, and exec cannot replace the guard.
 pub fn wrap_job(remote_root: &str, shell_command: &str, nonce: &str) -> Result<String> {
     validate_nonce(nonce)?;
     if remote_root.is_empty() {
@@ -50,7 +50,7 @@ pub fn wrap_job(remote_root: &str, shell_command: &str, nonce: &str) -> Result<S
     let command = shell_quote(shell_command);
 
     Ok(format!(
-        "printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; ( cd -- {root} && eval {command} ); __uu_status=$?; printf '\\r\\n%s%s%s%d%s' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\n"
+        "set +m; ( trap '__uu_status=$?; printf \"\\r\\n%s%s%s%d%s\\r\\n\" UUC {nonce} E \"$__uu_status\" Z' EXIT; trap 'exit 130' INT; printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; ( cd -- {root} && eval {command} ) )\n"
     ))
 }
 
@@ -59,7 +59,7 @@ pub fn wrap_job(remote_root: &str, shell_command: &str, nonce: &str) -> Result<S
 pub fn wrap_pwd_probe(nonce: &str) -> Result<String> {
     validate_nonce(nonce)?;
     Ok(format!(
-        "printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; pwd; __uu_status=$?; printf '\\r\\n%s%s%s%d%s' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\n"
+        "printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; pwd; __uu_status=$?; printf '\\r\\n%s%s%s%d%s\\r\\n' 'UUC' '{nonce}' 'E' \"$__uu_status\" 'Z'\n"
     ))
 }
 
@@ -238,29 +238,32 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_isolates_state_and_splits_printable_markers() {
+    fn wrapper_guards_interrupts_and_isolates_user_shell_control() {
         let wrapped = wrap_job(
             "/home/user/my project",
             "cd src && export X=1 && exit 7",
             "AbC123",
         )
         .unwrap();
-        assert!(wrapped.contains("printf '\\r\\n%s%s%s' 'UUC' 'AbC123' 'B'"));
+        assert!(wrapped.starts_with("set +m; ( trap '__uu_status=$?; printf"));
+        assert!(wrapped.contains("trap 'exit 130' INT"));
+        assert!(wrapped.contains("printf '\\r\\n%s%s%s' 'UUC' 'AbC123' 'B';"));
         assert!(wrapped.contains("( cd -- '/home/user/my project' && eval "));
-        assert!(wrapped.contains("'cd src && export X=1 && exit 7'"));
-        assert!(wrapped.contains("printf '\\r\\n%s%s%s%d%s' 'UUC' 'AbC123' 'E'"));
+        assert!(wrapped.contains("eval 'cd src && export X=1 && exit 7' ) )\n"));
+        assert!(wrapped.contains("printf \"\\r\\n%s%s%s%d%s\\r\\n\" UUC AbC123 E \"$__uu_status\" Z' EXIT"));
         assert!(!wrapped.contains("UUCAbC123B"));
         assert!(!wrapped.contains("UUCAbC123E"));
     }
 
     #[test]
-    fn pwd_probe_runs_without_changing_remote_root() {
+    fn pwd_probe_keeps_its_start_marker_and_terminates_end_marker_with_newline() {
         let script = wrap_pwd_probe("abc123").unwrap();
-        assert!(script.contains("printf '\\r\\n%s%s%s' 'UUC' 'abc123' 'B'"));
-        assert!(script.contains("; pwd;"));
+        assert!(script.contains("printf '\\r\\n%s%s%s' 'UUC' 'abc123' 'B'; pwd;"));
+        assert!(!script.contains("set +m"));
         assert!(!script.contains("cd --"));
-        assert!(script.contains("printf '\\r\\n%s%s%s%d%s' 'UUC' 'abc123' 'E'"));
+        assert!(script.contains("printf '\\r\\n%s%s%s%d%s\\r\\n' 'UUC' 'abc123' 'E'"));
         assert!(!script.contains("UUCabc123B"));
+        assert!(!script.contains("UUCabc123E"));
     }
 
     #[test]
