@@ -88,8 +88,12 @@ fn windows_registry_install_roots() -> Vec<PathBuf> {
                 let Ok(entry) = uninstall.open_subkey_with_flags(&subkey_name, flags) else {
                     continue;
                 };
-                let display_name = entry.get_value::<String, _>("DisplayName").unwrap_or_default();
-                let publisher = entry.get_value::<String, _>("Publisher").unwrap_or_default();
+                let display_name = entry
+                    .get_value::<String, _>("DisplayName")
+                    .unwrap_or_default();
+                let publisher = entry
+                    .get_value::<String, _>("Publisher")
+                    .unwrap_or_default();
                 if !looks_like_uu_remote(&display_name, &publisher) {
                     continue;
                 }
