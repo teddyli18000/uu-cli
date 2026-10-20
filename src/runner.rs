@@ -53,14 +53,7 @@ where
     O: Write,
 {
     let nonce = next_nonce();
-    run_framed_job_with_nonce(
-        reader,
-        writer,
-        output,
-        remote_root,
-        shell_command,
-        &nonce,
-    )
+    run_framed_job_with_nonce(reader, writer, output, remote_root, shell_command, &nonce)
 }
 
 pub fn run_framed_job_with_nonce<R, W, O>(
@@ -213,15 +206,9 @@ mod tests {
         let mut writer = Vec::new();
         let mut output = Vec::new();
 
-        let error = run_framed_job_with_nonce(
-            &mut reader,
-            &mut writer,
-            &mut output,
-            "",
-            "pwd",
-            "abc123",
-        )
-        .unwrap_err();
+        let error =
+            run_framed_job_with_nonce(&mut reader, &mut writer, &mut output, "", "pwd", "abc123")
+                .unwrap_err();
 
         assert!(!error.is_unknown());
         assert!(writer.is_empty());
