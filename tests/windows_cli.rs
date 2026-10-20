@@ -99,9 +99,18 @@ fn windows_cli_streams_unicode_output_and_propagates_remote_exit_code() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("fake output: 你好 世界"), "stdout: {stdout:?}");
-    assert!(!stdout.contains("Select target"), "stdout contains a human menu: {stdout:?}");
-    assert!(!stdout.contains("Remote root:"), "stdout contains setup input: {stdout:?}");
+    assert!(
+        stdout.contains("fake output: 你好 世界"),
+        "stdout: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Select target"),
+        "stdout contains a human menu: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("Remote root:"),
+        "stdout contains setup input: {stdout:?}"
+    );
 
     let dispatches = read_dispatches(&test.log_path);
     assert_eq!(dispatches.len(), 1);
@@ -136,7 +145,11 @@ fn windows_cli_quarantines_dropped_dispatch_without_replay_or_list_attach() {
     );
 
     let after_drop = read_dispatches(&test.log_path);
-    assert_eq!(after_drop.len(), 1, "the dropped job must be dispatched once");
+    assert_eq!(
+        after_drop.len(),
+        1,
+        "the dropped job must be dispatched once"
+    );
     assert!(
         after_drop[0]["wrapper"]
             .as_str()
