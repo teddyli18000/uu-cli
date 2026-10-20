@@ -70,17 +70,17 @@ pub fn satisfies_waiting_request<'a>(
     expected_device: Option<&str>,
     newly_seen: &'a [SessionInfo],
 ) -> Option<&'a SessionInfo> {
-    let eligible = newly_seen
-        .iter()
-        .filter(|session| is_eligible_session(session));
     match expected_device {
-        Some(device_identity) => eligible
-            .filter(|session| session.device_identity == device_identity)
-            .next(),
+        Some(device_identity) => newly_seen
+            .iter()
+            .filter(|session| is_eligible_session(session))
+            .find(|session| session.device_identity == device_identity),
         None => {
-            let mut iter = eligible;
-            let first = iter.next()?;
-            if iter.any(|other| other.device_identity != first.device_identity) {
+            let mut eligible = newly_seen
+                .iter()
+                .filter(|session| is_eligible_session(session));
+            let first = eligible.next()?;
+            if eligible.any(|other| other.device_identity != first.device_identity) {
                 None
             } else {
                 Some(first)
