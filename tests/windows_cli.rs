@@ -126,11 +126,7 @@ fn kill_process_tree(pid: u32) {
     }
 }
 
-fn collect_pipe(
-    receiver: Receiver<Result<Vec<u8>, String>>,
-    pid: u32,
-    stream: &str,
-) -> Vec<u8> {
+fn collect_pipe(receiver: Receiver<Result<Vec<u8>, String>>, pid: u32, stream: &str) -> Vec<u8> {
     match receiver.recv_timeout(Duration::from_secs(10)) {
         Ok(Ok(bytes)) => bytes,
         Ok(Err(error)) => panic!("read child {stream}: {error}"),
@@ -227,7 +223,11 @@ fn find_git_bash() -> (PathBuf, PathBuf) {
         "-c",
         "printf 'UU_TEST_BASH_READY\\n'",
     ]);
-    let output = run_bounded(&mut probe, Duration::from_secs(15), "Git Bash capability probe");
+    let output = run_bounded(
+        &mut probe,
+        Duration::from_secs(15),
+        "Git Bash capability probe",
+    );
     assert!(
         output.status.success(),
         "Git Bash probe failed at {}: {}",
@@ -246,7 +246,11 @@ fn find_git_bash() -> (PathBuf, PathBuf) {
 fn cygpath_unix(path: &Path, cygpath: &Path) -> String {
     let mut command = Command::new(cygpath);
     command.args(["-u", "--"]).arg(path);
-    let output = run_bounded(&mut command, Duration::from_secs(15), "cygpath remote-root conversion");
+    let output = run_bounded(
+        &mut command,
+        Duration::from_secs(15),
+        "cygpath remote-root conversion",
+    );
     assert!(
         output.status.success(),
         "cygpath failed for {}: {}",
@@ -267,7 +271,11 @@ fn randomized_payload() -> Vec<u8> {
         .unwrap_or_default()
         .as_nanos() as u64
         ^ u64::from(std::process::id());
-    let mut state = if seed == 0 { 0x9e37_79b9_7f4a_7c15 } else { seed };
+    let mut state = if seed == 0 {
+        0x9e37_79b9_7f4a_7c15
+    } else {
+        seed
+    };
     let mut bytes = Vec::with_capacity(1024 * 1024 + 1);
     for _ in 0..(1024 * 1024 + 1) {
         state ^= state << 13;
@@ -278,7 +286,6 @@ fn randomized_payload() -> Vec<u8> {
     bytes[..8].copy_from_slice(&[0x00, 0xff, 0x0d, 0x0a, 0x1a, 0x80, 0x00, 0xfe]);
     bytes
 }
-
 
 fn assert_transfer_success(output: Output, operation: &str) {
     assert!(
@@ -443,7 +450,6 @@ fn windows_cli_reports_an_unusable_component_without_dispatch() {
         "diagnostics must not attach or dispatch"
     );
 }
-
 
 #[test]
 fn windows_cli_put_get_binary_files_through_git_bash() {

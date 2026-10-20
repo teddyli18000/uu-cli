@@ -93,7 +93,10 @@ fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
             .status()?;
-        return Ok(status.code().and_then(|code| u8::try_from(code).ok()).unwrap_or(1));
+        return Ok(status
+            .code()
+            .and_then(|code| u8::try_from(code).ok())
+            .unwrap_or(1));
     }
 
     let mut command = String::new();

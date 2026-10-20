@@ -1,8 +1,8 @@
 #![cfg(windows)]
 
 use crate::runner::{
-    run_framed_job, run_framed_job_with_input, run_framed_pwd_probe, JobInput,
-    JobResult, JobRunError, ReadPump,
+    run_framed_job, run_framed_job_with_input, run_framed_pwd_probe, JobInput, JobResult,
+    JobRunError, ReadPump,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -51,7 +51,6 @@ impl TermPty {
             .context("failed to open UU terminal PTY writer")?;
         drop(slave);
         let mut reader = ReadPump::spawn(raw_reader);
-
 
         // Catch argument/ownership failures before command bytes can be sent.
         let status = match child.try_wait() {
@@ -240,8 +239,7 @@ mod tests {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::time::{Duration, Instant};
 
-    const PROBE: &[u8] =
-        b"\r\nUUCconptyprobeBpayload\r\nUUCconptyprobeE0Z\r\n";
+    const PROBE: &[u8] = b"\r\nUUCconptyprobeBpayload\r\nUUCconptyprobeE0Z\r\n";
 
     #[test]
     fn current_official_attach_command_targets_the_existing_authorized_session() {

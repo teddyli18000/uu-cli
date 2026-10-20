@@ -508,7 +508,6 @@ impl ReadPump {
         self.read_event(Some(timeout))
     }
 
-
     fn read_event(&mut self, timeout: Option<Duration>) -> io::Result<PumpRead> {
         if !self.pending.is_empty() {
             return Ok(PumpRead::Data(std::mem::take(&mut self.pending)));
@@ -763,9 +762,7 @@ mod tests {
         input_tx.send(JobInput::Eof).unwrap();
         assert!(writes_rx.recv_timeout(Duration::from_millis(30)).is_err());
 
-        remote_tx
-            .send(b"\r\nUUCabc123Bready".to_vec())
-            .unwrap();
+        remote_tx.send(b"\r\nUUCabc123Bready".to_vec()).unwrap();
         assert_eq!(
             writes_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
             b"typed"
@@ -780,9 +777,7 @@ mod tests {
             b"\x03"
         );
 
-        remote_tx
-            .send(b"\r\nUUCabc123E0Z".to_vec())
-            .unwrap();
+        remote_tx.send(b"\r\nUUCabc123E0Z".to_vec()).unwrap();
         let (result, output) = job.join().unwrap();
         assert_eq!(result.unwrap().exit_code, 0);
         assert_eq!(output, b"ready");

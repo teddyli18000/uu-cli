@@ -182,7 +182,6 @@ impl CompletionDecoder {
     }
 }
 
-
 fn longest_suffix_prefix(bytes: &[u8], prefix: &[u8]) -> usize {
     let max = bytes.len().min(prefix.len().saturating_sub(1));
     for length in (1..=max).rev() {
@@ -279,7 +278,11 @@ mod tests {
         let end = b"\r\nUUCabc123E17Zprompt$ ";
         let mut received = Vec::new();
 
-        received.extend(decoder.push(b"prompt$ printf '\\r\\n%s%s%s' 'UUC' 'abc123' 'B'\r\n").unwrap());
+        received.extend(
+            decoder
+                .push(b"prompt$ printf '\\r\\n%s%s%s' 'UUC' 'abc123' 'B'\r\n")
+                .unwrap(),
+        );
         received.extend(decoder.push(&start[..8]).unwrap());
         received.extend(decoder.push(&start[8..]).unwrap());
         received.extend(decoder.push(b"hello ").unwrap());
@@ -298,9 +301,7 @@ mod tests {
         assert!(decoder.push(echo).unwrap().is_empty());
         assert!(!decoder.started());
 
-        let mut output = decoder
-            .push(b"\r\nUUCnonceBreal output\r\n")
-            .unwrap();
+        let mut output = decoder.push(b"\r\nUUCnonceBreal output\r\n").unwrap();
         output.extend(decoder.push(b"\r\nUUCnonceE0Zprompt$ ").unwrap());
         assert_eq!(output, b"real output\r\n");
         assert_eq!(decoder.completed(), Some(0));
