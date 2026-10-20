@@ -47,6 +47,13 @@ and therefore proves only the wrapper/decoder plus transport experiment.
 changing the shell's directory, then validates its records with the same pinned
 `decode_pwd_output` function. It records the result locally and saves no binding.
 
+`channel <cli> <device> <session> <createdAt> <log-directory>` validates the same
+exact instance, then uses the actual pinned product transport and runner. It
+immediately captures the current directory and runs the fixed pwd/exit7/Unicode/
+stream/sleep/after sequence. It queues Interrupt after two seconds of sleep and
+stops on any error or unexpected status, without retry. This mode logs API output
+and milestones; it does not expose raw PTY RX/TX. It bypasses binding/pool/installer.
+
 `human.log` contains milestones; `raw.jsonl` contains timestamped TX/RX hex and
 process-state events before any interpretation. Cursor inheritance DSR is logged
 and answered only before a shell command is sent. Raw RX is never stripped or
@@ -55,5 +62,7 @@ normalized. Startup output/process liveness does not alone establish attach succ
 `quit` drops only this probe's local ConPTY attachment. It never invokes terminal
 kill/rename or sends remote `exit`. The effect of local disconnect on the selected
 official terminal is an observation, not assumed safe. The tool never calls
-`child.kill()`. Log directories contain real host information and stay gitignored;
+`child.kill()` in observation mode. The `channel` mode uses the product's cleanup,
+which terminates only its owned local official CLI attachment process, without a
+remote Terminal-management command. Log directories contain real host information and stay gitignored;
 do not publish them. Put only sanitized conclusions in REAL_UU_FINDINGS.md.

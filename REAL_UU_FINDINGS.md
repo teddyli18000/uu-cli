@@ -181,6 +181,28 @@
 - Probe disconnected normally with no pending command. Its own local attach
   child was confirmed gone; no remote exit/kill/rename was sent.
 
+## Observed — round 7, complete product transport and runner
+
+- After the user restarted the remote device, the old sessions disappeared. User
+  opened and surrendered a new dedicated Terminal; exact instance rechecked.
+- [Build 39431629252](https://github.com/teddyli18000/uu-cli/actions/runs/39431629252)
+  (`c8c410f`) compiled unchanged production job/runner/transport modules from
+  `3c2e44725b8f80ac09c593482ebcc964190c27c6`. No product source checkout or build
+  on the developer machine; no product installation, binding or watcher.
+- Actual product attach startup was followed immediately by current-directory
+  capture, without an additional readiness delay. Verified records decoded the
+  expected absolute path about 400 ms after probe start.
+- Same attach: pwd exit 0 (110 ms), exit 7 (106 ms), Unicode exit 0 (107 ms),
+  first tick streamed after about 95 ms and second about two seconds later.
+- Sleep's Interrupt was queued after two seconds. Actual runner returned status
+  130 at 2.064 seconds after dispatch; next printf returned expected text and
+  exit 0 after 107 ms. Six commands completed in about five seconds overall.
+- Product cleanup released its owned local CLI process; confirmed gone. Query
+  still showed the same remote Terminal instance detached. A separate running
+  manual Terminal retained its identity/state and was never attached by the probe.
+- This mode logs actual API output/milestones, not the private transport's raw
+  RX/TX. Earlier rounds retain the separate original-byte observation logs.
+
 ## Conclusion
 
 - Attach handoff is demonstrated in this environment: a live official attachment
@@ -196,8 +218,9 @@
   enabled. With the dedicated worker baseline and per-job guard, ETX cancellation,
   status 130 and next-command reuse passed for `sleep 30` in round 5.
 - Command-channel approach is viable for the observed cases. The production
-  wrapper and console decoder passed this isolated probe; full runner integration,
-  disconnect handling and safe remote-root capture still need acceptance. This
+  wrapper/console decoder, actual runner/transport and safe remote-root capture
+  passed this isolated probe. Failure injection, binding/pool and other release
+  gates still need their own evidence. This
   does not constitute full product acceptance or arbitrary output byte fidelity.
 - Official attach accepts a session name, not an atomic instance identifier;
   name + createdAt preflight detects replacements before attach but cannot prove
