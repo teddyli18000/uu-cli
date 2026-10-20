@@ -37,10 +37,15 @@ impl ConfigStore {
 
     pub fn load(&self) -> Result<Config> {
         let lock = self.open_lock()?;
-        lock.lock_shared().context("cannot lock uu-cli config for reading")?;
+        lock.lock_shared()
+            .context("cannot lock uu-cli config for reading")?;
         let result = self.load_unlocked();
         let unlock = FileExt::unlock(&lock).context("cannot unlock uu-cli config");
-        result.and(unlock.map(|_| ())).and_then(|_| self.load_unlocked())
+        match (result, unlock) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+            (Ok(config), Ok(())) => Ok(config),
+        }
     }
 
     pub fn save(&self, config: &Config) -> Result<()> {
