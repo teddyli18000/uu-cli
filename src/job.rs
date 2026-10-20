@@ -326,13 +326,13 @@ mod tests {
     }
 
     #[test]
-    fn eof_after_start_flushes_only_user_output() {
+    fn eof_after_start_does_not_delay_user_output() {
         let mut decoder = CompletionDecoder::new("nonce").unwrap();
         decoder
             .push(b"noise\x1b]7770;UUCLI;nonce;BEGIN\x07")
             .unwrap();
-        assert!(decoder.push(b"partial output").unwrap().is_empty());
-        assert_eq!(decoder.finish_without_marker(), b"partial output");
+        assert_eq!(decoder.push(b"partial output").unwrap(), b"partial output");
+        assert!(decoder.finish_without_marker().is_empty());
     }
 
     #[test]
