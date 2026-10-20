@@ -61,6 +61,23 @@ impl OfficialCli {
         parse_session_output(&output)
     }
 
+    /// Clean up a terminal session after a command is known to have finished.
+    /// Callers must only pass uu-cli-owned session names; an unknown/in-flight
+    /// session is deliberately left alone because its remote process may still run.
+    pub fn kill_session(&self, device_identity: &str, session_name: &str) -> Result<()> {
+        if device_identity.is_empty() || session_name.is_empty() {
+            bail!("device and session identity are required for terminal cleanup");
+        }
+        let output = self.run([
+            OsStr::new("term"),
+            OsStr::new("-d"),
+            OsStr::new(device_identity),
+            OsStr::new("kill"),
+            OsStr::new(session_name),
+        ])?;
+        ensure_command_success(&output, "terminal cleanup")
+    }
+
     fn run<I, S>(&self, args: I) -> Result<Output>
     where
         I: IntoIterator<Item = S>,
@@ -262,6 +279,27 @@ fn parse_session_output(output: &Output) -> Result<Vec<SessionInfo>> {
         .collect())
 }
 
+fn ensure_command_success(output: &Output, operation: &str) -> Result<()> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if let Some(json) = extract_json(&stdout).or_else(|| extract_json(&stderr)) {
+        if let Ok(envelope) = serde_json::from_str::<Envelope<Value>>(json) {
+            return ensure_success(&envelope)
+                .with_context(|| format!("official UU {operation} failed"));
+        }
+    }
+
+    if output.status.success() {
+        return Ok(());
+    }
+    bail!(
+        "official UU {operation} failed (exit {:?}): {}",
+        output.status.code(),
+        concise_error(&stdout, &stderr)
+    )
+}
+
 fn ensure_success<T>(envelope: &Envelope<T>) -> Result<()> {
     if envelope.success {
         return Ok(());
@@ -387,6 +425,28 @@ mod tests {
         let error = parse_session_output(&output).unwrap_err().to_string();
         assert!(error.contains("105"));
         assert!(error.contains("Timeout waiting for terminal environment check"));
+    }
+
+    #[test]
+    fn generic_command_success_accepts_json_envelope() {
+        let output = Output {
+            status: status(0),
+            stdout: br#"{"success":true,"data":{},"error":null}"#.to_vec(),
+            stderr: vec![],
+        };
+        ensure_command_success(&output, "test").unwrap();
+    }
+
+    #[test]
+    fn generic_command_success_preserves_vendor_error_on_zero_exit() {
+        let output = Output {
+            status: status(0),
+            stdout: br#"{"success":false,"data":null,"error":{"code":409,"message":"busy"}}"#.to_vec(),
+            stderr: vec![],
+        };
+        let error = ensure_command_success(&output, "test").unwrap_err().to_string();
+        assert!(error.contains("409"));
+        assert!(error.contains("busy"));
     }
 
     #[test]
