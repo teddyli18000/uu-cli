@@ -17,6 +17,8 @@ use uu_cli::model::{Config, SessionInfo, WorkspaceBinding};
 #[cfg(windows)]
 use uu_cli::transport::OfficialAttachPty;
 use uu_cli::uuyc::OfficialCli;
+#[cfg(windows)]
+use uu_cli::worker_lease::{AcquireResult, WorkerLease};
 use uu_cli::workspace::{resolve_binding, suggest_root};
 
 fn main() -> ExitCode {
@@ -353,47 +355,84 @@ fn run_remote(
     {
         let cli =
             OfficialCli::locate().context("official UU Remote is required for remote execution")?;
-        let workers = wait_for_available_workers(&cli, store, config, &binding)?;
+        let initial = discover_inventory(&cli)?;
+        validate_bound_device(&initial, &binding)?;
+        let mut seen = initial
+            .live_sessions_for(&binding.device_identity)
+            .into_iter()
+            .map(session_instance_key)
+            .collect::<HashSet<_>>();
+        let mut local_wait_announced = false;
 
-        let mut attach_errors = Vec::new();
-        for worker in &workers {
-            let mut transport = match OfficialAttachPty::attach(
-                cli.path(),
-                &binding.device_identity,
-                &worker.session_name,
-            ) {
-                Ok(transport) => transport,
-                Err(error) => {
-                    attach_errors.push(format!("{}: {error:#}", worker.session_name));
-                    continue;
-                }
-            };
+        loop {
+            let workers = wait_for_available_workers(&cli, store, config, &binding, &mut seen)?;
+            let mut attach_errors = Vec::new();
+            let mut blocked_locally = false;
 
-            let stdout = io::stdout();
-            let mut output = stdout.lock();
-            match transport.run_job(&mut output, &binding.remote_root, &shell_command) {
-                Ok(result) => {
-                    return u8::try_from(result.exit_code).with_context(|| {
-                        format!(
-                            "remote shell returned invalid exit code {}",
-                            result.exit_code
-                        )
-                    });
+            for worker in &workers {
+                let mut lease = match WorkerLease::try_acquire(store.path(), worker)? {
+                    AcquireResult::Acquired(lease) => lease,
+                    AcquireResult::Busy | AcquireResult::Quarantined => {
+                        blocked_locally = true;
+                        continue;
+                    }
+                };
+
+                let mut transport = match OfficialAttachPty::attach(
+                    cli.path(),
+                    &binding.device_identity,
+                    &worker.session_name,
+                ) {
+                    Ok(transport) => transport,
+                    Err(error) => {
+                        attach_errors.push(format!("{}: {error:#}", worker.session_name));
+                        continue;
+                    }
+                };
+
+                lease.mark_in_flight()?;
+                let stdout = io::stdout();
+                let mut output = stdout.lock();
+                match transport.run_job(&mut output, &binding.remote_root, &shell_command) {
+                    Ok(result) => {
+                        lease.complete()?;
+                        return u8::try_from(result.exit_code).with_context(|| {
+                            format!(
+                                "remote shell returned invalid exit code {}",
+                                result.exit_code
+                            )
+                        });
+                    }
+                    Err(error) if error.is_unknown() => {
+                        bail!(
+                            "{error}; not retrying on another Terminal because the command may already be running"
+                        );
+                    }
+                    Err(error) => {
+                        lease.complete()?;
+                        return Err(anyhow::Error::new(error));
+                    }
                 }
-                Err(error) if error.is_unknown() => {
-                    bail!(
-                        "{error}; not retrying on another Terminal because the command may already be running"
-                    );
-                }
-                Err(error) => return Err(anyhow::Error::new(error)),
             }
-        }
 
-        bail!(
-            "no authorized Terminal could be attached on {}: {}",
-            binding.device_name,
-            attach_errors.join(" | ")
-        )
+            if blocked_locally {
+                if !local_wait_announced {
+                    eprintln!(
+                        "All ready uu-cli Terminals on {} are already in use or quarantined. uu is waiting; open another Terminal for more capacity. Ctrl+C cancels.",
+                        binding.device_name
+                    );
+                    local_wait_announced = true;
+                }
+                thread::sleep(Duration::from_millis(750));
+                continue;
+            }
+
+            bail!(
+                "no authorized Terminal could be attached on {}: {}",
+                binding.device_name,
+                attach_errors.join(" | ")
+            )
+        }
     }
 }
 
@@ -403,30 +442,13 @@ fn wait_for_available_workers(
     store: &ConfigStore,
     config: &mut Config,
     binding: &WorkspaceBinding,
+    seen: &mut HashSet<String>,
 ) -> Result<Vec<SessionInfo>> {
-    let first = discover_inventory(cli)?;
-    validate_bound_device(&first, binding)?;
-
-    let mut seen = first
-        .live_sessions_for(&binding.device_identity)
-        .into_iter()
-        .map(session_instance_key)
-        .collect::<HashSet<_>>();
     let mut announced_wait = false;
-    let mut snapshot = first;
 
     loop {
+        let snapshot = discover_inventory(cli)?;
         validate_bound_device(&snapshot, binding)?;
-
-        let ready = snapshot
-            .eligible_sessions_for(&binding.device_identity)
-            .into_iter()
-            .filter(|session| config.is_session_authorized(session))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !ready.is_empty() {
-            return Ok(ready);
-        }
 
         let live = snapshot.live_sessions_for(&binding.device_identity);
         let mut changed = false;
@@ -441,6 +463,16 @@ fn wait_for_available_workers(
         }
         if changed {
             store.save(config)?;
+        }
+
+        let ready = snapshot
+            .eligible_sessions_for(&binding.device_identity)
+            .into_iter()
+            .filter(|session| config.is_session_authorized(session))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !ready.is_empty() {
+            return Ok(ready);
         }
 
         if !announced_wait {
@@ -463,7 +495,6 @@ fn wait_for_available_workers(
         }
 
         thread::sleep(Duration::from_millis(750));
-        snapshot = discover_inventory(cli)?;
     }
 }
 
