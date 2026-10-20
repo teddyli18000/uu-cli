@@ -57,23 +57,23 @@ function Test-NetEaseHost([string]$url) {
     }
 }
 
-# Prefer the Windows endpoint advertised by the official page. We deliberately
-# identify it by product route/type rather than by a versioned installer filename.
+# Prefer exactly the Windows route advertised by the official page.
 $preferred = $candidates |
     Where-Object {
         if (-not (Test-NetEaseHost $_)) { return $false }
         $uri = [Uri]$_
-        $text = $uri.AbsoluteUri.ToLowerInvariant()
-        return $text.Contains('/uuremote/') -and (
-            $text.Contains('type=pc') -or
-            $uri.AbsolutePath.TrimEnd('/').EndsWith('/gw')
+        $path = $uri.AbsolutePath.TrimEnd('/').ToLowerInvariant()
+        $query = $uri.Query.TrimStart('?').ToLowerInvariant()
+        return (
+            $path.EndsWith('/uuremote/c/gw') -and
+            (($query -split '&') -contains 'type=pc')
         )
     } |
     Sort-Object |
     Select-Object -First 1
 
 if (-not $preferred) {
-    throw 'Official page did not expose a recognizable NetEase Windows download endpoint.'
+    throw 'Official page did not expose the NetEase Windows download endpoint (uuremote/c/gw?type=pc).'
 }
 
 Write-Host "Selected Windows endpoint: $preferred"
