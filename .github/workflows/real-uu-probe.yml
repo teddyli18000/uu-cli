@@ -1,0 +1,29 @@
+name: Build real UU observation probe
+on:
+  push:
+    branches: [experiment/real-uu-probe]
+    paths: ['experiments/real-uu-probe/**', '.github/workflows/real-uu-probe.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: experiments/real-uu-probe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --locked -- -D warnings
+      - run: cargo build --locked --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: real-uu-probe-windows
+          path: experiments/real-uu-probe/target/release/real-uu-probe.exe
+          if-no-files-found: error
+          retention-days: 7
