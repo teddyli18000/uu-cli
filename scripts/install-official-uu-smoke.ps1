@@ -56,6 +56,15 @@ function Get-UuUninstallEntries {
     }
 }
 
+function Show-UuProcesses {
+    Get-Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.ProcessName -match '(?i)GameViewer|uuyc|UURemote|cleanup_utils|^Un$|^Uninstall$'
+        } |
+        Sort-Object ProcessName, Id |
+        ForEach-Object { Write-Host "  process: $($_.ProcessName) pid=$($_.Id)" }
+}
+
 Write-Host 'Installing verified official UU package silently on disposable runner...'
 $installExit = Invoke-BoundedProcess -FilePath $installer -ArgumentList @('/S') -TimeoutMs 240000
 Write-Host "Installer exit code: $installExit"
@@ -145,11 +154,8 @@ foreach ($args in @(@('version'), @('device', 'list', '--json'))) {
     if (Test-Path $stderr) { Get-Content $stderr | Select-Object -First 80 | ForEach-Object { Write-Host "  stderr: $_" } }
 }
 
-# Capture process names started by the installer before uninstalling. This is a disposable
-# runner; we do not use these process controls in the product itself.
-Get-Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.ProcessName -match '(?i)GameViewer|uuyc|UURemote' } |
-    ForEach-Object { Write-Host "UU-related process: $($_.ProcessName) pid=$($_.Id)" }
+Write-Host 'UU-related processes before uninstall:'
+Show-UuProcesses
 
 $uninstallExe = $null
 foreach ($entry in $entries) {
@@ -165,18 +171,44 @@ if (-not $uninstallExe -or -not (Test-Path $uninstallExe)) {
     throw 'Could not locate official UU uninstaller after clean install.'
 }
 
+$cliPaths = @($cliCandidates | ForEach-Object { $_.FullName })
 Write-Host "Uninstalling via: $uninstallExe /S"
 $uninstallExit = Invoke-BoundedProcess -FilePath $uninstallExe -ArgumentList @('/S') -TimeoutMs 240000 -WorkingDirectory (Split-Path -Parent $uninstallExe)
-Write-Host "Uninstaller exit code: $uninstallExit"
+Write-Host "Uninstaller launcher exit code: $uninstallExit"
 if ($uninstallExit -ne 0) {
     throw "Official uninstaller returned non-zero exit code $uninstallExit"
 }
 
-Start-Sleep -Seconds 3
-$remaining = @($cliCandidates | Where-Object { Test-Path $_.FullName })
-$remainingEntries = @(Get-UuUninstallEntries)
-Write-Host "Remaining CLI files: $($remaining.Count)"
-Write-Host "Remaining uninstall entries: $($remainingEntries.Count)"
-if ($remaining.Count -ne 0 -or $remainingEntries.Count -ne 0) {
-    throw 'Official UU silent uninstall left discovered installation state behind on the clean runner.'
+# NSIS launches helper cleanup processes and may return before they finish. Observe the
+# official asynchronous cleanup rather than killing anything just to make CI green.
+$deadline = [DateTime]::UtcNow.AddSeconds(90)
+$lastReport = [DateTime]::MinValue
+$clean = $false
+while ([DateTime]::UtcNow -lt $deadline) {
+    $remainingPaths = @($cliPaths | Where-Object { Test-Path $_ })
+    $remainingEntries = @(Get-UuUninstallEntries)
+    if ($remainingPaths.Count -eq 0 -and $remainingEntries.Count -eq 0) {
+        $clean = $true
+        break
+    }
+
+    if (([DateTime]::UtcNow - $lastReport).TotalSeconds -ge 5) {
+        Write-Host "Waiting for official cleanup: CLI files=$($remainingPaths.Count), uninstall entries=$($remainingEntries.Count)"
+        Show-UuProcesses
+        $lastReport = [DateTime]::UtcNow
+    }
+    Start-Sleep -Milliseconds 750
 }
+
+$remainingPaths = @($cliPaths | Where-Object { Test-Path $_ })
+$remainingEntries = @(Get-UuUninstallEntries)
+Write-Host "Remaining CLI files: $($remainingPaths.Count)"
+$remainingPaths | ForEach-Object { Write-Host "  $_" }
+Write-Host "Remaining uninstall entries: $($remainingEntries.Count)"
+if (-not $clean) {
+    Write-Host 'UU-related processes after cleanup timeout:'
+    Show-UuProcesses
+    throw 'Official UU silent uninstall did not complete within the bounded cleanup window.'
+}
+
+Write-Host 'Official UU asynchronous uninstall cleanup completed.'
