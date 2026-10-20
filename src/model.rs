@@ -13,6 +13,8 @@ pub struct WorkspaceBinding {
 pub struct OwnedWorker {
     pub device_identity: String,
     pub session_name: String,
+    #[serde(default)]
+    pub quarantined: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -55,23 +57,59 @@ impl Config {
     }
 
     pub fn remember_owned_worker(&mut self, device_identity: &str, session_name: &str) -> bool {
+        self.upsert_owned_worker(device_identity, session_name, false)
+    }
+
+    pub fn quarantine_owned_worker(
+        &mut self,
+        device_identity: &str,
+        session_name: &str,
+    ) -> bool {
+        self.upsert_owned_worker(device_identity, session_name, true)
+    }
+
+    fn upsert_owned_worker(
+        &mut self,
+        device_identity: &str,
+        session_name: &str,
+        quarantined: bool,
+    ) -> bool {
         if device_identity.is_empty() || session_name.is_empty() {
             return false;
         }
-        if self.owned_workers.iter().any(|worker| {
+        if let Some(worker) = self.owned_workers.iter_mut().find(|worker| {
             worker.device_identity == device_identity && worker.session_name == session_name
         }) {
+            if quarantined && !worker.quarantined {
+                worker.quarantined = true;
+                return true;
+            }
             return false;
         }
         self.owned_workers.push(OwnedWorker {
             device_identity: device_identity.to_owned(),
             session_name: session_name.to_owned(),
+            quarantined,
         });
         true
     }
 
     pub fn is_owned_worker(&self, session: &SessionInfo) -> bool {
-        self.owned_workers.iter().any(|worker| {
+        self.owned_worker(session).is_some()
+    }
+
+    pub fn is_reusable_owned_worker(&self, session: &SessionInfo) -> bool {
+        self.owned_worker(session)
+            .is_some_and(|worker| !worker.quarantined)
+    }
+
+    pub fn is_quarantined_owned_worker(&self, session: &SessionInfo) -> bool {
+        self.owned_worker(session)
+            .is_some_and(|worker| worker.quarantined)
+    }
+
+    fn owned_worker(&self, session: &SessionInfo) -> Option<&OwnedWorker> {
+        self.owned_workers.iter().find(|worker| {
             worker.device_identity == session.device_identity
                 && worker.session_name == session.session_name
         })
@@ -189,8 +227,22 @@ mod tests {
         let mut owned = session(Some("t"));
         owned.session_name = "uu-a".into();
         assert!(config.is_owned_worker(&owned));
+        assert!(config.is_reusable_owned_worker(&owned));
         owned.device_identity = "device-2".into();
         assert!(!config.is_owned_worker(&owned));
+    }
+
+    #[test]
+    fn quarantine_is_sticky_and_never_reusable() {
+        let mut config = Config::default();
+        config.remember_owned_worker("device-1", "uu-a");
+        assert!(config.quarantine_owned_worker("device-1", "uu-a"));
+        assert!(!config.remember_owned_worker("device-1", "uu-a"));
+
+        let mut owned = session(Some("t"));
+        owned.session_name = "uu-a".into();
+        assert!(config.is_quarantined_owned_worker(&owned));
+        assert!(!config.is_reusable_owned_worker(&owned));
     }
 
     #[test]
