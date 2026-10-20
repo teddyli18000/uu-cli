@@ -51,9 +51,7 @@ impl WorkerLease {
 
         match lock_file.try_lock_exclusive() {
             Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                return Ok(AcquireResult::Busy)
-            }
+            Err(error) if is_lock_contended(&error) => return Ok(AcquireResult::Busy),
             Err(error) => {
                 return Err(error)
                     .with_context(|| format!("cannot lock worker lease {}", lock_path.display()))
@@ -117,6 +115,22 @@ impl WorkerLease {
 impl Drop for WorkerLease {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.lock_file);
+    }
+}
+
+fn is_lock_contended(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        // ERROR_LOCK_VIOLATION: Windows reports a non-blocking file-lock
+        // collision as raw OS error 33 rather than ErrorKind::WouldBlock.
+        return error.raw_os_error() == Some(33);
+    }
+    #[cfg(not(windows))]
+    {
+        false
     }
 }
 
