@@ -31,11 +31,11 @@ local workspace
 首次绑定时：
 
 - Git 仓库内默认使用 Git root；
-- 非 Git 目录默认使用当前目录；
+- 非 Git 目录默认使用当前目录或合理的最近根目录；
 - binding 存在用户配置目录，不往项目仓库写额外文件；
 - 一个 workspace v1 只绑定一个远端设备。
 
-从子目录执行 `uu` 时，向上查找最近的 workspace binding。
+从子目录执行 `uu` 时，使用最近的 workspace binding。
 
 ## 3. Terminal 是执行资源，不是 Agent 上下文
 
@@ -53,19 +53,13 @@ device
 - 一个 terminal 同一时刻只执行一个 uu job；
 - 长任务持续占用自己的 terminal，并实时回传输出；
 - 其他并发命令使用其他 idle terminal；
-- 没有空闲 worker 时排队；
+- 没有空闲 worker 时等待；
 - 绝不跨设备借 terminal；
 - session name/id 不进入日常用户体验。
 
 ## 4. 不依赖上一条 shell-local 状态
 
-不同 `uu` 调用之间不保证使用同一个 Terminal，因此不保证继承：
-
-- `cd`；
-- `export`；
-- `source` / virtualenv；
-- alias；
-- 其他 shell-local 状态。
+不同 `uu` 调用之间不保证使用同一个 Terminal，因此不保证继承 `cd`、`export`、`source`/virtualenv、alias 或其他 shell-local 状态。
 
 不要：
 
@@ -83,7 +77,7 @@ uu "cd src && source .venv/bin/activate && python main.py"
 
 每个普通 job 都从该 workspace 的 `remote root` 开始。Codex Skill 必须明确写出这条规则。
 
-持续交互程序或长任务在自己的 job 生命周期内保持同一个 terminal lease；job 结束后不承诺 shell-local 状态被下一条命令继承。
+持续交互程序或长任务在自己的 job 生命周期内保持同一个 terminal；job 结束后不承诺 shell-local 状态被下一条命令继承。
 
 ## 5. 第一个 Terminal 由用户创建
 
@@ -101,49 +95,23 @@ UU 已运行并登录
 
 `uu-cli` 不自动点击 GUI，不注入 GameViewer，不伪造签名，不绕过 host registration。
 
-## 6. 首次绑定交互
+## 6. 首次绑定和新 Terminal 交互
 
-第一次普通 `uu <command>` 也可以自动进入 bind 流程，不强迫用户先学 `uu bind`。
+第一次普通 `uu <command>` 可以自动进入 bind 流程，不强迫用户先学 `uu bind`。
 
-### 没有 Terminal
+目标是：**没有歧义就自动，有歧义才问，而且问得很短。**
 
-```text
-uu-cli · D:\projects\aic
-当前没有可用的 UU Terminal。
-请在网易 UU 远程中打开目标设备的“终端远控”。
-等待中…  Ctrl+C 取消
-```
+- 如果当前没有可用 Terminal，`uu` 可以等待用户在官方 UU 中打开；一旦发现，原命令继续，不要求重跑；
+- 如果只发现一个明确的远端设备，尽量自动完成或只需 Enter 确认；
+- 如果多台设备都有 Terminal，弹出一个简短 PowerShell 选择器，以 friendly name + terminal 数量展示；
+- 新 Terminal 归属明确时可以自动加入对应 worker pool；
+- 如果无法判断它是否供 uu-cli 使用，允许弹一个短 PowerShell 选择窗口；
+- 已经确认过的 binding/Terminal 不应重复询问；
+- 用户明确跳过的 Terminal 不得被调度。
 
-用户打开后，原来的命令继续，不要求重跑。
+Codex 不接触裸 `deviceId`。
 
-### 只有一台设备
-
-尽量一键确认 workspace + device，再从选中的 terminal 获取 `pwd` 作为 remote root 默认值。
-
-### 多台设备
-
-只给人类一次简短 PowerShell 选择：
-
-```text
-发现多个远端设备：
-  [1] AIC-Car-1   3 terminals
-  [2] AIC-Car-2   2 terminals
-选择 [1]:
-```
-
-内部保存稳定 device identity；Codex 不接触裸 `deviceId`。
-
-## 7. 新 Terminal 的发现
-
-新开的官方 Terminal 应被 uu-cli 自动发现。
-
-- 已绑定设备且已允许自动加入：直接加入 worker pool；
-- 否则只弹一个短提示确认是否加入；
-- 用户自己手动使用、明确跳过的 Terminal 不得被调度。
-
-具体内部可用 rename 或本地 registry 标记 worker，选更稳定、对用户干扰更小的方案。
-
-## 8. 公共 CLI
+## 7. 公共 CLI
 
 日常：
 
@@ -160,63 +128,93 @@ uu bind
 uu list
 ```
 
-`uu bind` 用于首次或重新建立当前 workspace binding；`uu list` 只给人类查看当前 workspace、remote、worker busy/idle。
+`uu bind` 用于首次或重新建立当前 workspace binding；`uu list` 只给人类查看当前 workspace、remote 和 worker 状态。
 
-v1 不再把 `devices/use` 作为主要公共模型。设备只是 workspace binding 的内部组成部分。
+v1 不把 `devices/use` 作为主要公共模型。设备只是 workspace binding 的内部组成部分。
 
-## 9. 命令边界与输出
+## 8. 命令边界与输出
 
 官方 terminal 是持续 PTY 字节流，没有客户端可达的逐命令 exec/exit-code API。
 
-每个 job 内部使用带随机 nonce 的 completion marker 来判断本次命令完成和 `$?`。marker 必须从最终输出剥离，不能依赖 prompt 文本猜结束。
+`uu-cli` 必须可靠识别单次命令完成和 exit code，且不能靠 shell prompt 文本猜结束。具体内部机制由实现者选择。
 
 PTY stdout/stderr 可能合流，CLI 不伪造不存在的分离语义。
 
 一旦命令已经写入远端 PTY，连接异常时不得自动在另一个 worker 重放。无法确认结果时明确返回“命令可能仍在运行/执行状态未知”。
 
-## 10. 文件传输
+## 9. 文件传输
 
 公共接口保持：
 
 ```powershell
 uu put .\file.bin /remote/file.bin
-uu get /remote/file.bin .\roundtrip.bin
+uu get ~/remote/file.bin .\roundtrip.bin
 ```
 
-要求：二进制安全、明确完成/失败、传输不完整绝不返回成功。优先研究官方原生文件通道；除非原生入口确认不可复用，不提前把 terminal + base64 固化成正式架构。
+要求：二进制安全、明确完成/失败、传输不完整绝不返回成功。内部优先复用稳定官方能力，但最终实现方式不属于产品契约。
 
-## 11. 后台生命周期
+## 10. 不干扰官方 UU — 硬边界
 
-为了自动发现 Terminal 和协调多个 Codex 并发调用，v1 允许一个极轻的用户级 broker。
+`uu-cli` 是官方 UU 的旁路工具，不是 patch、插件注入器或替代客户端。
 
-约束：
+必须满足：
 
-- 无 console / GUI / tray；
-- 单实例；
-- UU 未运行、无 terminal、无 job 时尽量只等待，CPU 占用接近 0；
-- 优先事件触发刷新，必要 polling 必须退避，不能永久高频启动官方 CLI；
-- 只有需要人选择设备/接纳新 Terminal 时才弹一个短 `pwsh` 交互；
-- `uu` 调用发现 broker 不在时可以自行拉起恢复。
+- 不修改、替换、patch、inject 官方 UU/GameViewer 二进制；
+- 不改变 UU 的账号、登录、设备、更新、启动配置；
+- 不保存或导出 UU 密码、Token、Cookie、local-host token 等认证材料；
+- 不 kill、close、rename 或偷偷接管用户没有授权给 uu-cli 的 Terminal；
+- 不改变用户正在手工操作的 Terminal 的输入或 shell 状态；
+- 不让 uu-cli 崩溃、升级、卸载影响官方 UU 本身；
+- 不依赖签名伪造、认证绕过、GUI 自动点击、进程注入。
 
-在不修改官方 UU 的前提下，严格做到“UU 一启动 broker 才启动、UU 一退出 broker 进程绝对消失”未必存在可靠系统触发点。产品优先保证低占用、自动发现和无感，而不是为了进程数量强行引入脆弱 hook。
+如果某种 attach/reuse 方法会明显干扰用户当前 UU 窗口，必须换更安全的实现，或者只使用用户明确提供给 uu-cli 的专用 Terminal。
 
-## 12. 安装与配置
+## 11. 可移植性 — 目标是“换台电脑也能装了就用”
 
-目标交付物：一个 user-scope Windows installer。
+目标平台不是开发者自己的 Windows，而是：**官方 UU Remote 本身能够正常工作的受支持 Windows 电脑。**
 
-安装：
+实现必须尽可能：
 
-- 安装 `uu.exe`；
-- 加入当前用户 PATH；
-- 配置轻量 broker/watcher 自动启动；
-- 注册标准卸载入口；
-- 不修改官方 UU 文件。
+- 自动发现官方 UU 安装位置和可用组件；
+- 不硬编码开发机路径、用户名、盘符、deviceId、session 名、精确安装目录；
+- 优先做能力探测和兼容性判断，而不是只认一个固定版本；
+- 不要求用户额外安装 Python、Rust、Node、WSL 等开发运行时；
+- 尽量以普通用户权限完成安装和运行；
+- 对不同 Windows 用户、路径、设备名、系统语言保持稳健；
+- 在不兼容时给出明确诊断，而不是静默失败；
+- 发布前必须在非开发机或干净用户环境完成完整安装与首次使用验证。
 
-用户配置存放 `%LOCALAPPDATA%\uu-cli\` 或等价位置，只保存 workspace binding、设备非敏感 identity、remote root、worker 标记和少量 UX 偏好。
+## 12. 后台生命周期与资源占用
 
-不得保存 UU 密码、Token、Cookie、local-host token 等认证材料。
+用户目标是：UU 在使用时，`uu-cli` 随时可用；没有任务或没有 Terminal 时，资源占用尽可能低。
 
-## 13. 对 Agent 的要求
+实现方式不固定，可以是 broker、watcher、事件驱动、lazy process 或其他方案。但结果必须满足：
+
+- 用户不需要手工 start/stop 第二个服务；
+- 新开的官方 Terminal 能被自动发现；
+- 空闲时 CPU 接近 0，不永久高频轮询或反复 spawn 官方 CLI；
+- 没必要时不保持昂贵连接；
+- 无 tray、额外 GUI 或常驻可见 console；
+- 只有真正需要用户选择时才弹短 PowerShell 交互；
+- 后台组件异常后，下一次 `uu` 可以恢复或给出明确错误；
+- 不拖累或阻止官方 UU 的启动、退出、升级。
+
+## 13. 安装与配置
+
+目标交付物：一个普通用户可以直接安装的 Windows installer。
+
+安装完成后用户只应该感知 `uu` 命令和必要时的极短绑定交互。
+
+安装/升级/卸载必须：
+
+- 不要求开发环境；
+- 尽量 user-scope；
+- 正确配置 PATH；
+- 保留有效 workspace binding；
+- 卸载只清理 uu-cli 自己的文件、配置和集成；
+- 不修改或删除官方 UU 及其登录状态。
+
+## 14. 对 Agent 的要求
 
 Agent 只需要知道：
 
@@ -230,9 +228,9 @@ Agent 只需要知道：
 
 > 不依赖不同 `uu` 调用之间的 shell-local 状态；需要连续 `cd/source/export` 时放进同一条命令。每个普通 job 从 workspace remote root 开始。
 
-Agent 不选择 deviceId、不选择 session、不管理 worker。
+Agent 不选择 deviceId、不选择 session、不管理 worker，也不管理后台组件。
 
-## 14. 非目标
+## 15. 非目标
 
 v1 不做：
 
@@ -245,4 +243,4 @@ v1 不做：
 - GameViewer 注入、签名伪造、host-registration 绕过；
 - 自己的一套持久 shell-context 系统。
 
-详细内部架构见 `ARCHITECTURE.md`，实施蓝图见 `IMPLEMENTATION.md`。
+详细概念架构见 `ARCHITECTURE.md`；实现目标和验收契约见 `IMPLEMENTATION.md`。
