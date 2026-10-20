@@ -1,0 +1,3 @@
+# Link the shipped Windows binaries to the static MSVC C runtime.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

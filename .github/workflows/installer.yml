@@ -35,14 +35,59 @@ jobs:
       - name: Build native Windows executables and package
         shell: powershell
         run: |
-          cargo build --locked --release --bin uu --bin uu-background
+          $windowsTarget = 'x86_64-pc-windows-msvc'
+          cargo build --locked --release --target $windowsTarget --bin uu --bin uu-background
           if ($LASTEXITCODE -ne 0) { throw 'cargo build failed.' }
+          $releaseBin = Join-Path 'target' "$windowsTarget\release"
+          $programFilesX86 = [Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+          if ([string]::IsNullOrWhiteSpace($programFilesX86)) {
+            throw 'ProgramFiles(x86) is unavailable; cannot locate Visual Studio tools.'
+          }
+          $vswhere = Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
+            throw "vswhere.exe was not found at $vswhere."
+          }
+          $vsInstallOutput = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0) { throw 'vswhere failed to locate Visual C++ tools.' }
+          $vsInstall = [string]($vsInstallOutput | Select-Object -First 1)
+          if ([string]::IsNullOrWhiteSpace($vsInstall)) {
+            throw 'vswhere returned no Visual Studio installation with the x86/x64 C++ tools.'
+          }
+          $vcTools = Join-Path $vsInstall 'VC\Tools\MSVC'
+          if (-not (Test-Path -LiteralPath $vcTools -PathType Container)) {
+            throw "Visual C++ tools directory was not found at $vcTools."
+          }
+          $dumpbin = Get-ChildItem -LiteralPath $vcTools -Directory |
+            Sort-Object Name -Descending |
+            ForEach-Object { Join-Path $_.FullName 'bin\Hostx64\x64\dumpbin.exe' } |
+            Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } |
+            Select-Object -First 1
+          if (-not $dumpbin) { throw 'dumpbin.exe was not found in the selected Visual Studio installation.' }
+
+          foreach ($binary in @((Join-Path $releaseBin 'uu.exe'), (Join-Path $releaseBin 'uu-background.exe'))) {
+            if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+              throw "Expected Windows executable was not found: $binary."
+            }
+            $dependencyOutput = & $dumpbin /dependents $binary 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) { throw "dumpbin /dependents failed for $binary." }
+            Write-Host "DLL dependencies for $binary:"
+            Write-Host $dependencyOutput
+            $redistributableDlls = @(
+              [regex]::Matches($dependencyOutput, '(?im)^\s*((?:VCRUNTIME|MSVCP|MSVCR)[A-Z0-9_-]*\.DLL)\s*$') |
+                ForEach-Object { $_.Groups[1].Value.ToUpperInvariant() } |
+                Where-Object { $_ -ne 'MSVCRT.DLL' } |
+                Sort-Object -Unique
+            )
+            if ($redistributableDlls.Count -gt 0) {
+              throw "$binary depends on Visual C++ redistributable DLL(s): $($redistributableDlls -join ', ')."
+            }
+          }
           $package = Join-Path $env:RUNNER_TEMP 'uu-cli-package'
           New-Item -ItemType Directory -Path $package -Force | Out-Null
           New-Item -ItemType Directory -Path (Join-Path $package 'installer') -Force | Out-Null
           New-Item -ItemType Directory -Path (Join-Path $package 'skills\uu-cli') -Force | Out-Null
-          Copy-Item -LiteralPath 'target\release\uu.exe' -Destination $package
-          Copy-Item -LiteralPath 'target\release\uu-background.exe' -Destination $package
+          Copy-Item -LiteralPath (Join-Path $releaseBin 'uu.exe') -Destination $package
+          Copy-Item -LiteralPath (Join-Path $releaseBin 'uu-background.exe') -Destination $package
           Copy-Item -Path 'installer\*.ps1' -Destination (Join-Path $package 'installer')
           Copy-Item -LiteralPath 'installer\README.md' -Destination (Join-Path $package 'installer')
           Copy-Item -LiteralPath 'skills\uu-cli\SKILL.md' -Destination (Join-Path $package 'skills\uu-cli')
