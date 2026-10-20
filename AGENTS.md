@@ -19,7 +19,7 @@
 
 你是主要实现者。请自行完成技术选型、代码组织、开发顺序、CI、installer、实机调试和兼容性处理。
 
-不要等待别人逐步告诉你该用什么语言、Windows API、IPC、进程模型或 crate/library。只要不违反产品契约和硬边界，内部实现由你决定。
+不要等待别人逐步告诉你该用什么语言、Windows API、IPC、进程模型或库。只要不违反产品契约和硬边界，内部实现由你决定。
 
 遇到文档中的实现设想与真实 Windows + 官方 UU 行为冲突时，以实机证据为准；优先保住公共体验、安全边界和可移植性，然后选择更简单稳健的方案，并同步更新必要文档。
 
@@ -38,6 +38,12 @@ uu get <remote> <local>
 ```powershell
 uu bind
 uu list
+```
+
+保留词冲突时：
+
+```powershell
+uu -- <remote command...>
 ```
 
 不要重新引入 `devices/use/session/new/attach/kill` 等内部概念作为日常公共模型。
@@ -93,15 +99,18 @@ uu "cd src && source .venv/bin/activate && python main.py"
 
 必须遵守：
 
-- `uu` 正在等待某个明确设备的 worker 时，用户刚打开的该设备 Terminal 直接满足请求，不要再弹一次多余确认；
-- workspace 未绑定且正在提示用户“打开想使用设备的 Terminal”时，唯一新出现的 Terminal 可以同时完成设备识别和本次 worker 授权；
-- 没有等待请求时，新 Terminal 若未启用自动加入，只弹一个短 PowerShell：Enter=使用，N=跳过，A=该设备以后自动；
+- `uu` 正在等待 Terminal 时，提示必须明确说明“接下来打开的匹配 Terminal 会用于本次请求”；用户随后打开它即可作为本次授权，不要再弹第二轮“是否交给 uu-cli”；
+- workspace 未绑定时，唯一新出现的 Terminal 可以同时完成设备识别、本次 worker 授权和后续 remote-root 确认；
+- 没有等待请求时，新 Terminal 必须经过一次短授权：Enter=交给 uu-cli，N/Esc/关闭=保留手动使用；
+- v1 不提供设备级永久自动接管新 Terminal 的开关，避免未来用户手动开的 Terminal 被静默抢走；
 - 同一设备多个 workspace **不是** Terminal 归属歧义，因为它们共享 device-level pool；
-- 多个新 Terminal 短时间出现时尽量合并提示；
-- 用户 skip 的 session 之后不得偷偷使用；
-- 已确认过的 binding/session/device preference 不重复骚扰。
+- 多个新 Terminal 短时间出现时尽量在同一交互窗口顺序/批量处理；
+- 用户未授权的 session 不得偷偷使用；
+- 已确认过的 binding/session 不重复骚扰。
 
-人类选择和 job I/O 必须分离：选择器不能污染 `uu` stdout，也不能消费远端命令 stdin。需要人决定时用独立、短、可取消的 PowerShell 交互或等价方式。
+人类选择和 job I/O 必须分离：选择器不能污染 `uu` stdout，也不能消费远端命令 stdin。需要人决定时用独立、短、可取消的 PowerShell/console 交互或等价方式。
+
+不能要求用户预装 PowerShell 7。若使用 `pwsh`，必须在不存在时回退 Windows 自带能力或自己的最小原生交互。
 
 ## Workspace and device UX
 
@@ -134,7 +143,7 @@ uu-cli 必须是旁路工具，不能破坏或劫持官方 UU。
 - 签名伪造、认证绕过、GUI 自动点击、进程注入；
 - 让 uu-cli 的崩溃、升级、卸载影响 UU 本身正常使用。
 
-用户通过 uu-cli 的明确 PowerShell 交互把某个 Terminal 交给 uu-cli 后，可以把它作为专用 worker；在此之前不能静默接管。
+用户明确把某个 Terminal 交给 uu-cli 后，可以把它作为专用 worker；在此之前不能静默接管。
 
 如果某个官方 attach/reuse 路径会干扰用户未授权的 UU 窗口，不要硬用；换安全方案。
 
@@ -164,7 +173,7 @@ uu-cli 必须是旁路工具，不能破坏或劫持官方 UU。
 - 不硬编码开发机路径、用户名、盘符、deviceId、session name、版本号；
 - 自动发现官方 UU 安装和可用组件；
 - 优先能力探测，而不是只认一个精确客户端版本；
-- 不要求用户安装 Python/Rust/Node/WSL 等开发运行时；
+- 不要求用户安装 Python/Rust/Node/PowerShell 7/WSL 等开发运行时；
 - 尽量普通用户权限运行；
 - 对不同路径、Windows 用户、设备名、系统语言保持稳健；
 - 不兼容时给出明确诊断，不能静默失败。
@@ -180,7 +189,7 @@ uu-cli 必须是旁路工具，不能破坏或劫持官方 UU。
 - 无任务、无 Terminal 或 UU 未运行时资源占用尽可能低；
 - 禁止永久高频 polling/spawn 官方 CLI；
 - 无 tray、额外 GUI、常驻可见 console；
-- 只有真正需要人类决定时才弹短 PowerShell；
+- 只有真正需要人类决定时才弹短交互；
 - 后台组件异常后，下一次 `uu` 可以自动恢复或明确报错；
 - 不拖累 UU 的启动、退出、升级。
 
@@ -206,13 +215,15 @@ uu get <remote> <local>
 尽可能把构建、故障注入、安装和兼容性测试放到 GitHub Actions，减少开发者主力电脑的消耗和风险。
 
 - 建立 Windows CI；
-- pure logic / fake provider / concurrency / no-replay / quarantine 全部自动测；
+- pure logic / fake provider / concurrency / shell isolation / no-replay / quarantine 全部自动测；
 - installer 在新的 hosted Windows job 里安装、检查 PATH/后台集成、再卸载并检查残留；
 - 测无 UU、UU 未启动、组件缺失、不兼容等路径；
 - 需要官方 UU installer 时，只在 workflow 运行时从网易/UU 官方公开来源下载；不要提交或重新分发；
 - 对下载的官方二进制验证 Authenticode/版本/hash；
 - 可以做 scheduled/manual compatibility smoke，主动发现官方 UU 更新造成的兼容性变化；
 - 不要把真实 UU 账号凭据放进 CI。
+
+如果 hosted Windows 的 OS/SKU 不被官方 UU 支持，UU 安装 smoke 可以 non-gating/manual；不要因此弱化其他 clean-state CI，也不要声称真实 UU 已通过。
 
 GitHub-hosted CI 无法证明真实登录、真实 Terminal attach、多 Terminal、远端设备、Ctrl+C 和文件通道；这些只做最小必要实机验收。不要拿 mock 冒充端到端通过。
 
@@ -238,7 +249,7 @@ v1 不扩：
 - 干净 workspace 首次绑定；
 - 多设备同时开 Terminal 时选择正确且不会误绑；
 - 等待中的 `uu` + 新 Terminal 不重复询问；
-- 新 Terminal 自动发现，交互短且不骚扰；
+- 没有等待请求时未授权 Terminal 不会被接管；
 - 同设备多 workspace 共享 worker pool 不串 remote root；
 - 多 Terminal 并发和长任务；
 - shell-local 状态不成为跨 job 隐式上下文；
