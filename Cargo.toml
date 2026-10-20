@@ -19,6 +19,11 @@ name = "fake-uuyc"
 path = "tests/fixtures/fake_uuyc.rs"
 required-features = ["test-fixture"]
 
+[[bin]]
+name = "decision-driver"
+path = "tests/fixtures/decision_driver.rs"
+required-features = ["test-fixture"]
+
 [features]
 test-fixture = []
 
