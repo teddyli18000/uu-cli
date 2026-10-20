@@ -387,12 +387,9 @@ fn run_git_bash_attached_terminal(identity: AttachIdentity) -> Result<u8, Box<dy
     let stdout_relay = thread::Builder::new()
         .name("fake-uuyc-git-bash-stdout".to_owned())
         .spawn(move || {
-            if let Err(error) = relay_bash_output(
-                child_stdout,
-                io::stdout(),
-                stdout_identity,
-                "stdout",
-            ) {
+            if let Err(error) =
+                relay_bash_output(child_stdout, io::stdout(), stdout_identity, "stdout")
+            {
                 eprintln!("fake-uuyc: Git Bash stdout relay failed: {error}");
             }
         })?;
@@ -400,12 +397,9 @@ fn run_git_bash_attached_terminal(identity: AttachIdentity) -> Result<u8, Box<dy
     let stderr_relay = thread::Builder::new()
         .name("fake-uuyc-git-bash-stderr".to_owned())
         .spawn(move || {
-            if let Err(error) = relay_bash_output(
-                child_stderr,
-                io::stderr(),
-                stderr_identity,
-                "stderr",
-            ) {
+            if let Err(error) =
+                relay_bash_output(child_stderr, io::stderr(), stderr_identity, "stderr")
+            {
                 eprintln!("fake-uuyc: Git Bash stderr relay failed: {error}");
             }
         })?;
