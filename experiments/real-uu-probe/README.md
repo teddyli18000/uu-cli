@@ -12,7 +12,7 @@ session instance before attaching. Selection and authorization belong to the hum
 operating this experiment. Never select an unrelated terminal.
 
 The local input commands are `pwd`, `hello`, `exit7`, `second`, `unicode`, `sleep`,
-`stream`, `interrupt`, `after`, `status`, `quit`. They send fixed benign shell commands.
+`stream`, `interrupt`, `interrupt-key`, `after`, `status`, `quit`. They send fixed benign shell commands.
 Each command is individually wrapped with the current candidate ASCII completion
 markers and runs in a subshell. No automated sequence, retry, reconnect or replay.
 The observer reports ordered visible nonce tokens, not a verdict about stream
@@ -20,6 +20,11 @@ integrity or a production decoder fix. It separately records whether literal CRL
 separators required by the original candidate decoder survived. It refuses another
 shell command until the previous complete nonce end token/status is observed. `interrupt`
 sends exactly one ETX byte (03); it does not synthesize success or free a busy job.
+`interrupt-key` instead sends the Win32 input protocol's left-Ctrl down, C down/up
+(Unicode ETX, Ctrl modifier), and Ctrl up events into this probe's own ConPTY input.
+It requires the startup `ESC[?9001h` request and a pending command. No console mode
+or official process configuration is changed. Neither form asserts cancellation.
+Protocol reference: [Microsoft Terminal input encoder](https://github.com/microsoft/terminal/blob/main/src/terminal/input/terminalInput.cpp).
 
 `human.log` contains milestones; `raw.jsonl` contains timestamped TX/RX hex and
 process-state events before any interpretation. Cursor inheritance DSR is logged

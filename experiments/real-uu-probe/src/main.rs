@@ -179,13 +179,14 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
         }
     });
     logs.note(
-        "Local controls: pwd hello exit7 second unicode stream sleep interrupt after status quit",
+        "Local controls: pwd hello exit7 second unicode stream sleep interrupt interrupt-key after status quit",
     )?;
     let mut startup = Vec::new();
     let mut all_rx = Vec::new();
     let mut pending: Option<(String, String, Instant)> = None;
     let mut sequence = 0u32;
     let mut any_command_sent = false;
+    let mut win32_input_requested = false;
     let mut last_status = Instant::now();
     let mut process_exited = false;
     loop {
@@ -200,6 +201,12 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
                 all_rx.extend_from_slice(&bytes);
                 if !any_command_sent {
                     startup.extend_from_slice(&bytes);
+                    if !win32_input_requested
+                        && startup.windows(8).any(|part| part == b"\x1b[?9001h")
+                    {
+                        win32_input_requested = true;
+                        logs.note("Observed ConPTY Win32 input-mode request")?;
+                    }
                     while let Some(index) = startup.windows(4).position(|part| part == b"\x1b[6n") {
                         startup.drain(..index + 4);
                         transmit(&mut *writer, &mut logs, b"\x1b[1;1R")?;
@@ -299,15 +306,31 @@ fn attach(cli: &str, device: &str, session: &str, created: &str, log_dir: &Path)
                 logs.note("No send: attach process has exited")?;
                 continue;
             }
-            if control == "interrupt" {
+            if control == "interrupt" || control == "interrupt-key" {
                 if pending.is_none() {
                     logs.note("No interrupt sent: no active probe command")?;
                     continue;
                 }
-                transmit(&mut *writer, &mut logs, &[3])?;
-                logs.note(
-                    "One ETX byte sent; actual remote interruption still requires observation",
-                )?;
+                if control == "interrupt-key" {
+                    if !win32_input_requested {
+                        logs.note("No key events sent: Win32 input-mode request not observed")?;
+                        continue;
+                    }
+                    // Microsoft Terminal's CSI Vk;Sc;Uc;Kd;Cs;Rc_ protocol:
+                    // left Ctrl down, C down/up with ETX, then left Ctrl up.
+                    // This writes only our own ConPTY input, not a GUI key event.
+                    transmit(
+                        &mut *writer,
+                        &mut logs,
+                        b"\x1b[17;29;0;1;8;1_\x1b[67;46;3;1;8;1_\x1b[67;46;3;0;8;1_\x1b[17;29;0;0;0;1_",
+                    )?;
+                    logs.note("Win32 Ctrl+C key sequence sent; actual remote interruption still requires observation")?;
+                } else {
+                    transmit(&mut *writer, &mut logs, &[3])?;
+                    logs.note(
+                        "One ETX byte sent; actual remote interruption still requires observation",
+                    )?;
+                }
                 continue;
             }
             if pending.is_some() {
