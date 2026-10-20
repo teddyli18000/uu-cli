@@ -31,6 +31,12 @@ uu list
 
 正常情况下 Codex 不需要使用 `bind/list`。
 
+如果远端命令本身恰好叫 `put/get/bind/list`，使用标准 escape：
+
+```powershell
+uu -- <remote command...>
+```
+
 ## 核心模型
 
 ```text
@@ -61,24 +67,24 @@ uu git status
 
 - Git 仓库默认使用 Git root；
 - 只有一台明确设备时不要求用户输入 deviceId；
-- 多台设备同时可用时，弹一个简单 PowerShell 选择器；
+- 多台设备同时可用时，弹一个简单选择器；
 - remote root 默认可取所选 Terminal 当前 `pwd`，Enter 接受或输入修改；
 - binding 完成后，原命令继续执行，不要求重跑。
 
-如果 `uu` 正在等一个 Terminal，你此时在官方 UU 打开合适的 Terminal，它应直接被发现并继续这个请求，而不是再弹一轮重复确认。
+如果 `uu` 正在等一个 Terminal，它会明确提示你“接下来打开的匹配 Terminal 会用于本次请求”。你此时在官方 UU 打开它，就直接继续这个请求，不再弹第二轮重复确认。
 
 ## 后来再开 Terminal
 
-如果没有命令正在等待，新 Terminal 只有在需要人类授权时才弹一个很短的 PowerShell：
+如果没有命令正在等待，新 Terminal 不会被静默接管，而是只弹一次很短的确认：
 
 ```text
 AIC-Car-1 新终端已打开
-[Enter] 交给 uu-cli   [N] 不使用   [A] 此设备以后自动加入
+[Enter] 交给 uu-cli    [N] 保留手动使用
 ```
 
-同一设备多个 workspace 共享一个 worker pool，所以不会再问“这个 Terminal 属于哪个 workspace”。
+`N`、Esc、关闭或取消都表示不使用。v1 不做“以后这个设备所有新 Terminal 都自动接管”的永久开关，避免你未来手动开的 Terminal 被抢走。
 
-用户跳过的 session 不得被偷偷使用；短时间打开多个 Terminal 时应尽量合并提示，避免连续弹窗。
+同一设备多个 workspace 共享一个 worker pool，所以不会再问“这个 Terminal 属于哪个 workspace”。短时间打开多个 Terminal 时，应在同一个交互窗口里顺序/批量处理，避免连续弹窗。
 
 ## 多个 Terminal
 
@@ -121,8 +127,9 @@ uu "cd src && source .venv/bin/activate && python main.py"
 
 - 正常 `uu` stdout 尽量只有远端输出；
 - 工具诊断走 stderr；
-- 需要你选择设备/Terminal 时，使用独立的短 PowerShell 交互；
-- 选择器不能偷走远端命令 stdin，也不能把菜单混进 Codex 正在解析的输出。
+- 需要你选择设备/Terminal 时，使用独立的短 PowerShell/console 交互；
+- 选择器不能偷走远端命令 stdin，也不能把菜单混进 Codex 正在解析的输出；
+- 不要求用户额外安装 PowerShell 7：可以优先使用 `pwsh`，不存在时必须有系统自带或原生 fallback。
 
 ## 不干扰官方 UU
 
@@ -149,7 +156,7 @@ uu "cd src && source .venv/bin/activate && python main.py"
 
 目标不是只在开发机可用，而是：**只要官方 UU Remote 本身能在该 Windows 电脑正常工作，uu-cli 就应尽量做到安装后直接可用。**
 
-因此实现不能硬编码开发机路径、用户名、盘符、deviceId、session 名或精确安装位置；应自动发现官方 UU 和所需组件，尽量使用普通用户权限，不要求用户额外安装 Python/Rust/Node/WSL 等开发环境。
+因此实现不能硬编码开发机路径、用户名、盘符、deviceId、session 名或精确安装位置；应自动发现官方 UU 和所需组件，尽量使用普通用户权限，不要求用户额外安装 Python/Rust/Node/PowerShell 7/WSL 等开发环境。
 
 ## 自动发现与占用
 
@@ -160,7 +167,7 @@ uu "cd src && source .venv/bin/activate && python main.py"
 - 自动发现新开的官方 Terminal；
 - 空闲时 CPU 接近 0，不高频轮询；
 - 无 tray、额外 GUI 或常驻可见 console；
-- 只有真正需要用户选择时才弹短 PowerShell；
+- 只有真正需要用户选择时才弹短交互；
 - 用户不需要手工管理第二个服务；
 - 不拖累 UU 的启动、退出和升级。
 
