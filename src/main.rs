@@ -27,7 +27,10 @@ fn run() -> Result<u8> {
             let suggested = suggest_root(&cwd)?;
             if let Some(binding) = resolve_binding(&config, &cwd) {
                 println!("Workspace  {}", binding.local_root.display());
-                println!("Remote     {} · {}", binding.device_name, binding.remote_root);
+                println!(
+                    "Remote     {} · {}",
+                    binding.device_name, binding.remote_root
+                );
                 println!("Workers    discovery not connected in bootstrap build");
             } else {
                 println!("Workspace  {}", suggested.display());
