@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, Write};
@@ -45,7 +46,10 @@ fn run() -> Result<u8> {
         Command::Put { .. } | Command::Get { .. } => {
             bail!("file transfer is not implemented in this bootstrap build")
         }
-        Command::Run { argv } => run_remote(&config, &cwd, argv),
+        Command::Run { argv } => {
+            ensure_binding(&store, &mut config, &cwd)?;
+            run_remote(&store, &mut config, &cwd, argv)
+        }
     }
 }
 
@@ -158,6 +162,52 @@ fn print_bound_workers(config: &Config, sessions: &[&SessionInfo]) {
     }
 }
 
+fn ensure_binding(store: &ConfigStore, config: &mut Config, cwd: &Path) -> Result<()> {
+    if resolve_binding(config, cwd).is_some() {
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        launch_binding_console(cwd)?;
+        *config = store.load()?;
+        if resolve_binding(config, cwd).is_none() {
+            bail!("workspace binding was not completed");
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(windows))]
+    {
+        let root = suggest_root(cwd)?;
+        let _ = store;
+        bail!(
+            "workspace {} is not bound; run `uu bind` on Windows first",
+            root.display()
+        )
+    }
+}
+
+#[cfg(windows)]
+fn launch_binding_console(cwd: &Path) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+
+    let executable = env::current_exe().context("cannot locate the running uu executable")?;
+    eprintln!("Workspace is not bound. Opening a short uu setup window...");
+    let status = std::process::Command::new(executable)
+        .arg("bind")
+        .current_dir(cwd)
+        .creation_flags(CREATE_NEW_CONSOLE)
+        .status()
+        .context("cannot open the uu binding console")?;
+    if !status.success() {
+        bail!("uu setup was cancelled or failed ({status})");
+    }
+    Ok(())
+}
+
 fn run_bind(store: &ConfigStore, config: &mut Config, cwd: &Path) -> Result<()> {
     let local_root = suggest_root(cwd)?;
     let cli = OfficialCli::locate().context("official UU Remote is required for `uu bind`")?;
@@ -199,7 +249,7 @@ fn run_bind(store: &ConfigStore, config: &mut Config, cwd: &Path) -> Result<()> 
 
     println!("Bound      {}", local_root.display());
     println!("Remote     {} · {remote_root}", candidate.device_name);
-    println!("Workers    {authorized} newly authorized");
+    println!("Workers    {authorized} authorized");
     Ok(())
 }
 
@@ -281,20 +331,20 @@ fn prompt(label: &str) -> Result<String> {
     Ok(input.trim().to_owned())
 }
 
-fn run_remote(config: &Config, cwd: &Path, argv: Vec<OsString>) -> Result<u8> {
-    let binding = resolve_binding(config, cwd).ok_or_else(|| {
-        let root = suggest_root(cwd)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| cwd.display().to_string());
-        anyhow::anyhow!(
-            "workspace {root} is not bound; open a UU Terminal for the target device, then run `uu bind`"
-        )
-    })?;
+fn run_remote(
+    store: &ConfigStore,
+    config: &mut Config,
+    cwd: &Path,
+    argv: Vec<OsString>,
+) -> Result<u8> {
+    let binding = resolve_binding(config, cwd)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("workspace binding disappeared during setup"))?;
     let shell_command = argv_to_shell(&argv)?;
 
     #[cfg(not(windows))]
     {
-        let _ = (binding, shell_command);
+        let _ = (store, config, binding, shell_command);
         bail!("remote execution is supported only on Windows in v1")
     }
 
@@ -302,53 +352,10 @@ fn run_remote(config: &Config, cwd: &Path, argv: Vec<OsString>) -> Result<u8> {
     {
         let cli =
             OfficialCli::locate().context("official UU Remote is required for remote execution")?;
-        let snapshot = discover_inventory(&cli)?;
-        let device = snapshot
-            .devices
-            .iter()
-            .find(|item| item.device.device_identity == binding.device_identity)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "bound target {} is not present in the current UU device list",
-                    binding.device_name
-                )
-            })?;
-
-        if !device.device.is_online {
-            bail!("bound target {} is offline", binding.device_name);
-        }
-        if let Some(error) = &device.session_error {
-            bail!(
-                "cannot query terminal workers on {}: {error}",
-                binding.device_name
-            );
-        }
-
-        let workers: Vec<&SessionInfo> = device
-            .sessions
-            .iter()
-            .filter(|session| is_eligible_session(session))
-            .filter(|session| config.is_session_authorized(session))
-            .collect();
-        if workers.is_empty() {
-            let authorized_live = device
-                .sessions
-                .iter()
-                .any(|session| config.is_session_authorized(session));
-            if authorized_live {
-                bail!(
-                    "all authorized Terminals on {} are currently busy; wait until one becomes attachable or open another Terminal and run `uu bind`",
-                    binding.device_name
-                );
-            }
-            bail!(
-                "no authorized Terminal is open on {}; open one in official UU Remote and run `uu bind` once",
-                binding.device_name
-            );
-        }
+        let workers = wait_for_available_workers(&cli, store, config, &binding)?;
 
         let mut attach_errors = Vec::new();
-        for worker in workers {
+        for worker in &workers {
             let mut transport = match OfficialAttachPty::attach(
                 cli.path(),
                 &binding.device_identity,
@@ -387,4 +394,108 @@ fn run_remote(config: &Config, cwd: &Path, argv: Vec<OsString>) -> Result<u8> {
             attach_errors.join(" | ")
         )
     }
+}
+
+#[cfg(windows)]
+fn wait_for_available_workers(
+    cli: &OfficialCli,
+    store: &ConfigStore,
+    config: &mut Config,
+    binding: &WorkspaceBinding,
+) -> Result<Vec<SessionInfo>> {
+    let first = discover_inventory(cli)?;
+    validate_bound_device(&first, binding)?;
+
+    let mut seen = first
+        .live_sessions_for(&binding.device_identity)
+        .into_iter()
+        .map(session_instance_key)
+        .collect::<HashSet<_>>();
+    let mut announced_wait = false;
+    let mut snapshot = first;
+
+    loop {
+        validate_bound_device(&snapshot, binding)?;
+
+        let ready = snapshot
+            .eligible_sessions_for(&binding.device_identity)
+            .into_iter()
+            .filter(|session| config.is_session_authorized(session))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !ready.is_empty() {
+            return Ok(ready);
+        }
+
+        let live = snapshot.live_sessions_for(&binding.device_identity);
+        let mut changed = false;
+        for session in live {
+            let key = session_instance_key(session);
+            if !seen.insert(key) {
+                continue;
+            }
+            if session.authorization_fingerprint().is_some() && config.authorize_session(session) {
+                changed = true;
+            }
+        }
+        if changed {
+            store.save(config)?;
+        }
+
+        if !announced_wait {
+            let authorized_live = snapshot
+                .live_sessions_for(&binding.device_identity)
+                .into_iter()
+                .any(|session| config.is_session_authorized(session));
+            if authorized_live {
+                eprintln!(
+                    "All uu-cli Terminals on {} are busy. uu is waiting; open another Terminal in official UU Remote for more capacity. Ctrl+C cancels.",
+                    binding.device_name
+                );
+            } else {
+                eprintln!(
+                    "No uu-cli Terminal is available on {}. Open a new Terminal in official UU Remote now; uu will use it for this request. Ctrl+C cancels.",
+                    binding.device_name
+                );
+            }
+            announced_wait = true;
+        }
+
+        thread::sleep(Duration::from_millis(750));
+        snapshot = discover_inventory(cli)?;
+    }
+}
+
+#[cfg(windows)]
+fn validate_bound_device(snapshot: &InventorySnapshot, binding: &WorkspaceBinding) -> Result<()> {
+    let device = snapshot
+        .devices
+        .iter()
+        .find(|item| item.device.device_identity == binding.device_identity)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "bound target {} is not present in the current UU device list",
+                binding.device_name
+            )
+        })?;
+    if !device.device.is_online {
+        bail!("bound target {} is offline", binding.device_name);
+    }
+    if let Some(error) = &device.session_error {
+        bail!(
+            "cannot query terminal workers on {}: {error}",
+            binding.device_name
+        );
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn session_instance_key(session: &SessionInfo) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}",
+        session.device_identity,
+        session.session_name,
+        session.created_at.as_deref().unwrap_or("")
+    )
 }
