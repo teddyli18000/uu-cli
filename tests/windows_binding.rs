@@ -513,7 +513,7 @@ fn windows_existing_terminal_requires_friendly_name_authorization() {
         .contains("EXISTING_AUTHORIZED_JOB_OK"));
 }
 #[test]
-fn windows_close_cancels_root_without_binding_or_business_dispatch() {
+fn windows_ctrl_c_cancels_root_without_binding_or_business_dispatch() {
     let test = Workspace::new();
     fs::create_dir_all(test._temp.path().join("remote-root")).unwrap();
     assert!(
@@ -540,12 +540,12 @@ fn windows_close_cancels_root_without_binding_or_business_dispatch() {
         }]}),
     );
     wait_for_available_terminal(&test.events, Duration::from_secs(20));
-    drive(&test, running.pid, "Remote root [", "close");
+    drive(&test, running.pid, "Remote root [", "ctrlc");
 
     let output = running.finish(Duration::from_secs(15), &test);
     assert!(
         !output.status.success(),
-        "Esc-only root cancellation should fail the pending command"
+        "Ctrl+C root cancellation should fail the pending command"
     );
     if test.config.exists() {
         let config: Value = serde_json::from_slice(&fs::read(&test.config).unwrap()).unwrap();

@@ -66,6 +66,8 @@ mod windows {
     extern "system" {
         fn AttachConsole(process_id: u32) -> i32;
         fn FreeConsole() -> i32;
+        fn SetConsoleCtrlHandler(handler: *const c_void, add: i32) -> i32;
+        fn GenerateConsoleCtrlEvent(event: u32, process_group: u32) -> i32;
         fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> Handle;
         fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
         fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
@@ -250,6 +252,16 @@ mod windows {
             "enter" => write_keys(input, [(0x0d, 13)]),
             "n" => write_keys(input, [(0x4e, b'n' as u16)]),
             "escape" => write_keys(input, [(0x1b, 27)]),
+            "ctrlc" => {
+                // Only the owned decision console receives this event. Ignore it
+                // in the driver so the setup process can take its default action.
+                if unsafe { SetConsoleCtrlHandler(std::ptr::null(), 1) } == 0
+                    || unsafe { GenerateConsoleCtrlEvent(0, 0) } == 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            }
             "close" => {
                 let window = unsafe { GetConsoleWindow() };
                 unsafe {

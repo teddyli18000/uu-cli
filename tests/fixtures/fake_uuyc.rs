@@ -354,7 +354,32 @@ fn run_attached_terminal(
 
 const DSR_RESPONSE: &[u8] = b"\x1b[1;1R";
 
+#[cfg(windows)]
+fn raw_fixture_console_input() -> io::Result<()> {
+    use std::ffi::c_void;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetStdHandle(kind: u32) -> *mut c_void;
+        fn GetConsoleMode(handle: *mut c_void, mode: *mut u32) -> i32;
+        fn SetConsoleMode(handle: *mut c_void, mode: u32) -> i32;
+    }
+    let input = unsafe { GetStdHandle(-10_i32 as u32) };
+    let mut mode = 0;
+    if unsafe { GetConsoleMode(input, &mut mode) } == 0 {
+        // Direct fixture invocations may use a pipe instead of ConPTY.
+        return Ok(());
+    }
+    // The fake attachment forwards bytes, just like a terminal transport.
+    // Cooked console input would hold LF-terminated caller stdin until Enter.
+    if unsafe { SetConsoleMode(input, mode & !0x0007) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 fn run_git_bash_attached_terminal(identity: AttachIdentity) -> Result<u8, Box<dyn Error>> {
+    #[cfg(windows)]
+    raw_fixture_console_input()?;
     let bash = env::var_os("UU_TEST_BASH")
         .ok_or("UU_TEST_BASH must name the Git Bash executable for bash mode")?;
     let mut command = Command::new(bash);
