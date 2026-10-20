@@ -736,8 +736,7 @@ impl ReadPump {
                     Ok(read) => {
                         if !reserve_read_pump_backlog(&reader_queued_bytes, read) {
                             dropping_output = true;
-                            let error = io::Error::new(
-                                io::ErrorKind::Other,
+                            let error = io::Error::other(
                                 format!(
                                     "terminal output backlog exceeded {READ_PUMP_MAX_BACKLOG} bytes; draining and dropping further output"
                                 ),
