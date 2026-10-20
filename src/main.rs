@@ -1,4 +1,5 @@
 use anyhow::{bail, Context, Result};
+#[cfg(windows)]
 use std::collections::HashSet;
 use std::env;
 use std::ffi::OsString;
