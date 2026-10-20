@@ -182,6 +182,8 @@ pub enum JobInput {
 
 /// Run a framed command while also forwarding input events. Input stays queued
 /// until the remote BEGIN marker proves the command wrapper reached the shell.
+// The production PTY caller is Windows-only; Linux exercises the nonce-specific core.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn run_framed_job_with_input<W, O>(
     reader: &mut ReadPump,
     writer: &mut W,
