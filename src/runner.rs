@@ -317,6 +317,8 @@ where
         && std::env::var_os("UU_TEST_FIXTURE_EVENTS").is_some();
     #[cfg(windows)]
     let mut fixture_trace_remaining = 8192usize;
+    #[cfg(windows)]
+    let mut fixture_input_wait_logged = false;
     loop {
         if child_has_exited()
             .context("failed while checking official UU terminal process")
@@ -350,6 +352,11 @@ where
                             .map_err(JobRunError::Unknown)?;
                     }
                     Ok(JobInput::Bytes(bytes)) if !stdin_eof => {
+                        #[cfg(windows)]
+                        if fixture_trace {
+                            let hex = bytes.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+                            eprintln!("uu-test-job-input-bytes hex={hex}");
+                        }
                         writer
                             .write_all(&bytes)
                             .and_then(|_| writer.flush())
@@ -357,6 +364,8 @@ where
                             .map_err(JobRunError::Unknown)?;
                     }
                     Ok(JobInput::Eof) if !stdin_eof => {
+                        #[cfg(windows)]
+                        if fixture_trace { eprintln!("uu-test-job-input-eof"); }
                         writer
                             .write_all(b"\x04")
                             .and_then(|_| writer.flush())
@@ -365,7 +374,13 @@ where
                         stdin_eof = true;
                     }
                     Ok(JobInput::Bytes(_) | JobInput::Eof) => {}
-                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Timeout) => {
+                        #[cfg(windows)]
+                        if fixture_trace && !fixture_input_wait_logged {
+                            eprintln!("uu-test-job-input-wait decoder_started={}", decoder.started());
+                            fixture_input_wait_logged = true;
+                        }
+                    }
                     Err(RecvTimeoutError::Disconnected) => input_disconnected = true,
                 }
             }
