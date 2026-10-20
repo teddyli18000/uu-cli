@@ -59,6 +59,12 @@ impl TermPty {
             Ok(output) => output,
             Err(error) => {
                 let status = child.try_wait();
+                reader.record_diagnostic_failure(
+                    status
+                        .as_ref()
+                        .ok()
+                        .and_then(|status| status.as_ref().map(|status| status.exit_code())),
+                );
                 let _ = child.kill();
                 drop(writer);
                 drop(master);
@@ -71,6 +77,7 @@ impl TermPty {
         let status = match child.try_wait() {
             Ok(status) => status,
             Err(error) => {
+                reader.record_diagnostic_failure(None);
                 let _ = child.kill();
                 drop(writer);
                 drop(master);
@@ -90,6 +97,7 @@ impl TermPty {
                     Ok(crate::runner::PumpRead::Timeout) => {}
                 }
             }
+            reader.record_diagnostic_failure(Some(status.exit_code()));
             drop(writer);
             drop(master);
             reader.shutdown_and_join();
@@ -100,6 +108,8 @@ impl TermPty {
             }
             bail!("official UU {operation} exited immediately ({status:?}): {text}");
         }
+        reader.set_diagnostic_runner_phase();
+
         Ok(Self {
             child,
             master: Some(master),
@@ -108,21 +118,38 @@ impl TermPty {
         })
     }
 
+    #[cfg(windows)]
+    fn record_failure_diagnostic(&mut self) {
+        let child_exit_code = self
+            .child
+            .try_wait()
+            .ok()
+            .flatten()
+            .map(|status| status.exit_code());
+        self.reader.record_diagnostic_failure(child_exit_code);
+    }
     fn run_job<O: Write + ?Sized>(
         &mut self,
         output: &mut O,
         remote_root: &str,
         shell_command: &str,
     ) -> Result<JobResult, JobRunError> {
-        let child = &mut self.child;
-        run_framed_job_with_child(
-            &mut self.reader,
-            &mut self.writer,
-            output,
-            remote_root,
-            shell_command,
-            || child.try_wait().map(|status| status.is_some()),
-        )
+        let result = {
+            let child = &mut self.child;
+            run_framed_job_with_child(
+                &mut self.reader,
+                &mut self.writer,
+                output,
+                remote_root,
+                shell_command,
+                || child.try_wait().map(|status| status.is_some()),
+            )
+        };
+        #[cfg(windows)]
+        if result.is_err() {
+            self.record_failure_diagnostic();
+        }
+        result
     }
 
     fn run_job_with_input<O: Write + ?Sized>(
@@ -132,27 +159,40 @@ impl TermPty {
         shell_command: &str,
         input: &Receiver<JobInput>,
     ) -> Result<JobResult, JobRunError> {
-        let child = &mut self.child;
-        run_framed_job_with_input_and_child(
-            &mut self.reader,
-            &mut self.writer,
-            output,
-            remote_root,
-            shell_command,
-            input,
-            || child.try_wait().map(|status| status.is_some()),
-        )
+        let result = {
+            let child = &mut self.child;
+            run_framed_job_with_input_and_child(
+                &mut self.reader,
+                &mut self.writer,
+                output,
+                remote_root,
+                shell_command,
+                input,
+                || child.try_wait().map(|status| status.is_some()),
+            )
+        };
+        #[cfg(windows)]
+        if result.is_err() {
+            self.record_failure_diagnostic();
+        }
+        result
     }
 
     fn capture_pwd(&mut self) -> Result<String, JobRunError> {
         let mut output = Vec::new();
-        let child = &mut self.child;
-        let result = run_framed_pwd_probe_with_child(
-            &mut self.reader,
-            &mut self.writer,
-            &mut output,
-            || child.try_wait().map(|status| status.is_some()),
-        )?;
+        let result = {
+            let child = &mut self.child;
+            run_framed_pwd_probe_with_child(&mut self.reader, &mut self.writer, &mut output, || {
+                child.try_wait().map(|status| status.is_some())
+            })
+        };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.record_failure_diagnostic();
+                return Err(error);
+            }
+        };
         if result.exit_code != 0 {
             return Err(JobRunError::Completed(anyhow!(
                 "remote pwd exited with code {}",

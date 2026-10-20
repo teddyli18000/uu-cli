@@ -686,6 +686,82 @@ fn reserve_read_pump_backlog(queued: &AtomicUsize, incoming: usize) -> bool {
     }
 }
 
+#[cfg(any(windows, test))]
+const PTY_RX_DIAGNOSTIC_MAX_BYTES: usize = 8 * 1024;
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy)]
+enum PtyRxPhase {
+    Startup,
+    Runner,
+}
+
+#[cfg(any(windows, test))]
+struct PtyRxDiagnostic {
+    enabled: bool,
+    phase: PtyRxPhase,
+    startup: Vec<u8>,
+    runner: Vec<u8>,
+    captured_bytes: usize,
+    truncated: bool,
+}
+
+#[cfg(any(windows, test))]
+impl PtyRxDiagnostic {
+    fn from_env() -> Self {
+        let test_mode = std::env::var("UU_TEST_MODE").ok();
+        let fixture_events_present = std::env::var_os("UU_TEST_FIXTURE_EVENTS").is_some();
+        Self::with_gate(test_mode.as_deref(), fixture_events_present)
+    }
+
+    fn with_gate(test_mode: Option<&str>, fixture_events_present: bool) -> Self {
+        Self {
+            enabled: test_mode == Some("bash") && fixture_events_present,
+            phase: PtyRxPhase::Startup,
+            startup: Vec::new(),
+            runner: Vec::new(),
+            captured_bytes: 0,
+            truncated: false,
+        }
+    }
+
+    fn set_runner_phase(&mut self) {
+        self.phase = PtyRxPhase::Runner;
+    }
+
+    fn record_rx(&mut self, bytes: &[u8]) {
+        if !self.enabled {
+            return;
+        }
+        let remaining = PTY_RX_DIAGNOSTIC_MAX_BYTES.saturating_sub(self.captured_bytes);
+        let captured = &bytes[..bytes.len().min(remaining)];
+        let target = match self.phase {
+            PtyRxPhase::Startup => &mut self.startup,
+            PtyRxPhase::Runner => &mut self.runner,
+        };
+        target.extend_from_slice(captured);
+        self.captured_bytes += captured.len();
+        self.truncated |= captured.len() < bytes.len();
+    }
+
+    fn failure_line(&self, child_exit_code: Option<u32>) -> Option<String> {
+        if !self.enabled {
+            return None;
+        }
+        let encode_hex = |bytes: &[u8]| {
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        Some(format!(
+            "uu-test-pty-rx startup_hex={} runner_hex={} child_exit_code={child_exit_code:?} truncated={}",
+            encode_hex(&self.startup),
+            encode_hex(&self.runner),
+            self.truncated
+        ))
+    }
+}
 /// Continuously drains the PTY so ConPTY output cannot block terminal input.
 /// Buffered output is bounded; after the limit, output is drained and dropped
 /// and the consumer receives one error. Shutdown is bounded in case an
@@ -700,6 +776,8 @@ pub(crate) struct ReadPump {
     stop: Arc<AtomicBool>,
     #[cfg(any(windows, test))]
     queued_bytes: Arc<AtomicUsize>,
+    #[cfg(any(windows, test))]
+    diagnostic: PtyRxDiagnostic,
     pending: Vec<u8>,
     eof: bool,
 }
@@ -767,6 +845,7 @@ impl ReadPump {
             done_rx: Some(done_rx),
             stop,
             queued_bytes,
+            diagnostic: PtyRxDiagnostic::from_env(),
             pending: Vec::new(),
             eof: false,
         }
@@ -808,6 +887,8 @@ impl ReadPump {
             Ok(Some(bytes)) => {
                 #[cfg(any(windows, test))]
                 self.queued_bytes.fetch_sub(bytes.len(), Ordering::AcqRel);
+                #[cfg(any(windows, test))]
+                self.diagnostic.record_rx(&bytes);
                 Ok(PumpRead::Data(bytes))
             }
             Ok(None) => {
@@ -821,6 +902,17 @@ impl ReadPump {
         }
     }
 
+    #[cfg(any(windows, test))]
+    pub(crate) fn set_diagnostic_runner_phase(&mut self) {
+        self.diagnostic.set_runner_phase();
+    }
+
+    #[cfg(any(windows, test))]
+    pub(crate) fn record_diagnostic_failure(&mut self, child_exit_code: Option<u32>) {
+        if let Some(line) = self.diagnostic.failure_line(child_exit_code) {
+            let _ = writeln!(io::stderr().lock(), "{line}");
+        }
+    }
     #[cfg(any(windows, test))]
     pub(crate) fn shutdown_and_join(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -996,6 +1088,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn pty_rx_diagnostic_is_test_gated_and_bounded() {
+        let mut disabled = PtyRxDiagnostic::with_gate(None, true);
+        disabled.record_rx(b"not logged");
+        assert!(disabled.failure_line(Some(9)).is_none());
+
+        let mut diagnostic = PtyRxDiagnostic::with_gate(Some("bash"), true);
+        diagnostic.record_rx(&vec![b'A'; PTY_RX_DIAGNOSTIC_MAX_BYTES / 2]);
+        diagnostic.set_runner_phase();
+        diagnostic.record_rx(&vec![b'B'; PTY_RX_DIAGNOSTIC_MAX_BYTES]);
+        let line = diagnostic.failure_line(Some(7)).unwrap();
+
+        assert!(line.contains("startup_hex=41"));
+        assert!(line.contains("runner_hex=42"));
+        assert!(line.contains("child_exit_code=Some(7)"));
+        assert!(line.contains("truncated=true"));
+        assert_eq!(diagnostic.captured_bytes, PTY_RX_DIAGNOSTIC_MAX_BYTES);
+    }
     #[test]
     fn read_pump_drains_multiple_chunks_without_event_consumer() {
         let (chunks_tx, chunks_rx) = mpsc::sync_channel(0);
