@@ -177,9 +177,9 @@ Windows workspace key 至少验证：
 
 | 层级 | 已验证范围 | 证据 |
 | --- | --- | --- |
-| 纯逻辑与真实 Bash | 授权实例、设备选择、workspace、shell 隔离、并发锁、崩溃 quarantine、no-replay；真实持久 Bash 的 shell 隔离 | [Actions prepare](https://github.com/teddyli18000/uu-cli/actions/runs/39414188709) |
-| 文件传输 | 真实 Bash 中随机二进制、空文件、Unicode/空格、绝对路径、tilde；中断、unknown、完整性错误时保留目标且不报告成功 | [Actions transfer](https://github.com/teddyli18000/uu-cli/actions/runs/39414182630) |
-| 干净 Windows 安装 | 原生包在另一台全新 hosted VM 安装、真实后台进程唯一性、空闲 CPU、无 UU 诊断、升级、锁定文件失败、PATH、卸载、保留 binding/quarantine；Windows PowerShell 5.1 | [Actions installer](https://github.com/teddyli18000/uu-cli/actions/runs/39414182630) |
+| 纯逻辑与真实 Bash | 授权实例、设备选择、workspace、shell 隔离、并发锁、崩溃 quarantine、no-replay；真实持久 Bash 的 shell 隔离 | [Actions prepare](https://github.com/teddyli18000/uu-cli/actions/runs/39433019505) |
+| 文件传输 | 真实 Bash 中随机二进制、空文件、Unicode/空格、绝对路径、tilde；中断、unknown、完整性错误时保留目标且不报告成功 | [Actions transfer](https://github.com/teddyli18000/uu-cli/actions/runs/39433019285) |
+| 干净 Windows 安装 | 原生包在另一台全新 hosted VM 安装、真实后台进程唯一性、空闲 CPU、无 UU 诊断、升级、锁定文件失败、PATH、卸载、保留 binding/quarantine；Windows PowerShell 5.1 | [Actions installer](https://github.com/teddyli18000/uu-cli/actions/runs/39433019285) |
 | 官方安装发现 | 运行时从官方来源下载，验证 Authenticode/版本/hash，安装后由 uu-cli 发现组件并保留官方“未运行”诊断，卸载完成 | [Official UU smoke](https://github.com/teddyli18000/uu-cli/actions/runs/39412368759) |
 
 官方安装 smoke 使用的 Windows UU 为 `4.43.0.3607`，NetEase 签名有效；安装包 SHA256 为 `F26F84F01551538B9F6996D5CF0CCBF884FB12731903A4F3EFA73BE712C44DA4`。这只证明该次下载、安装、发现与未运行诊断，不证明登录或真实 Terminal attach。
@@ -196,3 +196,5 @@ Windows workspace key 至少验证：
 探针释放自己的本地 attach 子进程，无未完成任务。查询确认原远端实例仍在且 detached，另一未授权运行中 Terminal 的身份/状态未变，探针从未连接它。本轮记录实际 API 输出及时间点；transport 私有 RX/TX 未导出，不把 API 日志称作原始字节日志。
 
 这证明当前模块组成的最小命令闭环。完整 CLI、绑定/授权交互、真实断线恢复、多 worker、真实文件传输及其他 release gate 仍需逐项验收；不据此宣称 v1 完成。ConPTY 输出保持 presentation bytes，不承诺等于远端原始字节流。
+
+命令通道收口提交 8e1d3624d33586608d644ed9aced1f342e4a2afd 的 Windows/Linux fmt、Clippy、tests、release build 全部通过；Windows 四个 CLI integration 包括真实 Git Bash 二进制 put/get 往返均通过。独立 installer/transfer workflow 的三个 job 全通过。此提交相对真机探针引用的 runtime 仅新增测试夹具与断言调整（及文档），不把 fake-provider/Git Bash 结果当作真实 UU 文件通道验收。
