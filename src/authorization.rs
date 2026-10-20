@@ -30,7 +30,10 @@ pub fn classify_session(
         return SessionDecision::Unverifiable;
     };
 
-    if declined_fingerprints.iter().any(|item| item == &fingerprint) {
+    if declined_fingerprints
+        .iter()
+        .any(|item| item == &fingerprint)
+    {
         return SessionDecision::Declined;
     }
     if authorized_fingerprints

@@ -4,9 +4,9 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
 use std::ffi::OsStr;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::io::Read;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -74,20 +74,30 @@ impl OfficialCli {
             .parent()
             .ok_or_else(|| anyhow!("official UU CLI path has no parent directory"))?;
         let mut command = Command::new(&self.path);
-        command.args(args).current_dir(working_dir)
-            .stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .args(args)
+            .current_dir(working_dir)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x0800_0000);
         }
-        let mut child = command.spawn().context("cannot start official UU command-line component")?;
+        let mut child = command
+            .spawn()
+            .context("cannot start official UU command-line component")?;
         let stdout = child.stdout.take().expect("piped stdout");
         let stderr = child.stderr.take().expect("piped stderr");
-        let collect = |stream: Box<dyn Read + Send>| thread::spawn(move || {
-            let mut bytes = Vec::new();
-            stream.take(4 * 1024 * 1024).read_to_end(&mut bytes).map(|_| bytes)
-        });
+        let collect = |stream: Box<dyn Read + Send>| {
+            thread::spawn(move || {
+                let mut bytes = Vec::new();
+                stream
+                    .take(4 * 1024 * 1024)
+                    .read_to_end(&mut bytes)
+                    .map(|_| bytes)
+            })
+        };
         let out = collect(Box::new(stdout));
         let err = collect(Box::new(stderr));
         let deadline = Instant::now() + Duration::from_secs(20);
@@ -98,18 +108,30 @@ impl OfficialCli {
                 Ok(None) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    break Err(anyhow!("official UU discovery command timed out after 20s; no remote job was sent"));
+                    break Err(anyhow!(
+                        "official UU discovery command timed out after 20s; no remote job was sent"
+                    ));
                 }
                 Err(error) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    break Err(anyhow!(error).context("cannot wait for official UU discovery command"));
+                    break Err(
+                        anyhow!(error).context("cannot wait for official UU discovery command")
+                    );
                 }
             }
         };
-        let stdout = out.join().map_err(|_| anyhow!("UU stdout reader failed"))??;
-        let stderr = err.join().map_err(|_| anyhow!("UU stderr reader failed"))??;
-        Ok(Output { status: status?, stdout, stderr })
+        let stdout = out
+            .join()
+            .map_err(|_| anyhow!("UU stdout reader failed"))??;
+        let stderr = err
+            .join()
+            .map_err(|_| anyhow!("UU stderr reader failed"))??;
+        Ok(Output {
+            status: status?,
+            stdout,
+            stderr,
+        })
     }
 }
 

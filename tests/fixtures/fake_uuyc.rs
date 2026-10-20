@@ -68,11 +68,7 @@ fn run() -> Result<u8, Box<dyn Error>> {
         }));
     }
 
-    if args.len() == 5
-        && args[0] == "term"
-        && args[1] == "-d"
-        && args[3] == "attach"
-    {
+    if args.len() == 5 && args[0] == "term" && args[1] == "-d" && args[3] == "attach" {
         return run_attached_terminal();
     }
 
@@ -98,7 +94,9 @@ fn run_attached_terminal() -> Result<u8, Box<dyn Error>> {
     let Some(nonce) = command
         .split_once("UUCLI;")
         .and_then(|(_, rest)| rest.split_once(";BEGIN").map(|(nonce, _)| nonce))
-        .filter(|nonce| !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_alphanumeric()))
+        .filter(|nonce| {
+            !nonce.is_empty() && nonce.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        })
     else {
         return Err("received a terminal line without a valid uu-cli frame".into());
     };

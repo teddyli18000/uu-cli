@@ -1,6 +1,6 @@
-use anyhow::Result;
 #[cfg(not(windows))]
 use anyhow::bail;
+use anyhow::Result;
 use std::env;
 use std::process::ExitCode;
 use uu_cli::cli;
@@ -13,7 +13,10 @@ mod windows_app;
 fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code),
-        Err(error) => { eprintln!("uu: {error:#}"); ExitCode::from(2) }
+        Err(error) => {
+            eprintln!("uu: {error:#}");
+            ExitCode::from(2)
+        }
     }
 }
 
@@ -27,7 +30,9 @@ fn run() -> Result<u8> {
     let command = cli::parse(env::args_os().skip(1)).map_err(anyhow::Error::new)?;
     let store = ConfigStore::from_env()?;
     #[cfg(windows)]
-    { windows_app::execute(command, &store) }
+    {
+        windows_app::execute(command, &store)
+    }
     #[cfg(not(windows))]
     {
         if matches!(command, Command::List) {
@@ -36,10 +41,17 @@ fn run() -> Result<u8> {
             let root = uu_cli::workspace::suggest_root(&cwd)?;
             println!("Workspace  {}", root.display());
             if let Some(binding) = uu_cli::workspace::resolve_binding(&config, &cwd) {
-                println!("Remote     {} · {}", binding.device_name, binding.remote_root);
-            } else { println!("Remote     unbound"); }
+                println!(
+                    "Remote     {} · {}",
+                    binding.device_name, binding.remote_root
+                );
+            } else {
+                println!("Remote     unbound");
+            }
             println!("UU         Windows is required");
             Ok(0)
-        } else { bail!("uu-cli v1 requires Windows and official UU Remote") }
+        } else {
+            bail!("uu-cli v1 requires Windows and official UU Remote")
+        }
     }
 }

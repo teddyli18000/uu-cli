@@ -115,14 +115,22 @@ impl ConfigStore {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .with_context(|| format!("invalid config {}", self.path.display())),
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                let name = self.path.file_name().ok_or_else(|| anyhow!("config path has no filename"))?.to_string_lossy();
+                let name = self
+                    .path
+                    .file_name()
+                    .ok_or_else(|| anyhow!("config path has no filename"))?
+                    .to_string_lossy();
                 let backup = self.path.with_file_name(format!(".{name}.bak"));
                 match fs::read(&backup) {
-                    Ok(bytes) => serde_json::from_slice(&bytes).context("invalid interrupted-save backup"),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Config::default()),
+                    Ok(bytes) => {
+                        serde_json::from_slice(&bytes).context("invalid interrupted-save backup")
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        Ok(Config::default())
+                    }
                     Err(error) => Err(error).context("cannot recover interrupted config save"),
                 }
-            },
+            }
             Err(err) => Err(err).with_context(|| format!("cannot read {}", self.path.display())),
         }
     }
@@ -237,13 +245,23 @@ mod tests {
 
         store
             .update(|config| {
-                config.bindings.push(WorkspaceBinding { local_root: tmp.path().join("one"), device_identity: "device-1".into(), device_name: "Car".into(), remote_root: "/one".into() });
+                config.bindings.push(WorkspaceBinding {
+                    local_root: tmp.path().join("one"),
+                    device_identity: "device-1".into(),
+                    device_name: "Car".into(),
+                    remote_root: "/one".into(),
+                });
                 Ok(())
             })
             .unwrap();
         store
             .update(|config| {
-                config.bindings.push(WorkspaceBinding { local_root: tmp.path().join("two"), device_identity: "device-1".into(), device_name: "Car".into(), remote_root: "/two".into() });
+                config.bindings.push(WorkspaceBinding {
+                    local_root: tmp.path().join("two"),
+                    device_identity: "device-1".into(),
+                    device_name: "Car".into(),
+                    remote_root: "/two".into(),
+                });
                 Ok(())
             })
             .unwrap();

@@ -26,8 +26,7 @@ pub struct TransferReceipt {
 }
 
 /// Runs one isolated remote job and writes its merged output to the supplied writer.
-pub type JobExecutor<'a> =
-    dyn FnMut(&str, &mut dyn Write) -> Result<JobResult, JobRunError> + 'a;
+pub type JobExecutor<'a> = dyn FnMut(&str, &mut dyn Write) -> Result<JobResult, JobRunError> + 'a;
 
 /// Uploads a local file to the remote workspace.
 ///
@@ -137,11 +136,7 @@ pub fn get(
     let (expected_size, expected_hash) = parse_metadata(&metadata.bytes)?;
 
     let mut temporary = LocalTemp::create(local_path)?;
-    let stream_command = remote_command(
-        remote_path,
-        &nonce,
-        r#"base64 "$uu_cli_dest""#,
-    );
+    let stream_command = remote_command(remote_path, &nonce, r#"base64 "$uu_cli_dest""#);
     let (actual_size, actual_hash) = {
         let mut decoder = Base64Decoder::new(&mut temporary.file);
         let result = executor(&stream_command, &mut decoder)?;
@@ -153,7 +148,9 @@ pub fn get(
         }
         decoder.finish().map_err(|error| match error {
             DecodeError::Invalid(message) => completed(message),
-            DecodeError::Local(error) => preparation(format!("cannot write local temporary file: {error}")),
+            DecodeError::Local(error) => {
+                preparation(format!("cannot write local temporary file: {error}"))
+            }
         })?
     };
     if actual_size != expected_size || actual_hash != expected_hash {
@@ -167,8 +164,11 @@ pub fn get(
         .flush()
         .and_then(|_| temporary.file.sync_all())
         .map_err(|error| preparation(format!("cannot flush local temporary file: {error}")))?;
-    fs::rename(&temporary.path, local_path)
-        .map_err(|error| preparation(format!("cannot atomically replace local destination: {error}")))?;
+    fs::rename(&temporary.path, local_path).map_err(|error| {
+        preparation(format!(
+            "cannot atomically replace local destination: {error}"
+        ))
+    })?;
     temporary.keep = true;
 
     Ok(TransferReceipt {
@@ -272,8 +272,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut output = String::with_capacity(((bytes.len() + 2) / 3) * 4);
     for chunk in bytes.chunks(3) {
         let first = chunk[0];

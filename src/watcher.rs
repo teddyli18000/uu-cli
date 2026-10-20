@@ -60,8 +60,9 @@ fn try_lock_file(path: &Path) -> Result<Option<File>> {
     match FileExt::try_lock_exclusive(&file) {
         Ok(()) => Ok(Some(file)),
         Err(error) if is_lock_contended(&error) => Ok(None),
-        Err(error) => Err(error)
-            .with_context(|| format!("cannot acquire runtime lock {}", path.display())),
+        Err(error) => {
+            Err(error).with_context(|| format!("cannot acquire runtime lock {}", path.display()))
+        }
     }
 }
 
@@ -338,7 +339,6 @@ mod windows_process {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::{runtime_dir, try_interaction_lock, try_lock_file};
@@ -351,7 +351,9 @@ mod tests {
         let temp = tempdir().unwrap();
         let config_path = temp.path().join("config.json");
         let lock_path = runtime_dir(&config_path).join("watcher.lock");
-        let lock = try_lock_file(&lock_path).unwrap().expect("acquire watcher lock");
+        let lock = try_lock_file(&lock_path)
+            .unwrap()
+            .expect("acquire watcher lock");
 
         let status = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "watcher::tests::runtime_lock_child_probe"])
@@ -395,9 +397,6 @@ mod tests {
             Path::new(r"C:\Tools\uu.exe")
         );
         let normal = Path::new(r"C:\Tools\UU.EXE");
-        assert_eq!(
-            super::authorization_executable(normal).unwrap(),
-            normal
-        );
+        assert_eq!(super::authorization_executable(normal).unwrap(), normal);
     }
 }
