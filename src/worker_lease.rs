@@ -31,8 +31,12 @@ impl WorkerLease {
             .authorization_fingerprint()
             .ok_or_else(|| anyhow!("terminal session has no stable instance identity"))?;
         let runtime_dir = runtime_dir(config_path)?;
-        fs::create_dir_all(&runtime_dir)
-            .with_context(|| format!("cannot create worker state directory {}", runtime_dir.display()))?;
+        fs::create_dir_all(&runtime_dir).with_context(|| {
+            format!(
+                "cannot create worker state directory {}",
+                runtime_dir.display()
+            )
+        })?;
 
         let key = fingerprint_key(&fingerprint);
         let lock_path = runtime_dir.join(format!("{key}.lock"));
