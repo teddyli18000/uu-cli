@@ -4,6 +4,20 @@
 
 `uu-cli` 复用 **Windows 本地已经运行、已经登录的网易 UU 远程**。它不重新实现登录，不保存账号凭据，也不要求 Codex 学一套新的远程工具。
 
+## 当前状态与安装
+
+当前分支提供 Windows 原生候选实现；真实登录后的 UU Terminal、远端设备以及非开发机端到端验收仍属于 `requires-real-uu`，通过 hosted CI 不代表 v1 已完成。
+
+从 [Installer and transfer validation](https://github.com/teddyli18000/uu-cli/actions/workflows/installer.yml) 的成功运行下载 `uu-cli-windows-package` artifact，解压内层 ZIP 后，在 Windows 自带 PowerShell 中运行：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1
+```
+
+安装到当前用户的 `%LOCALAPPDATA%\Programs\uu-cli`，添加用户 PATH 和隐藏 watcher 的用户启动项。无需 Rust、Python、Node、WSL 或 PowerShell 7；新终端会收到更新后的 PATH。卸载运行同包中的 `installer\uninstall.ps1`。安装、升级和卸载不修改官方 UU；卸载保留用户绑定及 unknown worker 安全记录，避免重装后误复用可能仍忙的 Terminal。
+
+Agent 使用说明随包放在 `skills/uu-cli/SKILL.md`。
+
 ## 日常使用
 
 对人和 Agent 来说，远程执行只多一个 `uu` 前缀：
@@ -59,11 +73,11 @@ uu git status
 
 - Git 仓库默认使用 Git root；
 - 只有一台明确设备时尽量自动完成；
-- 多台设备同时有 Terminal 时，弹一个简单 PowerShell 选择器；
+- 多台设备同时有 Terminal 时，弹一个简单 独立 console 选择器；
 - 用户只选择友好设备名，不接触裸 `deviceId`；
 - binding 完成后，原命令继续执行，不要求重跑。
 
-如果后续新打开 Terminal，`uu-cli` 应自动发现。归属明确时尽量自动处理；有歧义或无法判断是否供 uu-cli 使用时，再弹一个几秒内能完成的 PowerShell 选择。
+等待中的请求会明确提示新开的匹配 Terminal 将用于本次请求，打开后不会重复授权。没有等待请求时，新 Terminal 需要一次短授权：Enter 交给 uu-cli，N/Esc/关闭保留手动使用。授权绑定到具体实例，重建的同名 Terminal 不继承旧授权。
 
 ## 多个 Terminal
 
@@ -96,7 +110,7 @@ uu python main.py
 uu "cd src && source .venv/bin/activate && python main.py"
 ```
 
-每条普通 `uu` job 都从当前 workspace 绑定的 `remote root` 开始。后续 Codex Skill 会明确写出这条规则。
+每条普通 `uu` job 都从当前 workspace 绑定的 `remote root` 开始。随包的 Codex Skill 明确写出这条规则。
 
 ## 不干扰官方 UU
 
@@ -130,7 +144,7 @@ uu "cd src && source .venv/bin/activate && python main.py"
 - 自动发现新开的官方 Terminal；
 - 空闲时 CPU 接近 0，不高频轮询；
 - 无 tray、额外 GUI 或常驻可见 console；
-- 只有真正需要用户选择时才弹短 PowerShell 交互；
+- 只有真正需要用户选择时才弹短 console 交互；
 - 用户不需要手工管理第二个服务；
 - 不拖累 UU 的启动、退出和升级。
 
@@ -177,3 +191,12 @@ https://uuyc.163.com/download/
 - [ROADMAP.md](ROADMAP.md)：阶段目标与验收
 - [AGENTS.md](AGENTS.md)：给实现 Agent 的硬规则
 - `docs/`、`proto/terminal.proto`：Windows UU terminal 互操作研究
+
+
+## 当前实现约束
+
+远端使用兼容 POSIX 的交互 shell；普通 job 在 subshell 中从 remote root 开始。PTY 将 stdout/stderr 合流，uu 直接转发合流输出，返回远端 exit code。命令一旦发送，断连只会报告 unknown/may-still-be-running 并隔离 worker，不会换 Terminal 重放。需要继续使用时，在官方 UU 中打开新 Terminal。
+
+文件通道通过同一已授权 worker 传输 base64，远端需要 `base64`、`wc`、`tr`、`cut`、`sha256sum` 和 `mv`。上传按 768 字节分块，适合可靠传输，当前大文件吞吐尚未实机测量；下载流式解码。两端核对字节数和 SHA-256 后才替换目标。失败上传可能留下相邻的 `.uu-cli-*.part` 文件，不会作为成功目标发布。
+
+默认状态放在 `%LOCALAPPDATA%\uu-cli`，不写入 workspace。后台仅做发现，不承载 job；当前用低频进程探测和 20 秒有 UU / 60 秒无 UU 的发现间隔，前台等待 Terminal 时每 2 秒检查。此间隔是实现配置，空闲 CPU 和官方互操作仍需真实环境测量。

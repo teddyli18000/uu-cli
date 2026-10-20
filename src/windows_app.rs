@@ -12,7 +12,7 @@ use std::sync::{
 };
 use std::thread;
 use std::time::Duration;
-use uu_cli::authorization::{classify_session, fingerprint_baseline, SessionDecision};
+use uu_cli::authorization::{binding_candidates, classify_session, fingerprint_baseline, SessionDecision};
 use uu_cli::cli::Command;
 use uu_cli::config::ConfigStore;
 use uu_cli::inventory::{discover_inventory, is_eligible_session, InventorySnapshot};
@@ -63,6 +63,8 @@ pub fn execute(command: Command, store: &ConfigStore) -> Result<u8> {
         return Ok(0);
     }
     if resolve_binding(&store.load()?, &cwd).is_none() {
+        // Fail with a persistent caller diagnostic before opening a decision window.
+        OfficialCli::locate()?.list_devices()?;
         launch_console("__setup", None)?;
     }
     let binding = resolve_binding(&store.load()?, &cwd)
@@ -189,13 +191,18 @@ fn interaction_lock(store: &ConfigStore) -> Result<File> {
     }
 }
 
-fn sessions(snapshot: &InventorySnapshot) -> Vec<SessionInfo> {
-    snapshot
-        .eligible_sessions()
-        .into_iter()
-        .filter(|session| session.authorization_fingerprint().is_some())
-        .cloned()
-        .collect()
+fn sessions(snapshot: &InventorySnapshot) -> Result<Vec<SessionInfo>> {
+    let eligible: Vec<_> = snapshot.eligible_sessions().into_iter().cloned().collect();
+    check_instance_support(&eligible)?;
+    Ok(eligible.into_iter().filter(|s| s.authorization_fingerprint().is_some()).collect())
+}
+
+fn check_instance_support(current: &[SessionInfo]) -> Result<()> {
+    let eligible: Vec<_> = current.iter().filter(|s| is_eligible_session(s)).collect();
+    if !eligible.is_empty() && eligible.iter().all(|s| s.authorization_fingerprint().is_none()) {
+        bail!("official UU Terminal instance identity is unavailable (createdAt/device/name); this client cannot safely authorize these Terminals");
+    }
+    Ok(())
 }
 
 fn prompt(label: &str) -> Result<String> {
@@ -237,7 +244,7 @@ fn authorize(store: &ConfigStore, device: Option<&str>) -> Result<()> {
     };
     let cli = OfficialCli::locate()?;
     let snapshot = discover_inventory(&cli)?;
-    for session in sessions(&snapshot)
+    for session in sessions(&snapshot)?
         .into_iter()
         .filter(|s| device.map_or(true, |id| s.device_identity == id))
     {
@@ -272,8 +279,7 @@ fn choose_device(candidates: &[SessionInfo]) -> Result<String> {
     }
     println!("请选择远端设备：");
     for (index, (_, name)) in devices.iter().enumerate() {
-        // Duplicate friendly names remain separate exact-identity choices; no
-        // fuzzy name matching. Ordinal is transient human selection only.
+        // Ordinals are used only for this explicit human decision.
         println!(
             "  {}) {}",
             index + 1,
@@ -305,42 +311,16 @@ fn setup(store: &ConfigStore, force: bool) -> Result<()> {
         return Ok(());
     }
     let cli = OfficialCli::locate()?;
-    let initial = sessions(&discover_inventory(&cli)?);
+    let initial = sessions(&discover_inventory(&cli)?)?;
     let mut baseline = fingerprint_baseline(&initial);
     let mut waiting = false;
     let (device_id, device_name) = loop {
         let snapshot = discover_inventory(&cli)?;
-        let current = sessions(&snapshot);
+        let current = sessions(&snapshot)?;
         let config = store.load()?;
-        let authorized: Vec<_> = current
-            .iter()
-            .filter(|s| config.is_session_authorized(s))
-            .cloned()
-            .collect();
-        let newly_opened: Vec<_> = current
-            .iter()
-            .filter(|s| {
-                classify_session(
-                    s,
-                    &config.authorized_workers,
-                    &config.declined_workers,
-                    Some(&baseline),
-                ) == SessionDecision::AutoAuthorizeForPendingRequest
-            })
-            .cloned()
-            .collect();
-        let undecided: Vec<_> = current
-            .iter()
-            .filter(|s| !config.is_session_authorized(s) && !config.is_session_declined(s))
-            .cloned()
-            .collect();
-        let (candidates, opened_for_request) = if !authorized.is_empty() {
-            (authorized, false)
-        } else if waiting && !newly_opened.is_empty() {
-            (newly_opened, true)
-        } else if !waiting && !undecided.is_empty() {
-            (undecided, false)
-        } else {
+        let candidates = binding_candidates(&current, &config.authorized_workers,
+            &config.declined_workers, waiting.then_some(&baseline));
+        if candidates.is_empty() {
             if !waiting {
                 println!("请在官方 UU 中打开目标设备的 Terminal；接下来打开的 Terminal 将用于本次请求。Ctrl+C取消。");
                 baseline = fingerprint_baseline(&current);
@@ -348,26 +328,25 @@ fn setup(store: &ConfigStore, force: bool) -> Result<()> {
             }
             thread::sleep(Duration::from_secs(2));
             continue;
-        };
+        }
         let selected = choose_device(&candidates)?;
         let selected_sessions: Vec<_> = candidates
             .iter()
             .filter(|s| s.device_identity == selected)
             .collect();
         let name = selected_sessions[0].device_name.clone();
-        let mut accepted = false;
+        let mut accepted = selected_sessions.iter().any(|s| config.is_session_authorized(s));
         for session in selected_sessions {
             if config.is_session_authorized(session) {
-                accepted = true;
-                break;
+                continue;
             }
-            if opened_for_request {
+            if waiting && classify_session(session, &config.authorized_workers, &config.declined_workers, Some(&baseline)) == SessionDecision::AutoAuthorizeForPendingRequest {
                 store.update(|config| {
                     config.authorize_session(session);
                     Ok(())
                 })?;
                 accepted = true;
-            } else if accept_one(store, session)? {
+            } else if !accepted && accept_one(store, session)? {
                 accepted = true;
             }
         }
@@ -493,6 +472,7 @@ fn with_worker<T>(
         let current = cli.list_sessions(&binding.device_identity).context(
             "cannot discover Terminal channel; open a Terminal in official UU if needed",
         )?;
+        check_instance_support(&current)?;
         let config = store.load()?;
         for session in current
             .iter()

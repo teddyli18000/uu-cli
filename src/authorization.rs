@@ -50,6 +50,22 @@ pub fn classify_session(
     SessionDecision::Prompt
 }
 
+/// Candidates for a new workspace binding, across all eligible devices.
+/// Existing authorization permits use, but never gives that device priority over
+/// another device the human may intend to bind.
+pub fn binding_candidates(
+    sessions: &[SessionInfo],
+    authorized: &[String],
+    declined: &[String],
+    waiting: Option<&HashSet<String>>,
+) -> Vec<SessionInfo> {
+    sessions.iter().filter(|session| match classify_session(session, authorized, declined, waiting) {
+        SessionDecision::Authorized | SessionDecision::AutoAuthorizeForPendingRequest => true,
+        SessionDecision::Prompt => waiting.is_none(),
+        SessionDecision::Declined | SessionDecision::Unverifiable => false,
+    }).cloned().collect()
+}
+
 /// Select a newly opened instance for a request that already told the user to
 /// open a matching terminal. The caller must first filter to eligible sessions
 /// and, for an existing binding, to its bound device. Multiple candidates stay
@@ -196,4 +212,24 @@ mod tests {
             WaitSelection::Unique(_)
         ));
     }
+    #[test]
+    fn prior_authorization_does_not_hide_another_binding_device() {
+        let old = session("old", Some("old"));
+        let mut other = session("new", Some("new"));
+        other.device_identity = "other-device".into();
+        let authorized = vec![old.authorization_fingerprint().unwrap()];
+        let current = vec![old.clone(), other.clone()];
+        assert_eq!(binding_candidates(&current, &authorized, &[], None), current);
+        let baseline = fingerprint_baseline([&old]);
+        assert_eq!(binding_candidates(&current, &authorized, &[], Some(&baseline)), current);
+    }
+
+    #[test]
+    fn binding_candidates_preserve_decline_and_instance_requirements() {
+        let declined = session("manual", Some("manual"));
+        let unknown = session("unknown", None);
+        let decisions = vec![declined.authorization_fingerprint().unwrap()];
+        assert!(binding_candidates(&[declined, unknown], &[], &decisions, None).is_empty());
+    }
+
 }

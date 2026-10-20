@@ -82,7 +82,6 @@ fn two_processes_cannot_run_on_one_terminal() {
         for line in BufReader::new(stdout).lines() {
             if line.unwrap().contains("LEASE_READY") {
                 let _ = sender.send(());
-                break;
             }
         }
     });
