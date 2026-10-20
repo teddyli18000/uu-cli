@@ -15,7 +15,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const UPLOAD_CHUNK_SIZE: usize = 768;
-const IO_BUFFER_SIZE: usize = 64 * 1024;
 static NEXT_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// A successful transfer, including the bytes and digest verified on both ends.
@@ -49,7 +48,11 @@ pub fn put(
     let create_command = remote_command(
         remote_path,
         &nonce,
-        r#"test ! -d "$uu_cli_dest" || { echo "uu-cli: destination is a directory" >&2; exit 1; }; (umask 077; set -C; : > "$uu_cli_tmp")"#,
+        r#"if [ -d "$uu_cli_dest" ]; then
+    echo "uu-cli: destination is a directory" >&2
+    exit 1
+fi
+(umask 077; set -C; : > "$uu_cli_tmp")"#,
     );
     run_remote(executor, &create_command, &mut io::sink())?;
 
@@ -75,7 +78,7 @@ pub fn put(
                 &mut hasher,
                 &mut size,
             )?;
-            pending.drain(..UPLOAD_CHUNK_SIZE);
+            pending.drain(..UPLOAD_CHUNK_SIZE).for_each(drop);
         }
     }
     if !pending.is_empty() {
@@ -89,12 +92,27 @@ pub fn put(
         )?;
     }
 
-    let digest = hex_digest(hasher.finalize().as_slice());
+    let digest_bytes = hasher.finalize();
+    let digest = hex_digest(&digest_bytes);
     let verify_and_publish = remote_command(
         remote_path,
         &nonce,
         &format!(
-            r#"actual_size=$(wc -c < "$uu_cli_tmp" | tr -d '[:space:]'); [ "$actual_size" = '{}' ] || {{ echo "uu-cli: remote byte count mismatch" >&2; exit 1; }}; actual_hash=$(sha256sum "$uu_cli_tmp" | cut -d ' ' -f 1); [ "$actual_hash" = '{}' ] || {{ echo "uu-cli: remote SHA-256 mismatch" >&2; exit 1; }}; test ! -d "$uu_cli_dest" || {{ echo "uu-cli: destination became a directory" >&2; exit 1; }}; mv -f "$uu_cli_tmp" "$uu_cli_dest""#,
+            r#"actual_size=$(wc -c < "$uu_cli_tmp" | tr -d '[:space:]')
+if [ "$actual_size" != '{}' ]; then
+    echo "uu-cli: remote byte count mismatch" >&2
+    exit 1
+fi
+actual_hash=$(sha256sum < "$uu_cli_tmp" | cut -d ' ' -f 1)
+if [ "$actual_hash" != '{}' ]; then
+    echo "uu-cli: remote SHA-256 mismatch" >&2
+    exit 1
+fi
+if [ -d "$uu_cli_dest" ]; then
+    echo "uu-cli: destination became a directory" >&2
+    exit 1
+fi
+mv -f "$uu_cli_tmp" "$uu_cli_dest""#,
             size, digest
         ),
     );
@@ -127,7 +145,13 @@ pub fn get(
     let metadata_command = remote_command(
         remote_path,
         &nonce,
-        r#"test -f "$uu_cli_dest" || { echo "uu-cli: remote source is not a regular file" >&2; exit 1; }; remote_size=$(wc -c < "$uu_cli_dest" | tr -d '[:space:]'); remote_hash=$(sha256sum "$uu_cli_dest" | cut -d ' ' -f 1); printf '%s %s\n' "$remote_size" "$remote_hash""#,
+        r#"if [ ! -f "$uu_cli_dest" ]; then
+    echo "uu-cli: remote source is not a regular file" >&2
+    exit 1
+fi
+remote_size=$(wc -c < "$uu_cli_dest" | tr -d '[:space:]')
+remote_hash=$(sha256sum < "$uu_cli_dest" | cut -d ' ' -f 1)
+printf '%s %s\n' "$remote_size" "$remote_hash""#,
     );
     let mut metadata = BoundedWriter::new(256);
     run_remote(executor, &metadata_command, &mut metadata)?;
@@ -153,12 +177,14 @@ pub fn get(
         }
         decoder.finish().map_err(|error| match error {
             DecodeError::Invalid(message) => completed(message),
-            DecodeError::Local(error) => preparation(format!("cannot write local temporary file: {error}")),
+            DecodeError::Local(error) => {
+                preparation(format!("cannot write local temporary file: {error}"))
+            }
         })?
     };
     if actual_size != expected_size || actual_hash != expected_hash {
         return Err(completed(format!(
-            "download integrity check failed (expected {expected_size} bytes / {expected_hash}, received {actual_size} bytes / {actual_hash})"
+            "download integrity check failed: expected {expected_size}, got {actual_size} bytes"
         )));
     }
 
@@ -168,7 +194,11 @@ pub fn get(
         .and_then(|_| temporary.file.sync_all())
         .map_err(|error| preparation(format!("cannot flush local temporary file: {error}")))?;
     fs::rename(&temporary.path, local_path)
-        .map_err(|error| preparation(format!("cannot atomically replace local destination: {error}")))?;
+        .map_err(|error| {
+            preparation(format!(
+                "cannot atomically replace local destination: {error}"
+            ))
+        })?;
     temporary.keep = true;
 
     Ok(TransferReceipt {
@@ -220,7 +250,33 @@ fn run_remote(
 fn remote_command(remote_path: &str, nonce: &str, body: &str) -> String {
     let quoted_path = shell_quote(remote_path);
     format!(
-        r#"set -eu; uu_cli_remote_input={quoted_path}; case "$uu_cli_remote_input" in '~') [ -n "$HOME" ] || {{ echo "uu-cli: remote HOME is unset" >&2; exit 1; }}; uu_cli_dest="$HOME";; '~/'*) [ -n "$HOME" ] || {{ echo "uu-cli: remote HOME is unset" >&2; exit 1; }}; uu_cli_rest=$(printf '%s' "$uu_cli_remote_input" | cut -c 3-); uu_cli_dest="$HOME/$uu_cli_rest";; /*) uu_cli_dest="$uu_cli_remote_input";; *) uu_cli_dest="$PWD/$uu_cli_remote_input";; esac; uu_cli_tmp="$uu_cli_dest.uu-cli-{nonce}.part"; {body}"#
+        r#"set -eu
+uu_cli_remote_input={quoted_path}
+case "$uu_cli_remote_input" in
+    '~')
+        if [ -z "$HOME" ]; then
+            echo "uu-cli: remote HOME is unset" >&2
+            exit 1
+        fi
+        uu_cli_dest="$HOME"
+        ;;
+    '~/'*)
+        if [ -z "$HOME" ]; then
+            echo "uu-cli: remote HOME is unset" >&2
+            exit 1
+        fi
+        uu_cli_rest=$(printf '%s' "$uu_cli_remote_input" | cut -c 3-)
+        uu_cli_dest="$HOME/$uu_cli_rest"
+        ;;
+    /*)
+        uu_cli_dest="$uu_cli_remote_input"
+        ;;
+    *)
+        uu_cli_dest="$PWD/$uu_cli_remote_input"
+        ;;
+esac
+uu_cli_tmp="$uu_cli_dest.uu-cli-{nonce}.part"
+{body}"#
     )
 }
 
@@ -274,7 +330,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 fn base64_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(((bytes.len() + 2) / 3) * 4);
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let first = chunk[0];
         let second = chunk.get(1).copied().unwrap_or(0);
@@ -418,7 +474,8 @@ impl<'a> Base64Decoder<'a> {
                 "remote base64 stream ended mid-quantum".to_owned(),
             ));
         }
-        Ok((self.size, hex_digest(self.hasher.finalize().as_slice())))
+        let digest = self.hasher.finalize();
+        Ok((self.size, hex_digest(&digest)))
     }
 
     fn accept(&mut self, byte: u8) {
