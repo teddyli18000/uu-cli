@@ -37,7 +37,7 @@ impl ConfigStore {
 
     pub fn load(&self) -> Result<Config> {
         let lock = self.open_lock()?;
-        lock.lock_shared()
+        FileExt::lock_shared(&lock)
             .context("cannot lock uu-cli config for reading")?;
         let result = self.load_unlocked();
         let unlock = FileExt::unlock(&lock).context("cannot unlock uu-cli config");
@@ -50,7 +50,7 @@ impl ConfigStore {
 
     pub fn save(&self, config: &Config) -> Result<()> {
         let lock = self.open_lock()?;
-        lock.lock_exclusive()
+        FileExt::lock_exclusive(&lock)
             .context("cannot lock uu-cli config for writing")?;
         let result = self.save_unlocked(config);
         let unlock = FileExt::unlock(&lock).context("cannot unlock uu-cli config");
@@ -70,7 +70,7 @@ impl ConfigStore {
         F: FnOnce(&mut Config) -> Result<()>,
     {
         let lock = self.open_lock()?;
-        lock.lock_exclusive()
+        FileExt::lock_exclusive(&lock)
             .context("cannot lock uu-cli config for update")?;
 
         let result = (|| {

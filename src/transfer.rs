@@ -15,7 +15,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const UPLOAD_CHUNK_SIZE: usize = 768;
-const IO_BUFFER_SIZE: usize = 64 * 1024;
 static NEXT_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// A successful transfer, including the bytes and digest verified on both ends.
@@ -273,7 +272,7 @@ fn hex_digest(bytes: &[u8]) -> String {
 
 fn base64_encode(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(((bytes.len() + 2) / 3) * 4);
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let first = chunk[0];
         let second = chunk.get(1).copied().unwrap_or(0);
