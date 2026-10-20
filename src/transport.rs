@@ -7,7 +7,7 @@ use crate::runner::{
 use anyhow::{anyhow, bail, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::ffi::OsString;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::Path;
 use std::sync::mpsc::Receiver;
 use std::thread;
@@ -95,7 +95,7 @@ impl TermPty {
         })
     }
 
-    :
+    fn run_job<O: Write + ?Sized>(
         &mut self,
         output: &mut O,
         remote_root: &str,
@@ -110,7 +110,7 @@ impl TermPty {
         )
     }
 
-    :
+    fn run_job_with_input<O: Write + ?Sized>(
         &mut self,
         output: &mut O,
         remote_root: &str,
@@ -190,7 +190,7 @@ impl OfficialAttachPty {
         self.inner.child.try_wait().map(|status| status.is_some())
     }
 
-    pub :
+    pub fn run_job<O: Write + ?Sized>(
         &mut self,
         output: &mut O,
         remote_root: &str,
@@ -199,7 +199,7 @@ impl OfficialAttachPty {
         self.inner.run_job(output, remote_root, shell_command)
     }
 
-    pub :
+    pub fn run_job_with_input<O: Write + ?Sized>(
         &mut self,
         output: &mut O,
         remote_root: &str,
@@ -238,7 +238,7 @@ mod tests {
     use super::*;
     use crate::runner::PumpRead;
     use portable_pty::CommandBuilder;
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::time::{Duration, Instant};
 
     const PROBE: &[u8] =
