@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use std::ffi::OsString;
 
 const OSC_PREFIX: &[u8] = b"\x1b]7770;UUCLI;";
@@ -18,9 +18,9 @@ pub fn argv_to_shell(argv: &[OsString]) -> Result<String> {
     let args = argv
         .iter()
         .map(|arg| {
-            arg.to_str()
-                .map(str::to_owned)
-                .ok_or_else(|| anyhow!("remote command contains text that cannot be represented as UTF-8"))
+            arg.to_str().map(str::to_owned).ok_or_else(|| {
+                anyhow!("remote command contains text that cannot be represented as UTF-8")
+            })
         })
         .collect::<Result<Vec<_>>>()?;
 
@@ -112,9 +112,9 @@ impl CompletionDecoder {
                 let status_end = status_start + relative_end;
                 let status_text = std::str::from_utf8(&self.pending[status_start..status_end])
                     .context("completion marker contains a non-UTF-8 exit status")?;
-                let status = status_text
-                    .parse::<i32>()
-                    .map_err(|_| anyhow!("invalid exit status in completion marker: {status_text}"))?;
+                let status = status_text.parse::<i32>().map_err(|_| {
+                    anyhow!("invalid exit status in completion marker: {status_text}")
+                })?;
                 let output = self.pending[..start].to_vec();
                 self.pending.clear();
                 self.completed = Some(status);
@@ -139,19 +139,6 @@ impl CompletionDecoder {
     /// marker. Callers should then report the job state as unknown, never replay.
     pub fn finish_without_marker(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.pending)
-    }
-}
-
-trait ResultContext<T> {
-    fn context(self, message: &'static str) -> Result<T>;
-}
-
-impl<T, E> ResultContext<T> for std::result::Result<T, E>
-where
-    E: std::error::Error + Send + Sync + 'static,
-{
-    fn context(self, message: &'static str) -> Result<T> {
-        self.map_err(|error| anyhow!("{message}: {error}"))
     }
 }
 
