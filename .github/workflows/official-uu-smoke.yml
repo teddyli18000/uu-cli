@@ -7,6 +7,7 @@ on:
     paths:
       - '.github/workflows/official-uu-smoke.yml'
       - 'scripts/official-uu-smoke.ps1'
+      - 'scripts/inspect-official-uu.ps1'
   workflow_dispatch:
 
 permissions:
@@ -15,13 +16,16 @@ permissions:
 jobs:
   probe-official-download:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - name: Discover and verify official Windows installer
         id: probe
         shell: pwsh
         run: ./scripts/official-uu-smoke.ps1
+      - name: Inspect verified package and embedded CLI
+        shell: pwsh
+        run: ./scripts/inspect-official-uu.ps1
       - name: Summary
         if: always()
         shell: pwsh
@@ -30,4 +34,6 @@ jobs:
           "- Source page: https://uuyc.163.com/download/" >> $env:GITHUB_STEP_SUMMARY
           "- Installer URL: ${{ steps.probe.outputs.installer_url }}" >> $env:GITHUB_STEP_SUMMARY
           "- Version: ${{ steps.probe.outputs.version }}" >> $env:GITHUB_STEP_SUMMARY
+          "- Product: ${{ steps.probe.outputs.product }}" >> $env:GITHUB_STEP_SUMMARY
+          "- Signer: ${{ steps.probe.outputs.signer }}" >> $env:GITHUB_STEP_SUMMARY
           "- SHA256: ${{ steps.probe.outputs.sha256 }}" >> $env:GITHUB_STEP_SUMMARY
