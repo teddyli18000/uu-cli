@@ -132,7 +132,7 @@ fn rejects_missing_repeated_corrupt_records_and_bad_hash_or_length() {
     assert_rejected(bad_length.as_bytes());
 
     let footer = valid.rfind("Z:").unwrap();
-    assert_rejected(valid[..footer].as_bytes());
+    assert_rejected(&valid.as_bytes()[..footer]);
 }
 
 #[test]
