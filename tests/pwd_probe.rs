@@ -32,7 +32,10 @@ fn pwd_output(path_bytes: &[u8]) -> Vec<u8> {
 }
 
 fn assert_rejected(output: &[u8]) {
-    assert!(decode_pwd_output(output).is_err(), "accepted malformed PWD1 envelope");
+    assert!(
+        decode_pwd_output(output).is_err(),
+        "accepted malformed PWD1 envelope"
+    );
 }
 
 #[test]
@@ -67,6 +70,20 @@ fn accepts_observed_cursor_vt_only_between_records() {
 }
 
 #[test]
+fn accepts_cursor_separated_records_without_crlf_and_footer_at_eof() {
+    let rows = String::from_utf8(envelope(b"/\n")).unwrap();
+    let rows = rows
+        .split("\r\n")
+        .filter(|row| !row.is_empty())
+        .collect::<Vec<_>>();
+    let fixture = format!(
+        "{}\x1b[2;1H{}\x1b[3;1H{}\x1b[4;1H",
+        rows[0], rows[1], rows[2]
+    );
+    assert_eq!(decode_pwd_output(fixture.as_bytes()).unwrap(), "/");
+}
+
+#[test]
 fn rejects_missing_repeated_corrupt_records_and_bad_hash_or_length() {
     let path = format!("/{}", "x".repeat(96));
     let valid = String::from_utf8(envelope(&pwd_output(path.as_bytes()))).unwrap();
@@ -78,7 +95,12 @@ fn rejects_missing_repeated_corrupt_records_and_bad_hash_or_length() {
     assert_rejected(missing_first.as_bytes());
 
     let first_record = &valid[header_end..first_end];
-    let repeated = format!("{}{}{}", &valid[..first_end], first_record, &valid[first_end..]);
+    let repeated = format!(
+        "{}{}{}",
+        &valid[..first_end],
+        first_record,
+        &valid[first_end..]
+    );
     assert_rejected(repeated.as_bytes());
 
     let reordered = format!(
@@ -96,7 +118,11 @@ fn rejects_missing_repeated_corrupt_records_and_bad_hash_or_length() {
 
     let mut bad_hash = valid.clone().into_bytes();
     let hash_start = bad_hash.iter().rposition(|byte| *byte == b':').unwrap() + 1;
-    bad_hash[hash_start] = if bad_hash[hash_start] == b'0' { b'1' } else { b'0' };
+    bad_hash[hash_start] = if bad_hash[hash_start] == b'0' {
+        b'1'
+    } else {
+        b'0'
+    };
     assert_rejected(&bad_hash);
 
     let mut bad_length = valid.clone();
@@ -107,10 +133,6 @@ fn rejects_missing_repeated_corrupt_records_and_bad_hash_or_length() {
 
     let footer = valid.rfind("Z:").unwrap();
     assert_rejected(valid[..footer].as_bytes());
-
-    let mut no_final_lf = valid.into_bytes();
-    no_final_lf.truncate(no_final_lf.len() - 2);
-    assert_rejected(&no_final_lf);
 }
 
 #[test]
@@ -130,10 +152,7 @@ fn rejects_unsupported_vt_inside_or_between_records() {
         .windows(b"D0001:".len())
         .position(|window| window == b"D0001:")
         .unwrap();
-    unsupported_boundary.splice(
-        second_record..second_record,
-        b"\x1b[31m".iter().copied(),
-    );
+    unsupported_boundary.splice(second_record..second_record, b"\x1b[31m".iter().copied());
     assert_rejected(&unsupported_boundary);
 }
 
@@ -174,7 +193,11 @@ fn bash_wrapper_round_trips_long_unicode_path_ending_in_lf() {
         .current_dir(&path)
         .output()
         .unwrap();
-    assert!(result.status.success(), "bash wrapper failed: {:?}", result.stderr);
+    assert!(
+        result.status.success(),
+        "bash wrapper failed: {:?}",
+        result.stderr
+    );
 
     let mut decoder = CompletionDecoder::new("pwdprobe1").unwrap();
     let payload = decoder.push(&result.stdout).unwrap();
@@ -184,7 +207,10 @@ fn bash_wrapper_round_trips_long_unicode_path_ending_in_lf() {
     for record in payload.split(|byte| *byte == b'\n') {
         let record = record.strip_suffix(b"\r").unwrap_or(record);
         if record.starts_with(b"D") {
-            assert!(record.len() <= 70, "encoded line exceeds the console width budget");
+            assert!(
+                record.len() <= 70,
+                "encoded line exceeds the console width budget"
+            );
         }
     }
 }
@@ -194,7 +220,7 @@ fn bash_wrapper_round_trips_long_unicode_path_ending_in_lf() {
 fn missing_external_encoder_tool_fails_without_a_valid_envelope() {
     let temp = tempfile::tempdir().unwrap();
     let script = wrap_pwd_probe("pwdprobe2").unwrap();
-    let result = Command::new("bash")
+    let result = Command::new("/bin/bash")
         .env("PATH", "")
         .args(["--noprofile", "--norc", "-c", &script])
         .current_dir(temp.path())

@@ -206,15 +206,14 @@ impl<'a> PwdRecordReader<'a> {
 
         let start = self.offset;
         while self.offset < self.bytes.len()
-            && !matches!(self.bytes[self.offset], b'\r' | b'\n')
+            && !matches!(self.bytes[self.offset], b'\r' | b'\n' | 0x1b)
         {
             self.offset += 1;
         }
-        if self.offset == self.bytes.len() {
-            bail!("pwd probe record was missing its line ending");
-        }
         let end = self.offset;
-        self.skip_boundaries()?;
+        if self.offset < self.bytes.len() {
+            self.skip_boundaries()?;
+        }
         Ok(Some(&self.bytes[start..end]))
     }
 
