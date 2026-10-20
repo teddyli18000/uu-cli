@@ -175,7 +175,7 @@ fn ensure_binding(store: &ConfigStore, config: &mut Config, cwd: &Path) -> Resul
         if resolve_binding(config, cwd).is_none() {
             bail!("workspace binding was not completed");
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(windows))]
