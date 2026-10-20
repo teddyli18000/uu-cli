@@ -104,7 +104,7 @@ fn run_list(config: &Config, cwd: &Path) -> Result<()> {
                 return Ok(());
             }
         }
-        let sessions = snapshot.eligible_sessions_for(&binding.device_identity);
+        let sessions = snapshot.live_sessions_for(&binding.device_identity);
         print_bound_workers(config, &sessions);
         return Ok(());
     }
@@ -115,7 +115,7 @@ fn run_list(config: &Config, cwd: &Path) -> Result<()> {
         let count = device
             .sessions
             .iter()
-            .filter(|session| is_eligible_session(session))
+            .filter(|session| uu_cli::inventory::is_live_session(session))
             .count();
         if count == 0 {
             continue;
@@ -138,15 +138,21 @@ fn print_bound_workers(config: &Config, sessions: &[&SessionInfo]) {
         .iter()
         .filter(|session| config.is_session_authorized(session))
         .count();
+    let ready = sessions
+        .iter()
+        .filter(|session| config.is_session_authorized(session) && is_eligible_session(session))
+        .count();
     println!(
-        "Workers    {authorized} authorized / {} open",
+        "Workers    {ready} ready / {authorized} authorized / {} open",
         sessions.len()
     );
     for session in sessions {
-        let status = if config.is_session_authorized(session) {
-            "authorized"
-        } else {
+        let status = if !config.is_session_authorized(session) {
             "not authorized"
+        } else if is_eligible_session(session) {
+            "ready"
+        } else {
+            "busy"
         };
         println!("  {} · {status}", session.session_name);
     }
@@ -163,11 +169,11 @@ fn run_bind(store: &ConfigStore, config: &mut Config, cwd: &Path) -> Result<()> 
 
     println!(
         "Target     {} · {} open terminal(s)",
-        candidate.device_name, candidate.eligible_sessions
+        candidate.device_name, candidate.open_sessions
     );
     let remote_root = prompt_remote_root(previous_root.as_deref())?;
 
-    let sessions = snapshot.eligible_sessions_for(&candidate.device_identity);
+    let sessions = snapshot.live_sessions_for(&candidate.device_identity);
     let stable_sessions: Vec<&SessionInfo> = sessions
         .into_iter()
         .filter(|session| session.authorization_fingerprint().is_some())
@@ -193,7 +199,7 @@ fn run_bind(store: &ConfigStore, config: &mut Config, cwd: &Path) -> Result<()> 
 
     println!("Bound      {}", local_root.display());
     println!("Remote     {} · {remote_root}", candidate.device_name);
-    println!("Workers    {authorized} authorized");
+    println!("Workers    {authorized} newly authorized");
     Ok(())
 }
 
@@ -206,7 +212,7 @@ fn wait_for_bind_target(cli: &OfficialCli) -> Result<(InventorySnapshot, BindCan
             BindDecision::WaitForTerminal { online_devices } => {
                 if !announced_wait {
                     eprintln!(
-                        "No reusable UU Terminal is open ({online_devices} online device(s)). Open the target Terminal in official UU Remote; uu is waiting. Ctrl+C cancels."
+                        "No UU Terminal is open ({online_devices} online device(s)). Open the target Terminal in official UU Remote; uu is waiting. Ctrl+C cancels."
                     );
                     announced_wait = true;
                 }
@@ -228,7 +234,7 @@ fn choose_candidate(candidates: &[BindCandidate]) -> Result<usize> {
             "  {}) {} · {} terminal(s)",
             index + 1,
             candidate.device_name,
-            candidate.eligible_sessions
+            candidate.open_sessions
         );
     }
 
@@ -325,8 +331,18 @@ fn run_remote(config: &Config, cwd: &Path, argv: Vec<OsString>) -> Result<u8> {
             .filter(|session| config.is_session_authorized(session))
             .collect();
         if workers.is_empty() {
+            let authorized_live = device
+                .sessions
+                .iter()
+                .any(|session| config.is_session_authorized(session));
+            if authorized_live {
+                bail!(
+                    "all authorized Terminals on {} are currently busy; wait until one becomes attachable or open another Terminal and run `uu bind`",
+                    binding.device_name
+                );
+            }
             bail!(
-                "no authorized reusable Terminal is open on {}; open one in official UU Remote and run `uu bind` once",
+                "no authorized Terminal is open on {}; open one in official UU Remote and run `uu bind` once",
                 binding.device_name
             );
         }
