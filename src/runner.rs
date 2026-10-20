@@ -902,12 +902,12 @@ impl ReadPump {
         }
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(windows)]
     pub(crate) fn set_diagnostic_runner_phase(&mut self) {
         self.diagnostic.set_runner_phase();
     }
 
-    #[cfg(any(windows, test))]
+    #[cfg(windows)]
     pub(crate) fn record_diagnostic_failure(&mut self, child_exit_code: Option<u32>) {
         if let Some(line) = self.diagnostic.failure_line(child_exit_code) {
             let _ = writeln!(io::stderr().lock(), "{line}");
