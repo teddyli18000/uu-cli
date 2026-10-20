@@ -55,6 +55,16 @@ pub fn wrap_job(remote_root: &str, shell_command: &str, nonce: &str) -> Result<S
     ))
 }
 
+/// Build the read-only current-directory probe used when binding a newly
+/// authorized existing terminal. This intentionally has no remote-root cd.
+pub fn wrap_pwd_probe(nonce: &str) -> Result<String> {
+    validate_nonce(nonce)?;
+    Ok(format!(
+        "printf '\\033]7770;UUCLI;{nonce};BEGIN\\007'; pwd; __uu_status=$?; printf '\\033]7770;UUCLI;{nonce};END;%d\\007' \"$__uu_status\"\n"
+    ))
+}
+
+
 pub fn shell_quote(text: &str) -> String {
     if text.is_empty() {
         return "''".into();
@@ -174,14 +184,22 @@ impl CompletionDecoder {
             return Ok(output);
         }
 
-        let keep = self.end_prefix.len().saturating_sub(1);
-        if self.pending.len() <= keep {
-            return Ok(Vec::new());
-        }
-        let emit_len = self.pending.len() - keep;
+        let keep = longest_suffix_prefix(&self.pending, &self.end_prefix);
+        let emit_len = self.pending.len().saturating_sub(keep);
         Ok(self.pending.drain(..emit_len).collect())
     }
 }
+
+fn longest_suffix_prefix(bytes: &[u8], prefix: &[u8]) -> usize {
+    let max = bytes.len().min(prefix.len().saturating_sub(1));
+    for length in (1..=max).rev() {
+        if bytes[bytes.len() - length..] == prefix[..length] {
+            return length;
+        }
+    }
+    0
+}
+
 
 fn validate_nonce(nonce: &str) -> Result<()> {
     if nonce.is_empty() || !nonce.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
@@ -241,6 +259,26 @@ mod tests {
         assert!(wrapped.contains("'cd src && export X=1 && exit 7'"));
         assert!(wrapped.contains("UUCLI;AbC123;END;%d"));
     }
+
+    #[test]
+    fn pwd_probe_runs_without_changing_remote_root() {
+        let script = wrap_pwd_probe("abc123").unwrap();
+        assert!(script.contains("UUCLI;abc123;BEGIN"));
+        assert!(script.contains("; pwd;"));
+        assert!(!script.contains("cd --"));
+        assert!(script.contains("UUCLI;abc123;END;%d"));
+    }
+
+    #[test]
+    fn decoder_streams_short_output_without_waiting_for_marker_window() {
+        let mut decoder = CompletionDecoder::new("nonce").unwrap();
+        decoder
+            .push(b"\x1b]7770;UUCLI;nonce;BEGIN\x07")
+            .unwrap();
+        assert_eq!(decoder.push(b"short").unwrap(), b"short");
+        assert_eq!(decoder.completed(), None);
+    }
+
 
     #[test]
     fn decoder_drops_echo_and_handles_markers_split_across_frames() {
