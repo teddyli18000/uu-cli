@@ -161,6 +161,7 @@ pub fn live_sessions(store: &ConfigStore) -> Result<Vec<SessionInfo>> {
 
 pub struct WorkerClient {
     pipe: File,
+    output: File,
     next_id: u64,
 }
 
@@ -179,7 +180,7 @@ impl WorkerClient {
         {
             return Ok(None);
         }
-        let name = pipe_name(store, session)?;
+        let name = format!("{}-in", pipe_name(store, session)?);
         let deadline = Instant::now() + Duration::from_millis(750);
         let mut pipe = loop {
             match OpenOptions::new().read(true).write(true).open(&name) {
@@ -194,6 +195,14 @@ impl WorkerClient {
             }
         };
         verify_server(&pipe, info.pid)?;
+        // Independent input/output pipe objects keep a blocking read from
+        // serializing an unrelated write on the same synchronous file object.
+        let mut output = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(format!("{}-out", pipe_name(store, session)?))
+            .context("cannot open local worker output")?;
+        verify_server(&output, info.pid)?;
         let fingerprint = session
             .authorization_fingerprint()
             .context("missing worker instance")?;
@@ -204,15 +213,19 @@ impl WorkerClient {
                 fingerprint: fingerprint.clone(),
             },
         )?;
-        wait_readable(&pipe, Duration::from_secs(10))?;
-        match read_frame(&mut pipe)? {
+        wait_readable(&output, Duration::from_secs(10))?;
+        match read_frame(&mut output)? {
             Response::Ready {
                 protocol: PROTOCOL,
                 fingerprint: actual,
             } if actual == fingerprint => {}
             _ => bail!("local worker protocol/instance mismatch"),
         }
-        Ok(Some(Self { pipe, next_id: 0 }))
+        Ok(Some(Self {
+            pipe,
+            output,
+            next_id: 0,
+        }))
     }
 
     pub fn connect_or_start(
@@ -303,10 +316,10 @@ impl WorkerClient {
                 input_pump.check().map_err(unknown)?;
                 // Read available bytes incrementally; never block the input path
                 // waiting for the rest of a large response frame.
-                let available = available_bytes(&self.pipe).map_err(unknown)?;
+                let available = available_bytes(&self.output).map_err(unknown)?;
                 if available > 0 {
                     let mut bytes = vec![0; available.min(64 * 1024) as usize];
-                    let count = self.pipe.read(&mut bytes).map_err(unknown)?;
+                    let count = self.output.read(&mut bytes).map_err(unknown)?;
                     if count == 0 {
                         return Err(unknown("local worker stream ended"));
                     }
@@ -482,6 +495,7 @@ type InputRoute = Arc<Mutex<Option<(u64, mpsc::SyncSender<JobInput>)>>>;
 
 fn serve_client(
     pipe: &mut File,
+    output: &mut File,
     transport: &mut OfficialAttachPty,
     session: &SessionInfo,
 ) -> Result<bool> {
@@ -497,7 +511,7 @@ fn serve_client(
         _ => bail!("worker client protocol/instance mismatch"),
     }
     write_frame(
-        pipe,
+        output,
         &Response::Ready {
             protocol: PROTOCOL,
             fingerprint: expected,
@@ -565,7 +579,7 @@ fn serve_client(
         };
         let result = match request {
             Request::Run { root, command, .. } => transport
-                .run_job_with_input(&mut Output(pipe), &root, &command, &input)
+                .run_job_with_input(&mut Output(output), &root, &command, &input)
                 .map(|result| (result.exit_code, None)),
             Request::Pwd { .. } => transport.capture_pwd().map(|pwd| (0, Some(pwd))),
             _ => unreachable!(),
@@ -589,12 +603,12 @@ fn serve_client(
                 }
             }
         };
-        write_frame(pipe, &response)?;
+        write_frame(output, &response)?;
         if !keep {
             // DisconnectNamedPipe discards unread output. Let the caller drain
             // the final partial output/error before retiring this attachment.
             unsafe {
-                FlushFileBuffers(pipe.as_raw_handle());
+                FlushFileBuffers(output.as_raw_handle());
             }
             return Ok(false);
         }
@@ -608,7 +622,8 @@ pub fn run(store: &ConfigStore, session: SessionInfo, cli_path: &Path) -> Result
     }
     fs::create_dir_all(host_dir(store))?;
     let path = metadata_path(store, &session)?;
-    let pipe = create_pipe(&pipe_name(store, &session)?)?;
+    let pipe = create_pipe(&format!("{}-in", pipe_name(store, &session)?))?;
+    let output = create_pipe(&format!("{}-out", pipe_name(store, &session)?))?;
     let mut transport =
         OfficialAttachPty::attach(cli_path, &session.device_identity, &session.session_name)?;
     let info = HostInfo {
@@ -626,6 +641,7 @@ pub fn run(store: &ConfigStore, session: SessionInfo, cli_path: &Path) -> Result
     let _metadata = RemoveMetadata(path);
     record_start_event();
     let mut pipe = pipe;
+    let mut output = output;
     let mut idle_since = Instant::now();
     loop {
         if !transport.drain_idle()? || idle_since.elapsed() >= IDLE {
@@ -635,14 +651,23 @@ pub fn run(store: &ConfigStore, session: SessionInfo, cli_path: &Path) -> Result
             thread::sleep(Duration::from_millis(100));
             continue;
         }
-        let keep = serve_client(&mut pipe, &mut transport, &session);
+        let second_deadline = Instant::now() + Duration::from_secs(10);
+        while !accept(&output)? {
+            if Instant::now() >= second_deadline {
+                bail!("worker output connection was not established");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let keep = serve_client(&mut pipe, &mut output, &mut transport, &session);
         unsafe {
             DisconnectNamedPipe(pipe.as_raw_handle());
+            DisconnectNamedPipe(output.as_raw_handle());
         }
         if !matches!(keep, Ok(true)) {
             return keep.map(|_| ());
         }
         set_pipe_mode(&pipe, 1)?;
+        set_pipe_mode(&output, 1)?;
         idle_since = Instant::now();
     }
 }
