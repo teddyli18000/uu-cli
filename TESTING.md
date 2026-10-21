@@ -177,7 +177,7 @@ Windows workspace key 至少验证：
 
 该调整在 `30f7f9b` 完成：[Windows/Linux CI](https://github.com/teddyli18000/uu-cli/actions/runs/39547381263) 与 [打包/干净安装升级卸载](https://github.com/teddyli18000/uu-cli/actions/runs/39547381226) 全部通过，包含受控进程退出等待、无 UU 时 watcher 返回。已在用户当前 Windows 用 `pwsh` 安装同一 Actions 包和 Skill：二进制哈希一致、Run 项不存在、安装后后台进程为零，`uu list` 识别官方 UU，原官方 GUI 进程保持不变。本次未关闭官方 UU 做整体退出联调，也未将这次开发机安装记为外部干净 Windows 端到端验收。
 
-当前仍是验证候选，尚未满足 v1 release gate。真实官方 UU 集成使用开发机已登录的 Windows UU 4.43.0.3607、用户授权的 disposable Ubuntu 18.04 WSL host 和 `uu-remote-linux` v0.2.12-aic.3；没有把它描述成外部干净 Windows 或真实多设备验收。完整实测记录见 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
+当前仍是验证候选，尚未满足 v1 release gate。真实官方 UU 集成使用开发机已登录的 Windows UU 4.43.0.3607、用户授权的 disposable Ubuntu 18.04 WSL host 和 `uu-remote-linux` v0.2.12-aic.3；没有把它描述成外部干净 Windows 或真实多设备验收。完整实测记录见 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。随后停止全部 WSL，使用已安装的 preview.2 与真实小车 `abot-robot` 完成首次绑定 `/home/abot`、连续命令/中文/退出码 7、shell 隔离、4,097 字节随机二进制哈希一致及 Ctrl+C 后复用；取消耗时 89.6 ms。这增加了真实小车验收，不替代其余独立 release gate。
 
 | 层级 | 已验证范围 | 证据 |
 | --- | --- | --- |
