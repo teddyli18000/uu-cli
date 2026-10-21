@@ -3,6 +3,24 @@ use std::process::Command;
 use uu_cli::job::{wrap_job, CompletionDecoder};
 
 #[test]
+fn persistent_bash_survives_late_eof_without_breaking_foreground_stdin() {
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(include_str!("fixtures/bash_eof_pty.py"))
+        .arg(wrap_job("/tmp", "printf fast", "fastjob").unwrap())
+        .arg(wrap_job("/tmp", "cat; printf 'stdin-complete\\n'", "stdinjob").unwrap())
+        .arg(wrap_job("/tmp", "printf worker-alive", "afterjob").unwrap())
+        .output()
+        .expect("run Linux PTY regression");
+    assert!(
+        output.status.success(),
+        "PTY regression failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn persistent_shell_keeps_workspace_and_shell_state_isolated() {
     let tmp = tempfile::TempDir::new().unwrap();
     let root = tmp.path().join("project 空格 'quoted'");

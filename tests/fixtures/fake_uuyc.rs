@@ -531,6 +531,10 @@ fn forward_bash_byte<W: Write>(
     }
 
     match byte {
+        // This fixture feeds a pipe, not a remote canonical-mode PTY. An idle
+        // VEOF is terminal control, never a byte of the next shell command.
+        // Real foreground EOF behavior is covered by the Linux PTY regression.
+        0x04 => {}
         b'\r' => {
             dispatch_bash_line(line, output, true, identity)?;
             *swallow_next_lf = true;
@@ -581,7 +585,7 @@ fn dispatch_bash_line<W: Write>(
     Ok(())
 }
 fn is_terminal_wrapper(line: &[u8]) -> bool {
-    line.starts_with(b"set +m; ( trap '__uu_status=$?;")
+    line.starts_with(b"set +m; if [ -n \"${BASH_VERSION-}\" ]; then set -o ignoreeof; fi; ( trap '__uu_status=$?;")
         || line.starts_with(b"printf '\\r\\n%s%s%s' 'UUC' '")
 }
 

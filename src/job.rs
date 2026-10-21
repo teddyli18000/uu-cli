@@ -41,6 +41,9 @@ pub fn argv_to_shell(argv: &[OsString]) -> Result<String> {
 /// shell and its foreground job together. A guard subshell owns completion and
 /// interrupt traps; the job runs in a nested subshell so its shell state, traps,
 /// exit, and exec cannot replace the guard.
+/// Bash also ignores EOF at its idle prompt: caller EOF can race with a fast
+/// job's completion, and must not terminate the dedicated worker shell. This
+/// does not disable the terminal's EOF character for foreground commands.
 pub fn wrap_job(remote_root: &str, shell_command: &str, nonce: &str) -> Result<String> {
     validate_nonce(nonce)?;
     if remote_root.is_empty() {
@@ -51,7 +54,7 @@ pub fn wrap_job(remote_root: &str, shell_command: &str, nonce: &str) -> Result<S
     let command = shell_quote(shell_command);
 
     Ok(format!(
-        "set +m; ( trap '__uu_status=$?; printf \"\\r\\n%s%s%s%d%s\\r\\n\" UUC {nonce} E \"$__uu_status\" Z' EXIT; trap 'exit 130' INT; printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; ( cd -- {root} && eval {command} ) )\n"
+        "set +m; if [ -n \"${{BASH_VERSION-}}\" ]; then set -o ignoreeof; fi; ( trap '__uu_status=$?; printf \"\\r\\n%s%s%s%d%s\\r\\n\" UUC {nonce} E \"$__uu_status\" Z' EXIT; trap 'exit 130' INT; printf '\\r\\n%s%s%s' 'UUC' '{nonce}' 'B'; ( cd -- {root} && eval {command} ) )\n"
     ))
 }
 
@@ -495,7 +498,7 @@ mod tests {
             "AbC123",
         )
         .unwrap();
-        assert!(wrapped.starts_with("set +m; ( trap '__uu_status=$?; printf"));
+        assert!(wrapped.starts_with("set +m; if [ -n \"${BASH_VERSION-}\" ]; then set -o ignoreeof; fi; ( trap '__uu_status=$?; printf"));
         assert!(wrapped.contains("trap 'exit 130' INT"));
         assert!(wrapped.contains("printf '\\r\\n%s%s%s' 'UUC' 'AbC123' 'B';"));
         assert!(wrapped.contains("( cd -- '/home/user/my project' && eval "));
