@@ -17,9 +17,11 @@ use uu_cli::authorization::{
 };
 use uu_cli::cli::Command;
 use uu_cli::config::ConfigStore;
-use uu_cli::inventory::{discover_inventory, is_eligible_session, InventorySnapshot};
+use uu_cli::inventory::{
+    discover_inventory, is_eligible_session, is_live_session, InventorySnapshot,
+};
 use uu_cli::job::argv_to_shell;
-use uu_cli::model::{SessionInfo, WorkspaceBinding};
+use uu_cli::model::{Config, SessionInfo, WorkspaceBinding};
 use uu_cli::runner::{JobInput, JobRunError};
 use uu_cli::uuyc::OfficialCli;
 use uu_cli::watcher;
@@ -215,6 +217,67 @@ fn check_instance_support(current: &[SessionInfo]) -> Result<()> {
     Ok(())
 }
 
+fn binding_sessions(
+    store: &ConfigStore,
+    snapshot: &InventorySnapshot,
+    config: &Config,
+) -> Result<Vec<SessionInfo>> {
+    let mut candidates = sessions(snapshot)?;
+    let mut seen: HashSet<_> = candidates
+        .iter()
+        .filter_map(SessionInfo::authorization_fingerprint)
+        .collect();
+
+    // A helper may keep an authorized Terminal attached after UU marks it
+    // running/non-attachable. Metadata is only an index: require the device to
+    // be online and the exact live instance to still appear in fresh inventory.
+    for helper in worker_host::live_sessions(store)? {
+        let Some(fingerprint) = helper.authorization_fingerprint() else {
+            continue;
+        };
+        if seen.contains(&fingerprint) {
+            continue;
+        }
+        let Some(device) = snapshot.devices.iter().find(|entry| {
+            entry.device.is_online && entry.device.device_identity == helper.device_identity
+        }) else {
+            continue;
+        };
+        let Some(current) = device.sessions.iter().find(|session| {
+            is_live_session(session)
+                && session.authorization_fingerprint().as_deref() == Some(fingerprint.as_str())
+        }) else {
+            continue;
+        };
+        // The cache never grants authorization, even if its pipe is healthy.
+        if !config.is_session_authorized(current) {
+            continue;
+        }
+
+        match WorkerLease::try_acquire(store.path(), current)? {
+            AcquireResult::Acquired(lease) => {
+                let client = WorkerClient::try_connect(store, current)?;
+                let connected = client.is_some();
+                drop(client);
+                drop(lease);
+                if connected {
+                    candidates.push(current.clone());
+                    seen.insert(fingerprint);
+                }
+            }
+            // Another uu call owns this exact, currently live authorized
+            // instance. Do not probe its busy pipe; it remains a device
+            // candidate and capture_pwd will wait for its lease.
+            AcquireResult::Busy => {
+                candidates.push(current.clone());
+                seen.insert(fingerprint);
+            }
+            AcquireResult::Quarantined => {}
+        }
+    }
+    Ok(candidates)
+}
+
 fn prompt(label: &str) -> Result<String> {
     print!("{label}");
     io::stdout().flush()?;
@@ -326,8 +389,8 @@ fn setup(store: &ConfigStore, force: bool) -> Result<()> {
     let mut waiting = false;
     let (device_id, device_name) = loop {
         let snapshot = discover_inventory(&cli)?;
-        let current = sessions(&snapshot)?;
         let config = store.load()?;
+        let current = binding_sessions(store, &snapshot, &config)?;
         let candidates = binding_candidates(
             &current,
             &config.authorized_workers,
@@ -423,13 +486,63 @@ fn setup(store: &ConfigStore, force: bool) -> Result<()> {
 fn capture_pwd(store: &ConfigStore, cli: &OfficialCli, device: &str) -> Result<String> {
     loop {
         let config = store.load()?;
-        let current = cli.list_sessions(device)?;
-        let mut quarantined = false;
-        for session in current
+        let snapshot = discover_inventory(cli)?;
+        let Some(device_inventory) = snapshot
+            .devices
             .iter()
-            .filter(|s| is_eligible_session(s) && config.is_session_authorized(s))
-        {
-            let mut lease = match WorkerLease::try_acquire(store.path(), session)? {
+            .find(|entry| entry.device.device_identity == device)
+        else {
+            bail!(
+                "authorized Terminal device disappeared; open a new Terminal and run uu bind again"
+            );
+        };
+        if !device_inventory.device.is_online {
+            bail!(
+                "authorized Terminal device is offline; open a new Terminal and run uu bind again"
+            );
+        }
+        if let Some(error) = &device_inventory.session_error {
+            bail!("cannot discover authorized Terminal: {error}");
+        }
+        let current: Vec<_> = device_inventory
+            .sessions
+            .iter()
+            .filter(|session| is_live_session(session))
+            .cloned()
+            .collect();
+        let helper_fingerprints: HashSet<_> = worker_host::live_sessions(store)?
+            .into_iter()
+            .filter(|helper| helper.device_identity == device)
+            .filter_map(|helper| helper.authorization_fingerprint())
+            .collect();
+        let mut ordered = Vec::new();
+        let mut seen = HashSet::new();
+        // Use a current inventory record, never metadata contents, for the
+        // helper's name/state/instance and require authorization below.
+        for session in &current {
+            let Some(fingerprint) = session.authorization_fingerprint() else {
+                continue;
+            };
+            if helper_fingerprints.contains(&fingerprint) && config.is_session_authorized(session) {
+                seen.insert(fingerprint);
+                ordered.push((session.clone(), true));
+            }
+        }
+        for session in &current {
+            let Some(fingerprint) = session.authorization_fingerprint() else {
+                continue;
+            };
+            if is_eligible_session(session)
+                && config.is_session_authorized(session)
+                && seen.insert(fingerprint)
+            {
+                ordered.push((session.clone(), false));
+            }
+        }
+
+        let mut quarantined = false;
+        for (session, has_helper) in ordered {
+            let mut lease = match WorkerLease::try_acquire(store.path(), &session)? {
                 AcquireResult::Acquired(lease) => lease,
                 AcquireResult::Busy => continue,
                 AcquireResult::Quarantined => {
@@ -437,7 +550,33 @@ fn capture_pwd(store: &ConfigStore, cli: &OfficialCli, device: &str) -> Result<S
                     continue;
                 }
             };
-            let mut transport = WorkerClient::connect_or_start(store, cli.path(), session)?;
+            let transport = if has_helper {
+                match WorkerClient::try_connect(store, &session)? {
+                    Some(transport) => transport,
+                    None if is_eligible_session(&session) => {
+                        WorkerClient::connect_or_start(store, cli.path(), &session)?
+                    }
+                    None => continue,
+                }
+            } else {
+                // Revalidate an attachable inventory candidate immediately
+                // before preparing a new helper connection.
+                let latest = discover_inventory(cli)?;
+                let Some(latest_device) = latest
+                    .devices
+                    .iter()
+                    .find(|entry| entry.device.device_identity == device && entry.device.is_online)
+                else {
+                    bail!("authorized Terminal device disappeared; open a new Terminal and run uu bind again");
+                };
+                if !latest_device.sessions.iter().any(|now| {
+                    is_eligible_session(now)
+                        && now.authorization_fingerprint() == session.authorization_fingerprint()
+                }) {
+                    continue;
+                }
+                WorkerClient::connect_or_start(store, cli.path(), &session)?
+            };
             lease.mark_in_flight()?;
             let result = transport.capture_pwd();
             drop(transport);
@@ -457,7 +596,10 @@ fn capture_pwd(store: &ConfigStore, cli: &OfficialCli, device: &str) -> Result<S
         if quarantined {
             bail!("worker state unknown/may-still-be-running; open a new Terminal in official UU");
         }
-        if !current.iter().any(|s| config.is_session_authorized(s)) {
+        if !current
+            .iter()
+            .any(|session| config.is_session_authorized(session))
+        {
             bail!("authorized Terminal disappeared; open a new Terminal and run uu bind again");
         }
         eprintln!("等待已授权 Terminal 空闲。Ctrl+C取消。");

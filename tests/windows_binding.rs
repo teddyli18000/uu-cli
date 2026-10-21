@@ -445,6 +445,121 @@ fn windows_first_binding_uses_isolated_console_and_preserves_job_stdin() {
 }
 
 #[test]
+fn windows_force_binding_reuses_live_helper_and_keeps_other_device_candidate() {
+    let test = Workspace::new();
+    fs::create_dir_all(test._temp.path().join("remote-root")).unwrap();
+    let bash = bash_path();
+
+    let mut first_command = base_command(&test, &bash);
+    first_command.arg("printf FIRST_WORKSPACE_OK");
+    let first = Running::start(first_command, b"");
+    drive(
+        &test,
+        first.pid,
+        "接下来打开的 Terminal 将用于本次请求",
+        "wait",
+    );
+    atomic_fixture(
+        &test.fixture,
+        &json!({"devices": [{
+            "deviceId": DEVICE_ID, "deviceName": DEVICE_NAME, "isOnline": true,
+            "terminals": [{"name": SESSION_NAME, "shell": "bash", "state": "detached",
+                "createdAt": CREATED_AT, "attachable": true}]
+        }]}),
+    );
+    wait_for_available_terminal(&test.events, Duration::from_secs(20));
+    drive(&test, first.pid, "Remote root [", "enter");
+    let first_output = first.finish(Duration::from_secs(90), &test);
+    assert_success(&first_output, "first workspace command");
+    assert!(String::from_utf8_lossy(&first_output.stdout).contains("FIRST_WORKSPACE_OK"));
+
+    let second_root = test._temp.path().join("second-workspace");
+    fs::create_dir_all(&second_root).unwrap();
+    let git = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(&second_root)
+        .output()
+        .expect("git init second workspace");
+    assert!(
+        git.status.success(),
+        "git init failed: {}",
+        String::from_utf8_lossy(&git.stderr)
+    );
+
+    // UU now reports the retained helper's exact Terminal as running and not
+    // attachable. A second detached device ensures binding still asks instead
+    // of silently preferring the already-authorized device.
+    atomic_fixture(
+        &test.fixture,
+        &json!({"devices": [
+            {
+                "deviceId": DEVICE_ID, "deviceName": DEVICE_NAME, "isOnline": true,
+                "terminals": [{"name": SESSION_NAME, "shell": "bash", "state": "running",
+                    "createdAt": CREATED_AT, "attachable": false}]
+            },
+            {
+                "deviceId": "device-other", "deviceName": "另一台设备", "isOnline": true,
+                "terminals": [{"name": "bash-other", "shell": "bash", "state": "detached",
+                    "createdAt": "2026-10-21T12:00:00Z", "attachable": true}]
+            }
+        ]}),
+    );
+    let mut bind_command = base_command(&test, &bash);
+    bind_command.current_dir(&second_root).arg("bind");
+    let bind = Running::start(bind_command, b"");
+    drive(&test, bind.pid, "请选择远端设备：", "line:2");
+    drive(&test, bind.pid, "Remote root [", "enter");
+    let bind_output = bind.finish(Duration::from_secs(60), &test);
+    assert_success(&bind_output, "second workspace bind");
+
+    let transcript = fs::read_to_string(&test.transcript).unwrap_or_default();
+    assert!(transcript.contains(DEVICE_NAME), "{transcript}");
+    assert!(transcript.contains("另一台设备"), "{transcript}");
+    assert!(
+        transcript.contains("1)") && transcript.contains("2)"),
+        "{transcript}"
+    );
+
+    let config: Value = serde_json::from_slice(&fs::read(&test.config).unwrap()).unwrap();
+    let bindings = config["bindings"].as_array().expect("bindings");
+    assert_eq!(bindings.len(), 2, "{config:#}");
+    let canonical_second_root = fs::canonicalize(&second_root).unwrap();
+    let second_binding = bindings
+        .iter()
+        .find(|binding| binding["local_root"] == canonical_second_root.to_string_lossy().as_ref())
+        .expect("second workspace binding");
+    assert_eq!(second_binding["device_identity"], DEVICE_ID);
+
+    let probe = Command::new(&bash)
+        .args(["--noprofile", "--norc", "-c", "pwd"])
+        .current_dir(test._temp.path().join("remote-root"))
+        .output()
+        .expect("probe remote cwd");
+    assert!(probe.status.success());
+    let expected_root = String::from_utf8_lossy(&probe.stdout).trim().to_owned();
+    assert_eq!(second_binding["remote_root"], expected_root);
+
+    let events = read_events(&test.events);
+    let attaches: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "attach_started")
+        .collect();
+    assert_eq!(attaches.len(), 1, "second binding reattached: {events:#?}");
+    assert_eq!(attaches[0]["deviceId"], DEVICE_ID);
+    let dispatches: Vec<_> = events
+        .iter()
+        .filter(|event| event["event"] == "dispatch")
+        .collect();
+    assert_eq!(dispatches.len(), 3, "{events:#?}");
+    assert!(dispatches[2]["wrapper"]
+        .as_str()
+        .unwrap()
+        .starts_with("printf '\\r\\n%s%s%s' 'UUC'"));
+    assert_eq!(dispatches[2]["deviceId"], DEVICE_ID);
+    assert_eq!(dispatches[2]["sessionName"], SESSION_NAME);
+}
+
+#[test]
 fn windows_existing_terminal_requires_friendly_name_authorization() {
     let test = Workspace::new();
     let remote_root = test._temp.path().join("remote-root");
