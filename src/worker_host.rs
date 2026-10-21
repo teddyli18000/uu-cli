@@ -15,9 +15,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
-use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc, Mutex,
@@ -236,23 +234,13 @@ impl WorkerClient {
         if let Some(client) = Self::try_connect(store, session)? {
             return Ok(client);
         }
-        let mut child = Command::new(helper_exe()?)
-            .arg("__worker")
-            .arg(serde_json::to_string(session)?)
-            .arg(cli_path)
-            .env("UU_CLI_CONFIG", store.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(0x0800_0000 | 0x0000_0008)
-            .spawn()
-            .context("cannot start hidden Terminal worker")?;
+        let child = spawn_helper(session, cli_path)?;
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
             if let Some(client) = Self::try_connect(store, session)? {
                 return Ok(client);
             }
-            if let Some(status) = child.try_wait()? {
+            if let Some(status) = child.exit_code()? {
                 bail!("hidden Terminal worker exited before dispatch ({status}); official attachment could not be prepared");
             }
             if Instant::now() >= deadline {
@@ -711,8 +699,140 @@ struct SecurityAttributes {
     inherit: i32,
 }
 
+#[repr(C)]
+struct StartupInfo {
+    size: u32,
+    reserved: *mut u16,
+    desktop: *mut u16,
+    title: *mut u16,
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+    columns: u32,
+    rows: u32,
+    fill: u32,
+    flags: u32,
+    show: u16,
+    reserved_size: u16,
+    reserved_bytes: *mut u8,
+    stdin: Handle,
+    stdout: Handle,
+    stderr: Handle,
+}
+
+#[repr(C)]
+struct ProcessInfo {
+    process: Handle,
+    thread: Handle,
+    pid: u32,
+    thread_id: u32,
+}
+
+struct HelperProcess(File);
+impl HelperProcess {
+    fn exit_code(&self) -> io::Result<Option<u32>> {
+        if unsafe { WaitForSingleObject(self.0.as_raw_handle(), 0) } == 258 {
+            return Ok(None);
+        }
+        let mut code = 0;
+        if unsafe { GetExitCodeProcess(self.0.as_raw_handle(), &mut code) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Some(code))
+    }
+    fn kill(&self) -> io::Result<()> {
+        if unsafe { TerminateProcess(self.0.as_raw_handle(), 2) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}
+
+fn quote_argument(argument: &str) -> String {
+    let mut quoted = String::from("\"");
+    let mut slashes = 0;
+    for ch in argument.chars() {
+        if ch == '\\' {
+            slashes += 1;
+            continue;
+        }
+        if ch == '"' {
+            quoted.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
+        } else {
+            quoted.extend(std::iter::repeat_n('\\', slashes));
+        }
+        slashes = 0;
+        quoted.push(ch);
+    }
+    quoted.extend(std::iter::repeat_n('\\', slashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+fn spawn_helper(session: &SessionInfo, cli: &Path) -> Result<HelperProcess> {
+    let exe = helper_exe()?;
+    let executable = wide(&exe.to_string_lossy());
+    let mut command = wide(
+        &[
+            exe.to_string_lossy().into_owned(),
+            "__worker".into(),
+            serde_json::to_string(session)?,
+            cli.to_string_lossy().into_owned(),
+        ]
+        .iter()
+        .map(|arg| quote_argument(arg))
+        .collect::<Vec<_>>()
+        .join(" "),
+    );
+    let mut startup: StartupInfo = unsafe { std::mem::zeroed() };
+    startup.size = std::mem::size_of::<StartupInfo>() as u32;
+    let mut process: ProcessInfo = unsafe { std::mem::zeroed() };
+    // bInheritHandles=FALSE is essential: a surviving worker must not keep the
+    // public caller's stdout/stderr pipes open. Environment/cwd are inherited;
+    // the public entry point obtained this same ConfigStore from that environment.
+    if unsafe {
+        CreateProcessW(
+            executable.as_ptr(),
+            command.as_mut_ptr(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            0,
+            0x0800_0000 | 0x0000_0008,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &mut startup,
+            &mut process,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error()).context("cannot start hidden Terminal worker");
+    }
+    unsafe {
+        CloseHandle(process.thread);
+    }
+    Ok(HelperProcess(unsafe {
+        File::from_raw_handle(process.process)
+    }))
+}
+
 #[link(name = "kernel32")]
 extern "system" {
+    fn CreateProcessW(
+        app: *const u16,
+        command: *mut u16,
+        process_security: *mut SecurityAttributes,
+        thread_security: *mut SecurityAttributes,
+        inherit: i32,
+        flags: u32,
+        environment: Handle,
+        directory: *const u16,
+        startup: *mut StartupInfo,
+        process: *mut ProcessInfo,
+    ) -> i32;
+    fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    fn GetExitCodeProcess(process: Handle, code: *mut u32) -> i32;
+    fn TerminateProcess(process: Handle, code: u32) -> i32;
     fn CreateNamedPipeW(
         name: *const u16,
         access: u32,
