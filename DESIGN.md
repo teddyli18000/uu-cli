@@ -245,6 +245,8 @@ uu get remote/path.bin .\roundtrip.bin
 
 ## 12. 后台生命周期与资源占用
 
+不设置 Windows 开机/登录启动项，也不在安装时启动后台。首次公开 `uu` 调用按需启动发现组件；官方 UU 退出后组件与本工具的附着连接退出，无 UU 时不常驻等待。
+
 用户目标是：UU 在使用时，`uu-cli` 随时可用；没有任务或没有 Terminal 时，资源占用尽可能低。
 
 实现方式不固定，可以是 broker、watcher、事件驱动、lazy process 或其他方案。但结果必须满足：

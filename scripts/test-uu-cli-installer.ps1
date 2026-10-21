@@ -66,6 +66,27 @@ function Restore-RegistryValue {
     }
 }
 
+function Set-LegacyRunEntry {
+    param([Parameter(Mandatory = $true)][string]$Target)
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey(
+        'Software\Microsoft\Windows\CurrentVersion\Run'
+    )
+    try {
+        $key.SetValue('uu-cli', ('"{0}"' -f $Target), [Microsoft.Win32.RegistryValueKind]::String)
+    }
+    finally {
+        $key.Dispose()
+    }
+}
+
+function Assert-NoLegacyRunEntry {
+    param([Parameter(Mandatory = $true)][string]$Stage)
+    $run = Read-RegistryValue -SubKey 'Software\Microsoft\Windows\CurrentVersion\Run' -Name 'uu-cli'
+    if ($run.Exists) {
+        throw "$Stage left a legacy per-user uu-cli Run entry behind."
+    }
+}
+
 function Normalize-PathEntry {
     param([string]$Entry)
     $value = [Environment]::ExpandEnvironmentVariables($Entry.Trim().Trim('"'))
@@ -136,7 +157,7 @@ function Invoke-CapturedProcess {
     }
 }
 
-function Get-InstalledWatcherProcesses {
+function Get-InstalledBackgroundProcesses {
     param(
         [Parameter(Mandatory = $true)][string]$UuExecutable,
         [Parameter(Mandatory = $true)][string]$BackgroundExecutable
@@ -165,101 +186,21 @@ function Get-InstalledWatcherProcesses {
     return $owned
 }
 
-function Wait-ForInstalledWatcher {
-    param(
-        [Parameter(Mandatory = $true)][string]$UuExecutable,
-        [Parameter(Mandatory = $true)][string]$BackgroundExecutable
-    )
-    $watchers = @()
-    $deadline = [DateTime]::UtcNow.AddSeconds(15)
-    $sampleCount = 0
-    $counts = @{ Zero = 0; One = 0; Multiple = 0 }
-    $history = @{}
-
-    do {
-        $sampleCount++
-        $sampleTime = [DateTime]::UtcNow
-        $watchers = @(Get-InstalledWatcherProcesses -UuExecutable $UuExecutable -BackgroundExecutable $BackgroundExecutable)
-        if ($watchers.Count -eq 0) { $counts.Zero = $counts.Zero + 1 }
-        elseif ($watchers.Count -eq 1) { $counts.One = $counts.One + 1 }
-        else { $counts.Multiple = $counts.Multiple + 1 }
-
-        foreach ($process in $watchers) {
-            $processId = [int]$process.ProcessId
-            $created = [string]$process.CreationDate
-            $identity = '{0}|{1}' -f $processId, $created
-            $snapshot = @{
-                Handles = $process.HandleCount
-                Kernel100ns = $process.KernelModeTime
-                User100ns = $process.UserModeTime
-            }
-            if (-not $history.ContainsKey($identity)) {
-                $history[$identity] = [pscustomobject]@{
-                    PID = $processId; Created = $created; ParentPID = $process.ParentProcessId
-                    Samples = 0; FirstUtc = $sampleTime.ToString('o'); LastUtc = $sampleTime.ToString('o')
-                    First = $snapshot; Last = $snapshot
-                }
-            }
-            $record = $history[$identity]
-            $record.Samples = $record.Samples + 1
-            $record.LastUtc = $sampleTime.ToString('o')
-            $record.Last = $snapshot
-        }
-
-        if ($watchers.Count -eq 1 -and
-            [IO.Path]::GetFullPath([string]$watchers[0].ExecutablePath) -ieq [IO.Path]::GetFullPath($BackgroundExecutable)) {
-            return $watchers[0]
-        }
-        Start-Sleep -Milliseconds 250
-    } while ([DateTime]::UtcNow -lt $deadline)
-
-    $snapshot = [pscustomobject]@{
-        Samples = $sampleCount; Counts = $counts
-        Processes = @($history.Values | Sort-Object PID, Created)
-    }
-    Write-Host ('Watcher failure snapshot: ' + ($snapshot | ConvertTo-Json -Depth 5 -Compress))
-    throw "Expected exactly one watcher at '$BackgroundExecutable', found $($watchers.Count)."
-}
-function Assert-IdleWatcher {
-    param(
-        [Parameter(Mandatory = $true)]$Watcher,
-        [Parameter(Mandatory = $true)][string]$UuExecutable,
-        [Parameter(Mandatory = $true)][string]$BackgroundExecutable
-    )
-    Start-Sleep -Seconds 1
-    $process = Get-Process -Id ([int]$Watcher.ProcessId) -ErrorAction Stop
-    $before = $process.TotalProcessorTime.TotalMilliseconds
-    Start-Sleep -Seconds 2
-    $process.Refresh()
-    if ($process.HasExited) {
-        throw 'The installed background watcher exited during the idle CPU sample.'
-    }
-    $usedMilliseconds = $process.TotalProcessorTime.TotalMilliseconds - $before
-    if ($usedMilliseconds -gt 200) {
-        throw "The idle background watcher used $([math]::Round($usedMilliseconds)) ms CPU in 2 seconds (limit 200 ms)."
-    }
-
-    $stillRunning = Wait-ForInstalledWatcher -UuExecutable $UuExecutable -BackgroundExecutable $BackgroundExecutable
-    if ([int]$stillRunning.ProcessId -ne [int]$Watcher.ProcessId) {
-        throw 'The installed background watcher was replaced during the idle CPU sample.'
-    }
-}
-
-function Assert-NoInstalledWatchers {
+function Assert-NoInstalledBackgroundProcesses {
     param(
         [Parameter(Mandatory = $true)][string]$UuExecutable,
         [Parameter(Mandatory = $true)][string]$BackgroundExecutable
     )
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     do {
-        $watchers = @(Get-InstalledWatcherProcesses -UuExecutable $UuExecutable -BackgroundExecutable $BackgroundExecutable)
-        if ($watchers.Count -eq 0) {
+        $processes = @(Get-InstalledBackgroundProcesses -UuExecutable $UuExecutable -BackgroundExecutable $BackgroundExecutable)
+        if ($processes.Count -eq 0) {
             return
         }
         Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
 
-    throw "Uninstall left $($watchers.Count) watcher process(es) from '$BackgroundExecutable' running."
+    throw "The installer lifecycle left $($processes.Count) background process(es) from '$BackgroundExecutable' running."
 }
 
 $oldLocalAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', 'Process')
@@ -294,6 +235,7 @@ try {
 
     [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, 'Process')
     [Environment]::SetEnvironmentVariable('UU_CLI_CONFIG', $null, 'Process')
+    Set-LegacyRunEntry -Target (Join-Path $testRoot 'legacy-install\uu-background.exe')
 
     # Exercise the documented powershell.exe -File entry point without an explicit
     # PackageRoot: PS 5.1 does not expose PSScriptRoot in parameter default values.
@@ -308,6 +250,8 @@ try {
         -not (Test-Path -LiteralPath $backgroundExe -PathType Leaf)) {
         throw 'Install did not place both native executables.'
     }
+    Assert-NoInstalledBackgroundProcesses -UuExecutable $uuExe -BackgroundExecutable $backgroundExe
+    Assert-NoLegacyRunEntry -Stage 'Install'
     if (-not (Test-Path -LiteralPath (Join-Path $installRoot 'skills\uu-cli\SKILL.md') -PathType Leaf)) {
         throw 'Install did not place the uu-cli skill.'
     }
@@ -319,9 +263,6 @@ try {
     if ($usage.ExitCode -ne 2 -or $usage.Output -notmatch 'usage:\s*uu') {
         throw "The installed executable returned unexpected usage output or exit code $($usage.ExitCode): $($usage.Output)"
     }
-    $installedWatcher = Wait-ForInstalledWatcher -UuExecutable $uuExe -BackgroundExecutable $backgroundExe
-    Assert-IdleWatcher -Watcher $installedWatcher -UuExecutable $uuExe -BackgroundExecutable $backgroundExe
-
     $listResult = Invoke-CapturedProcess -Executable $uuExe -Arguments 'list' -WorkingDirectory $localAppData
     if ($listResult.ExitCode -ne 0 -or $listResult.Output -notmatch '(?im)^UU\s+not found\b') {
         throw "uu list did not report a missing official UU cleanly (exit $($listResult.ExitCode)): $($listResult.Output)"
@@ -333,11 +274,6 @@ try {
     if ((Count-UserPathEntry $installRoot) -ne 1) {
         throw 'Install did not add exactly one user PATH entry.'
     }
-    $run = Read-RegistryValue -SubKey 'Software\Microsoft\Windows\CurrentVersion\Run' -Name 'uu-cli'
-    if (-not $run.Exists -or $run.Value -cne ('"{0}"' -f $backgroundExe)) {
-        throw 'Install did not register the hidden watcher at the expected per-user path.'
-    }
-
     $lockedExecutable = [IO.File]::Open(
         $uuExe,
         [IO.FileMode]::Open,
@@ -358,7 +294,10 @@ try {
         throw 'Upgrade did not report a clear busy error for a locked uu.exe.'
     }
 
+    Set-LegacyRunEntry -Target (Join-Path $testRoot 'legacy-upgrade\uu-background.exe')
     & $installer -PackageRoot $package
+    Assert-NoInstalledBackgroundProcesses -UuExecutable $uuExe -BackgroundExecutable $backgroundExe
+    Assert-NoLegacyRunEntry -Stage 'Upgrade'
     if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -cne $configBytes) {
         throw 'Upgrade changed the existing workspace binding config.'
     }
@@ -369,13 +308,8 @@ try {
     if ([IO.Path]::GetFullPath($resolved) -ine [IO.Path]::GetFullPath($uuExe)) {
         throw 'Upgrade changed the command away from the native uu.exe path.'
     }
-    $upgradedWatcher = Wait-ForInstalledWatcher -UuExecutable $uuExe -BackgroundExecutable $backgroundExe
-    if ([IO.Path]::GetFullPath([string]$upgradedWatcher.ExecutablePath) -ine [IO.Path]::GetFullPath($backgroundExe)) {
-        throw 'Upgrade did not leave one watcher at the exact installed background path.'
-    }
-
     & $uninstaller
-    Assert-NoInstalledWatchers -UuExecutable $uuExe -BackgroundExecutable $backgroundExe
+    Assert-NoInstalledBackgroundProcesses -UuExecutable $uuExe -BackgroundExecutable $backgroundExe
     if (Test-Path -LiteralPath $installRoot) {
         throw 'Uninstall left the uu-cli program directory behind.'
     }
@@ -398,10 +332,7 @@ try {
     if ((Count-UserPathEntry $installRoot) -ne 0) {
         throw 'Uninstall left its user PATH entry behind.'
     }
-    $run = Read-RegistryValue -SubKey 'Software\Microsoft\Windows\CurrentVersion\Run' -Name 'uu-cli'
-    if ($run.Exists) {
-        throw 'Uninstall left its per-user watcher Run entry behind.'
-    }
+    Assert-NoLegacyRunEntry -Stage 'Uninstall'
 }
 catch {
     $testFailure = $_
@@ -441,4 +372,4 @@ finally {
 if ($null -ne $testFailure) {
     throw $testFailure
 }
-Write-Output 'Clean hosted Windows install, exact watcher process, idle CPU, missing-UU list, upgrade, Unicode/space PATH, and state-preserving uninstall checks passed.'
+Write-Output 'Clean hosted Windows install and upgrade without startup entries or background processes, missing-UU list, Unicode/space PATH, and state-preserving uninstall checks passed.'

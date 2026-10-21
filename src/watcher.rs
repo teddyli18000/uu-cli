@@ -2,17 +2,17 @@
 //!
 //! The GUI process-name probe is a cheap capability check based on the currently
 //! observed GameViewer.exe host. A renamed or materially different client may
-//! not be detected; in that case the watcher sleeps and does not query uuyc-cli.
+//! not be detected; in that case the watcher exits without querying uuyc-cli.
 
 use anyhow::{Context, Result};
 use fs2::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
+#[cfg(windows)]
+use std::time::Duration;
 
 #[cfg(windows)]
 const ACTIVE_POLL: std::time::Duration = std::time::Duration::from_secs(20);
-#[cfg(windows)]
-const NO_UU_POLL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Runtime data is stored beside the per-user config, outside the workspace.
 pub fn runtime_dir(config_path: &Path) -> PathBuf {
@@ -86,7 +86,7 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
 ///
 /// Each uu invocation may call this function. The cross-process watcher lock
 /// prevents a second long-lived watcher; the process only polls at 20 seconds
-/// while UU is active and sleeps for 60 seconds while it is absent.
+/// while UU is active and exits as soon as the captured UU GUI process exits.
 pub fn spawn_if_needed(executable: &Path, config_path: &Path) -> Result<()> {
     if std::env::var("UU_CLI_NO_BACKGROUND").is_ok_and(|value| value == "1") {
         return Ok(());
@@ -145,6 +145,26 @@ pub fn run(config_path: &Path) -> Result<()> {
     }
 }
 
+/// A waitable handle to the official UU GUI process captured by process name.
+/// The owned file closes the native handle when the lifetime leaves scope.
+#[cfg(windows)]
+pub(crate) struct OfficialUuLifetime(File);
+
+#[cfg(windows)]
+impl OfficialUuLifetime {
+    /// Wait for the captured process to exit. Returns false when the timeout elapses.
+    pub(crate) fn wait(&self, timeout: Duration) -> Result<bool> {
+        windows_process::wait_for_exit(&self.0, timeout)
+    }
+}
+
+/// Capture a waitable process handle for the currently running official UU GUI.
+/// Returns `None` when no matching process is present.
+#[cfg(windows)]
+pub(crate) fn official_lifetime() -> Result<Option<OfficialUuLifetime>> {
+    windows_process::official_lifetime("GameViewer.exe")
+}
+
 #[cfg(windows)]
 pub fn is_official_uu_running() -> Result<bool> {
     windows_process::has_process_named("GameViewer.exe")
@@ -177,14 +197,16 @@ fn run_windows(config_path: &Path) -> Result<()> {
     use crate::config::ConfigStore;
     use crate::inventory::discover_inventory;
     use crate::uuyc::OfficialCli;
-    use std::process::{Child, Command};
-    use std::thread;
-
     use std::os::windows::process::CommandExt;
+    use std::process::{Child, Command};
 
     const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
 
     let Some(_watcher_lock) = try_lock_file(&watcher_lock_path(config_path))? else {
+        return Ok(());
+    };
+
+    let Some(official_lifetime) = official_lifetime()? else {
         return Ok(());
     };
 
@@ -195,18 +217,17 @@ fn run_windows(config_path: &Path) -> Result<()> {
     let mut authorization_console: Option<Child> = None;
 
     loop {
+        if official_lifetime.wait(Duration::ZERO)? {
+            stop_authorization_console(&mut authorization_console);
+            return Ok(());
+        }
+
         let authorization_finished = match authorization_console.as_mut() {
             Some(child) => child.try_wait()?.is_some(),
             None => false,
         };
         if authorization_finished {
             authorization_console = None;
-        }
-
-        if !matches!(is_official_uu_running(), Ok(true)) {
-            official_cli = None;
-            thread::sleep(NO_UU_POLL);
-            continue;
         }
 
         if authorization_console.is_none() {
@@ -218,7 +239,10 @@ fn run_windows(config_path: &Path) -> Result<()> {
                 // Foreground waiting/decision flows own this lock and perform
                 // their own discovery; skip a duplicate official CLI query.
                 let Some(interaction_lock) = try_interaction_lock(config_path)? else {
-                    thread::sleep(ACTIVE_POLL);
+                    if official_lifetime.wait(ACTIVE_POLL)? {
+                        stop_authorization_console(&mut authorization_console);
+                        return Ok(());
+                    }
                     continue;
                 };
 
@@ -226,7 +250,10 @@ fn run_windows(config_path: &Path) -> Result<()> {
                     Ok(snapshot) => snapshot,
                     Err(_) => {
                         official_cli = None;
-                        thread::sleep(ACTIVE_POLL);
+                        if official_lifetime.wait(ACTIVE_POLL)? {
+                            stop_authorization_console(&mut authorization_console);
+                            return Ok(());
+                        }
                         continue;
                     }
                 };
@@ -246,7 +273,20 @@ fn run_windows(config_path: &Path) -> Result<()> {
             }
         }
 
-        thread::sleep(ACTIVE_POLL);
+        if official_lifetime.wait(ACTIVE_POLL)? {
+            stop_authorization_console(&mut authorization_console);
+            return Ok(());
+        }
+    }
+}
+
+#[cfg(windows)]
+fn stop_authorization_console(console: &mut Option<std::process::Child>) {
+    if let Some(mut child) = console.take() {
+        if child.try_wait().ok().flatten().is_none() {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
     }
 }
 
@@ -271,13 +311,19 @@ fn has_promptable_sessions(
 mod windows_process {
     use anyhow::{Context, Result};
     use std::ffi::c_void;
+    use std::fs::File;
     use std::io;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use std::time::Duration;
 
     type Handle = *mut c_void;
 
     const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
+    const SYNCHRONIZE: u32 = 0x0010_0000;
     const MAX_PATH: usize = 260;
     const INVALID_HANDLE_VALUE: Handle = (-1isize) as Handle;
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 258;
 
     #[repr(C)]
     struct ProcessEntry32W {
@@ -298,6 +344,8 @@ mod windows_process {
         fn CreateToolhelp32Snapshot(flags: u32, process_id: u32) -> Handle;
         fn Process32FirstW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
         fn Process32NextW(snapshot: Handle, entry: *mut ProcessEntry32W) -> i32;
+        fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> Handle;
+        fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
         fn CloseHandle(handle: Handle) -> i32;
     }
 
@@ -340,6 +388,65 @@ mod windows_process {
         }
 
         Ok(false)
+    }
+
+    pub fn official_lifetime(expected_name: &str) -> Result<Option<super::OfficialUuLifetime>> {
+        let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if raw == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error()).context("cannot enumerate Windows processes");
+        }
+        let _snapshot = Snapshot(raw);
+
+        let mut entry: ProcessEntry32W = unsafe { std::mem::zeroed() };
+        entry.dw_size = std::mem::size_of::<ProcessEntry32W>() as u32;
+        if unsafe { Process32FirstW(raw, &mut entry) } == 0 {
+            return Err(io::Error::last_os_error()).context("cannot read Windows process list");
+        }
+
+        loop {
+            let end = entry
+                .sz_exe_file
+                .iter()
+                .position(|unit| *unit == 0)
+                .unwrap_or(MAX_PATH);
+            let process_name = String::from_utf16_lossy(&entry.sz_exe_file[..end]);
+            if process_name.eq_ignore_ascii_case(expected_name) {
+                if let Some(lifetime) = lifetime_for_pid(entry.th32_process_id)? {
+                    return Ok(Some(lifetime));
+                }
+            }
+            if unsafe { Process32NextW(raw, &mut entry) } == 0 {
+                break;
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub fn lifetime_for_pid(process_id: u32) -> Result<Option<super::OfficialUuLifetime>> {
+        let raw = unsafe { OpenProcess(SYNCHRONIZE, 0, process_id) };
+        if raw.is_null() {
+            let error = io::Error::last_os_error();
+            // The process can exit between the process snapshot and OpenProcess.
+            if error.raw_os_error() == Some(87) {
+                return Ok(None);
+            }
+            return Err(error)
+                .with_context(|| format!("cannot open process {process_id} for wait"));
+        }
+
+        Ok(Some(super::OfficialUuLifetime(unsafe {
+            File::from_raw_handle(raw)
+        })))
+    }
+
+    pub fn wait_for_exit(process: &File, timeout: Duration) -> Result<bool> {
+        let milliseconds = timeout.as_millis().min((u32::MAX - 1) as u128) as u32;
+        match unsafe { WaitForSingleObject(process.as_raw_handle(), milliseconds) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            _ => Err(io::Error::last_os_error()).context("cannot wait for official UU process"),
+        }
     }
 }
 
@@ -402,5 +509,36 @@ mod tests {
         );
         let normal = Path::new(r"C:\Tools\UU.EXE");
         assert_eq!(super::authorization_executable(normal).unwrap(), normal);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_lifetime_waits_for_own_short_child() {
+        use std::time::Duration;
+
+        let mut child = Command::new("cmd.exe")
+            .args(["/C", "ping -n 3 127.0.0.1 > NUL"])
+            .spawn()
+            .expect("spawn short child process");
+        let lifetime = super::windows_process::lifetime_for_pid(child.id())
+            .unwrap()
+            .expect("open child process lifetime");
+
+        assert!(!lifetime.wait(Duration::ZERO).unwrap());
+        assert!(lifetime.wait(Duration::from_secs(10)).unwrap());
+        assert!(child.wait().unwrap().success());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn watcher_returns_when_no_official_uu_process_is_present() {
+        if super::official_lifetime()
+            .expect("query official UU process")
+            .is_some()
+        {
+            return;
+        }
+        let temp = tempdir().unwrap();
+        super::run(temp.path().join("config.json").as_path()).unwrap();
     }
 }

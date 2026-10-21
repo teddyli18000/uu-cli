@@ -159,20 +159,7 @@ function Set-UuCliProcessPath {
     $env:PATH = $remaining -join ';'
 }
 
-function Set-UuCliRunEntry {
-    param([Parameter(Mandatory = $true)][string]$InstallRoot)
-    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey(
-        'Software\Microsoft\Windows\CurrentVersion\Run'
-    )
-    try {
-        $background = Join-Path $InstallRoot 'uu-background.exe'
-        $key.SetValue('uu-cli', ('"{0}"' -f $background), [Microsoft.Win32.RegistryValueKind]::String)
-    }
-    finally {
-        $key.Dispose()
-    }
-}
-
+# Remove the startup entry written by older releases; new installs do not register one.
 function Remove-UuCliRunEntry {
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey(
         'Software\Microsoft\Windows\CurrentVersion\Run',

@@ -173,6 +173,8 @@ Windows workspace key 至少验证：
 
 ## 当前实现与证据（2026-10-21）
 
+生命周期要求已调整为：不设置 Windows 登录启动项；安装/升级清除旧的 `uu-cli` Run 项且不启动后台；首次 `uu` 调用按需启动发现组件，官方 UU 退出时结束 watcher 和附着连接。Hosted installer 必须检查无启动项、安装/升级后无后台，并使用文档中的无 `-PackageRoot` 安装入口覆盖 Windows PowerShell 5.1。
+
 当前仍是验证候选，尚未满足 v1 release gate。真实官方 UU 集成使用开发机已登录的 Windows UU 4.43.0.3607、用户授权的 disposable Ubuntu 18.04 WSL host 和 `uu-remote-linux` v0.2.12-aic.3；没有把它描述成外部干净 Windows 或真实多设备验收。完整实测记录见 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
 
 | 层级 | 已验证范围 | 证据 |

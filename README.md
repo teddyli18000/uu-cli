@@ -14,7 +14,7 @@
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1
 ```
 
-安装到当前用户的 `%LOCALAPPDATA%\Programs\uu-cli`，添加用户 PATH 和隐藏 watcher 的用户启动项。无需 Rust、Python、Node、WSL 或 PowerShell 7；新终端会收到更新后的 PATH。卸载运行同包中的 `installer\uninstall.ps1`。安装、升级和卸载不修改官方 UU；卸载保留用户绑定及 unknown worker 安全记录，避免重装后误复用可能仍忙的 Terminal。
+安装到当前用户的 `%LOCALAPPDATA%\Programs\uu-cli`，添加用户 PATH，不设置开机启动，也不在安装时启动后台。首次执行 `uu` 时按需启动发现组件；官方 UU 退出时发现组件和本工具的附着连接随之退出。无需 Rust、Python、Node、WSL 或 PowerShell 7；新终端会收到更新后的 PATH。卸载运行同包中的 `installer\uninstall.ps1`。安装、升级和卸载不修改官方 UU；卸载保留用户绑定及 unknown worker 安全记录，避免重装后误复用可能仍忙的 Terminal。
 
 Agent Skill 已写好，随包放在 `skills/uu-cli/SKILL.md`，Release 也提供独立的 `uu-cli-skill.zip`。将其中的 `uu-cli` 文件夹放入 Codex 的 `$CODEX_HOME/skills`（未设置时为 `%USERPROFILE%\.codex\skills`），在新会话中使用。CLI installer 不修改 Codex 配置或自动安装 Skill。
 
@@ -203,4 +203,4 @@ https://uuyc.163.com/download/
 
 文件通道通过同一已授权 worker 传输 base64，远端需要 `base64`、`dd`、`wc`、`tr`、`cut`、`sha256sum` 和 `mv`。上传按 768 字节分块；下载逐块确认并解码。两端核对字节数和 SHA-256 后才替换目标。真实 `put/get` 已对 16,385 个随机二进制字节完成哈希一致验证，也覆盖零字节、相对/绝对/`~` 路径及中英文和空格路径；该样本之外的大文件吞吐仍未实测。失败上传可能留下相邻的 `.uu-cli-*.part` 文件，不会作为成功目标发布。
 
-默认状态放在 `%LOCALAPPDATA%\uu-cli`，不写入 workspace。隐藏 watcher 负责发现，专用 worker helper 保持官方连接供后续命令复用，空闲五分钟后释放；当前用低频进程探测和 20 秒有 UU / 60 秒无 UU 的发现间隔，前台等待 Terminal 时每 2 秒检查。发现和授权的实测结果及资源采样见 [TESTING.md](TESTING.md)。
+默认状态放在 `%LOCALAPPDATA%\uu-cli`，不写入 workspace。隐藏 watcher 由 `uu` 按需启动，官方 UU 开启期间每 20 秒检查新 Terminal；前台等待 Terminal 时每 2 秒检查。watcher 用进程句柄等待官方 UU 退出，无 UU 时不常驻轮询。专用 worker helper 保持连接供后续命令复用，空闲五分钟或官方 UU 退出时释放。退出官方 UU 后，尚未确认完成的命令仍按 unknown 处理，不自动重放。发现和授权的实测结果及资源采样见 [TESTING.md](TESTING.md)。

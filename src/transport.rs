@@ -19,6 +19,22 @@ struct TermPty {
     reader: ReadPump,
     writer: Box<dyn Write + Send>,
     idle_dsr: ConPtyDsrHandshake,
+    official_lifetime: Option<crate::watcher::OfficialUuLifetime>,
+}
+
+fn attachment_has_exited(
+    child: &mut dyn Child,
+    official_lifetime: Option<&crate::watcher::OfficialUuLifetime>,
+) -> std::io::Result<bool> {
+    if let Some(lifetime) = official_lifetime {
+        if lifetime
+            .wait(Duration::ZERO)
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+        {
+            return Ok(true);
+        }
+    }
+    child.try_wait().map(|status| status.is_some())
 }
 
 impl TermPty {
@@ -27,6 +43,7 @@ impl TermPty {
             bail!("official UU CLI not found at {}", cli_path.display());
         }
 
+        let official_lifetime = crate::watcher::official_lifetime()?;
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -118,6 +135,7 @@ impl TermPty {
             reader,
             writer,
             idle_dsr: ConPtyDsrHandshake::default(),
+            official_lifetime,
         })
     }
 
@@ -139,13 +157,14 @@ impl TermPty {
     ) -> Result<JobResult, JobRunError> {
         let result = {
             let child = &mut self.child;
+            let official_lifetime = self.official_lifetime.as_ref();
             run_framed_job_with_child(
                 &mut self.reader,
                 &mut self.writer,
                 output,
                 remote_root,
                 shell_command,
-                || child.try_wait().map(|status| status.is_some()),
+                || attachment_has_exited(child.as_mut(), official_lifetime),
             )
         };
         #[cfg(windows)]
@@ -164,6 +183,7 @@ impl TermPty {
     ) -> Result<JobResult, JobRunError> {
         let result = {
             let child = &mut self.child;
+            let official_lifetime = self.official_lifetime.as_ref();
             run_framed_job_with_input_and_child(
                 &mut self.reader,
                 &mut self.writer,
@@ -171,7 +191,7 @@ impl TermPty {
                 remote_root,
                 shell_command,
                 input,
-                || child.try_wait().map(|status| status.is_some()),
+                || attachment_has_exited(child.as_mut(), official_lifetime),
             )
         };
         #[cfg(windows)]
@@ -185,8 +205,9 @@ impl TermPty {
         let mut output = Vec::new();
         let result = {
             let child = &mut self.child;
+            let official_lifetime = self.official_lifetime.as_ref();
             run_framed_pwd_probe_with_child(&mut self.reader, &mut self.writer, &mut output, || {
-                child.try_wait().map(|status| status.is_some())
+                attachment_has_exited(child.as_mut(), official_lifetime)
             })
         };
         let result = match result {
@@ -244,7 +265,10 @@ impl OfficialAttachPty {
     }
 
     pub fn has_exited(&mut self) -> std::io::Result<bool> {
-        self.inner.child.try_wait().map(|status| status.is_some())
+        attachment_has_exited(
+            self.inner.child.as_mut(),
+            self.inner.official_lifetime.as_ref(),
+        )
     }
 
     /// Drain idle prompt/banner traffic without executing remote commands.
