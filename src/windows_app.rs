@@ -551,7 +551,7 @@ fn with_worker<T>(
                     continue;
                 }
                 baseline = fingerprint_baseline(&current);
-                eprintln!("等待 {} 的可用 Terminal；接下来打开的匹配 Terminal 将用于本次请求。unknown/may-still-be-running 的 worker 不会复用。Ctrl+C取消。", binding.device_name);
+                eprintln!("等待 {} 的可用 Terminal；接下来打开的匹配 Terminal 将用于本次请求。看到提示符后关闭专用 Terminal 的标签页以释放官方连接，不输入 exit。unknown/may-still-be-running 的 worker 不会复用。Ctrl+C取消。", binding.device_name);
                 announced = true;
                 wait_guard = Some(lock);
             }
