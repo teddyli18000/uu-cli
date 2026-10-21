@@ -248,7 +248,7 @@ fn download_chunk_command(
     expected_size: u64,
 ) -> String {
     let body = format!(
-        r#"uu_cli_chunk_size=$(dd if="$uu_cli_dest" bs={UPLOAD_CHUNK_SIZE} skip={sequence} count=1 2>/dev/null | wc -c | tr -d '[:space:]'); [ "$uu_cli_chunk_size" = "{expected_size}" ] || {{ echo "uu-cli: remote chunk size mismatch" >&2; exit 1; }}; printf 'UUCLI_CHUNK_BEGIN:{sequence}:{expected_size}\n'; dd if="$uu_cli_dest" bs={UPLOAD_CHUNK_SIZE} skip={sequence} count=1 2>/dev/null | base64 || exit $?; printf '\nUUCLI_CHUNK_END:{sequence}:%s\n' "$uu_cli_chunk_size""#
+        r#"printf 'UUCLI_CHUNK_BEGIN:{sequence}:{expected_size}\n'; dd if="$uu_cli_dest" bs={UPLOAD_CHUNK_SIZE} skip={sequence} count=1 2>/dev/null | base64 || exit $?; printf '\nUUCLI_CHUNK_END:{sequence}:{expected_size}\n'"#
     );
     remote_command(remote_path, nonce, &body)
 }
@@ -722,8 +722,9 @@ mod tests {
                         preparation(format!("fixture metadata output failed: {error}"))
                     })?;
             } else {
-                assert_eq!(command.matches("bs=768 ").count(), 2);
-                assert_eq!(command.matches("count=1").count(), 2);
+                assert_eq!(command.matches("bs=768 ").count(), 1);
+                assert_eq!(command.matches("count=1").count(), 1);
+                assert!(!command.contains("wc -c"));
                 let expected_sequence = commands.len() - 2;
                 let skip_values: Vec<usize> = command
                     .split(" skip=")
@@ -735,7 +736,7 @@ mod tests {
                             .expect("download command should include its chunk sequence")
                     })
                     .collect();
-                assert_eq!(skip_values, vec![expected_sequence; 2]);
+                assert_eq!(skip_values, vec![expected_sequence]);
                 let sequence = skip_values[0];
                 let start = sequence * UPLOAD_CHUNK_SIZE;
                 let end = (start + UPLOAD_CHUNK_SIZE).min(bytes.len());
