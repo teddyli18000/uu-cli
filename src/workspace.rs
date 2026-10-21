@@ -51,19 +51,9 @@ fn is_ancestor_key(root: &str, child: &str) -> bool {
     }
 }
 
-/// Return the nearest repository root, including worktrees and submodules whose
-/// .git entry is a file instead of a directory.
-fn git_root_boundary(cwd: &Path) -> Option<PathBuf> {
-    let cwd = canonical(cwd).ok()?;
-    cwd.ancestors()
-        .find(|ancestor| ancestor.join(".git").exists())
-        .map(Path::to_path_buf)
-}
-
 pub fn resolve_binding<'a>(config: &'a Config, cwd: &Path) -> Option<&'a WorkspaceBinding> {
     let resolved_cwd = canonical(cwd).ok()?;
     let cwd = comparable(&resolved_cwd)?;
-    let git_boundary = git_root_boundary(&resolved_cwd).and_then(|boundary| comparable(&boundary));
 
     config
         .bindings
@@ -74,15 +64,6 @@ pub fn resolve_binding<'a>(config: &'a Config, cwd: &Path) -> Option<&'a Workspa
                 return None;
             }
 
-            // An inner Git repository or submodule is its own workspace
-            // boundary. A binding outside it must not leak into that checkout.
-            if git_boundary
-                .as_deref()
-                .is_some_and(|boundary| !is_ancestor_key(boundary, &root))
-            {
-                return None;
-            }
-
             Some((root.len(), binding))
         })
         .max_by_key(|(len, _)| *len)
@@ -90,11 +71,7 @@ pub fn resolve_binding<'a>(config: &'a Config, cwd: &Path) -> Option<&'a Workspa
 }
 
 pub fn suggest_root(cwd: &Path) -> Result<PathBuf> {
-    let cwd = canonical(cwd)?;
-    if let Some(root) = git_root_boundary(&cwd) {
-        return Ok(root);
-    }
-    Ok(cwd)
+    canonical(cwd)
 }
 
 #[cfg(test)]
@@ -129,7 +106,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_git_repository_does_not_inherit_parent_binding() {
+    fn nested_git_repository_inherits_nearest_explicit_ancestor_binding() {
         let tmp = TempDir::new().unwrap();
         let outer = tmp.path().join("outer");
         let nested = outer.join("vendor").join("nested");
@@ -141,12 +118,13 @@ mod tests {
         let mut config = Config::default();
         config.bindings.push(binding(outer, "outer"));
 
-        assert!(resolve_binding(&config, &leaf).is_none());
-        assert!(same_path(&suggest_root(&leaf).unwrap(), &nested));
+        let got = resolve_binding(&config, &leaf).unwrap();
+        assert_eq!(got.device_identity, "outer");
+        assert!(same_path(&suggest_root(&leaf).unwrap(), &leaf));
     }
 
     #[test]
-    fn nested_submodule_git_file_is_a_workspace_boundary() {
+    fn nested_submodule_git_file_does_not_hide_ancestor_binding() {
         let tmp = TempDir::new().unwrap();
         let outer = tmp.path().join("outer");
         let submodule = outer.join("vendor").join("submodule");
@@ -158,8 +136,9 @@ mod tests {
         let mut config = Config::default();
         config.bindings.push(binding(outer, "outer"));
 
-        assert!(resolve_binding(&config, &leaf).is_none());
-        assert!(same_path(&suggest_root(&leaf).unwrap(), &submodule));
+        let got = resolve_binding(&config, &leaf).unwrap();
+        assert_eq!(got.device_identity, "outer");
+        assert!(same_path(&suggest_root(&leaf).unwrap(), &leaf));
     }
 
     #[test]
@@ -242,13 +221,13 @@ mod tests {
     }
 
     #[test]
-    fn git_root_is_preferred() {
+    fn current_directory_is_the_workspace_root_inside_git_repository() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("repo");
         let child = root.join("src").join("deep");
         std::fs::create_dir_all(&child).unwrap();
         std::fs::create_dir(root.join(".git")).unwrap();
 
-        assert!(same_path(&suggest_root(&child).unwrap(), &root));
+        assert!(same_path(&suggest_root(&child).unwrap(), &child));
     }
 }

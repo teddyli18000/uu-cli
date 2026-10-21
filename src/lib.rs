@@ -4,6 +4,7 @@ pub mod config;
 pub mod discovery;
 pub mod inventory;
 pub mod job;
+pub mod job_queue;
 pub mod model;
 pub mod runner;
 pub mod transfer;

@@ -3,25 +3,21 @@ use std::collections::HashSet;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::windows::process::CommandExt;
 use std::path::Path;
-use std::process::Command as ProcessCommand;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc, Arc,
 };
 use std::thread;
 use std::time::Duration;
-use uu_cli::authorization::{
-    binding_candidates, classify_session, fingerprint_baseline, SessionDecision,
-};
 use uu_cli::cli::Command;
 use uu_cli::config::ConfigStore;
 use uu_cli::inventory::{
     discover_inventory, is_eligible_session, is_live_session, InventorySnapshot,
 };
 use uu_cli::job::argv_to_shell;
-use uu_cli::model::{Config, SessionInfo, WorkspaceBinding};
+use uu_cli::job_queue::QueueTicket;
+use uu_cli::model::{SessionInfo, WorkspaceBinding};
 use uu_cli::runner::{JobInput, JobRunError};
 use uu_cli::uuyc::OfficialCli;
 use uu_cli::watcher;
@@ -29,26 +25,12 @@ use uu_cli::worker_host::{self, WorkerClient};
 use uu_cli::worker_lease::{AcquireResult, WorkerLease};
 use uu_cli::workspace::{resolve_binding, suggest_root};
 
-const CREATE_NEW_CONSOLE: u32 = 0x10;
-
 pub fn internal(mode: &str) -> Result<u8> {
-    if mode != "__watch" {
-        decision_console()?;
-    }
-    let store = ConfigStore::from_env()?;
     match mode {
-        "__watch" => {
-            watcher::run(store.path())?;
-        }
-        "__setup" => {
-            setup(&store, env::args().nth(2).as_deref() == Some("force"))?;
-        }
-        "__authorize" => {
-            authorize(&store, env::args().nth(2).as_deref())?;
-        }
-        _ => bail!("unknown internal mode"),
+        // Compatibility for a legacy watcher launch; no discovery or UI.
+        "__watch" => Ok(0),
+        _ => bail!("internal setup is disabled; the human must run uu bind in their terminal"),
     }
-    Ok(0)
 }
 
 pub fn execute(command: Command, store: &ConfigStore) -> Result<u8> {
@@ -56,24 +38,15 @@ pub fn execute(command: Command, store: &ConfigStore) -> Result<u8> {
     if matches!(command, Command::List) {
         return list(store, &cwd);
     }
-    let exe = env::current_exe()?;
-    // A failed background launch must be visible; the foreground command can
-    // still complete without relying on a watcher for safety.
-    if let Err(error) = watcher::spawn_if_needed(&exe, store.path()) {
-        eprintln!("uu: automatic Terminal discovery unavailable: {error:#}");
-    }
     if matches!(command, Command::Bind) {
-        launch_console("__setup", Some("force"))?;
+        setup(store)?;
         return Ok(0);
-    }
-    if resolve_binding(&store.load()?, &cwd).is_none() {
-        // Fail with a persistent caller diagnostic before opening a decision window.
-        OfficialCli::locate()?.list_devices()?;
-        launch_console("__setup", None)?;
     }
     let binding = resolve_binding(&store.load()?, &cwd)
         .cloned()
-        .ok_or_else(|| anyhow!("workspace binding was cancelled or not completed"))?;
+        .ok_or_else(|| {
+            anyhow!("workspace is unbound; ask the human to run uu bind in this workspace")
+        })?;
 
     let (sender, receiver) = mpsc::channel();
     let cancelled = Arc::new(AtomicBool::new(false));
@@ -90,8 +63,7 @@ pub fn execute(command: Command, store: &ConfigStore) -> Result<u8> {
             let shell = argv_to_shell(&argv)?;
             let remote_root = binding.remote_root.clone();
             let result = with_worker(store, &binding, &cancelled, move |transport| {
-                // Only the job reader consumes caller stdin. Setup/selection is
-                // always hosted in a separate console.
+                // Ordinary jobs never read binding decisions from caller stdin.
 
                 thread::spawn(move || {
                     let mut input = io::stdin().lock();
@@ -172,21 +144,6 @@ pub fn execute(command: Command, store: &ConfigStore) -> Result<u8> {
     }
 }
 
-fn launch_console(mode: &str, argument: Option<&str>) -> Result<()> {
-    let mut command = ProcessCommand::new(env::current_exe()?);
-    command.arg(mode).creation_flags(CREATE_NEW_CONSOLE);
-    if let Some(argument) = argument {
-        command.arg(argument);
-    }
-    let status = command
-        .status()
-        .context("cannot open the short uu decision window")?;
-    if !status.success() {
-        bail!("uu setup was cancelled or failed");
-    }
-    Ok(())
-}
-
 fn interaction_lock(store: &ConfigStore) -> Result<File> {
     loop {
         if let Some(lock) = watcher::try_interaction_lock(store.path())? {
@@ -217,239 +174,73 @@ fn check_instance_support(current: &[SessionInfo]) -> Result<()> {
     Ok(())
 }
 
-fn binding_sessions(
-    store: &ConfigStore,
-    snapshot: &InventorySnapshot,
-    config: &Config,
-) -> Result<Vec<SessionInfo>> {
-    let mut candidates = sessions(snapshot)?;
-    let mut seen: HashSet<_> = candidates
-        .iter()
-        .filter_map(SessionInfo::authorization_fingerprint)
-        .collect();
-
-    // A helper may keep an authorized Terminal attached after UU marks it
-    // running/non-attachable. Metadata is only an index: require the device to
-    // be online and the exact live instance to still appear in fresh inventory.
-    for helper in worker_host::live_sessions(store)? {
-        let Some(fingerprint) = helper.authorization_fingerprint() else {
-            continue;
-        };
-        if seen.contains(&fingerprint) {
-            continue;
-        }
-        let Some(device) = snapshot.devices.iter().find(|entry| {
-            entry.device.is_online && entry.device.device_identity == helper.device_identity
-        }) else {
-            continue;
-        };
-        let Some(current) = device.sessions.iter().find(|session| {
-            is_live_session(session)
-                && session.authorization_fingerprint().as_deref() == Some(fingerprint.as_str())
-        }) else {
-            continue;
-        };
-        // The cache never grants authorization, even if its pipe is healthy.
-        if !config.is_session_authorized(current) {
-            continue;
-        }
-
-        match WorkerLease::try_acquire(store.path(), current)? {
-            AcquireResult::Acquired(lease) => {
-                let client = WorkerClient::try_connect(store, current)?;
-                let connected = client.is_some();
-                drop(client);
-                drop(lease);
-                if connected {
-                    candidates.push(current.clone());
-                    seen.insert(fingerprint);
-                }
-            }
-            // Another uu call owns this exact, currently live authorized
-            // instance. Do not probe its busy pipe; it remains a device
-            // candidate and capture_pwd will wait for its lease.
-            AcquireResult::Busy => {
-                candidates.push(current.clone());
-                seen.insert(fingerprint);
-            }
-            AcquireResult::Quarantined => {}
-        }
-    }
-    Ok(candidates)
-}
-
 fn prompt(label: &str) -> Result<String> {
     print!("{label}");
     io::stdout().flush()?;
     let mut line = String::new();
     if io::stdin().read_line(&mut line)? == 0 {
-        bail!("decision window input closed");
+        bail!("binding input closed");
     }
     Ok(line.trim().to_owned())
 }
 
-fn accept_one(store: &ConfigStore, session: &SessionInfo) -> Result<bool> {
-    // Persist default-deny before showing the question. Esc/close/crash therefore
-    // cannot cause the same Terminal instance to prompt again or become eligible.
-    store.update(|config| {
-        config.decline_session(session);
-        Ok(())
-    })?;
-    println!(
-        "{} 新终端\n[Enter] 交给 uu-cli  [N/Esc] 保留手动使用",
-        session.device_name
-    );
-    if read_accept_key()? {
-        store.update(|config| {
-            config.accept_session(session);
-            Ok(())
-        })?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
-}
-
-fn authorize(store: &ConfigStore, device: Option<&str>) -> Result<()> {
-    // A child that lost a race must simply close, not queue another question.
-    let Some(_lock) = watcher::try_interaction_lock(store.path())? else {
-        return Ok(());
-    };
-    let cli = OfficialCli::locate()?;
-    let snapshot = discover_inventory(&cli)?;
-    for session in sessions(&snapshot)?
-        .into_iter()
-        .filter(|s| device.map_or(true, |id| s.device_identity == id))
-    {
-        let config = store.load()?;
-        if !config.is_session_authorized(&session) && !config.is_session_declined(&session) {
-            accept_one(store, &session)?;
-        }
-    }
-    Ok(())
-}
-
-fn choose_device(candidates: &[SessionInfo]) -> Result<String> {
-    let mut devices = Vec::<(String, String)>::new();
-    for candidate in candidates {
-        if !devices
-            .iter()
-            .any(|(id, _)| id == &candidate.device_identity)
-        {
-            devices.push((
-                candidate.device_identity.clone(),
-                candidate.device_name.clone(),
-            ));
-        }
-    }
-    if devices.len() == 1 {
-        return Ok(devices[0].0.clone());
-    }
-    for (index, (_, name)) in devices.iter().enumerate() {
-        if devices[index + 1..].iter().any(|(_, other)| other == name) {
-            bail!("多个设备具有相同名称；请仅保留目标设备的 Terminal 后重试，uu 不会猜测设备");
-        }
-    }
-    println!("请选择远端设备：");
-    for (index, (_, name)) in devices.iter().enumerate() {
-        // Ordinals are used only for this explicit human decision.
-        println!(
-            "  {}) {}",
-            index + 1,
-            if name.is_empty() {
-                "未命名设备"
-            } else {
-                name
-            }
-        );
-    }
-    loop {
-        let answer = prompt("设备编号 (Ctrl+C取消): ")?;
-        if answer.contains('\u{1b}') {
-            bail!("device selection cancelled");
-        }
-        if let Ok(index) = answer.parse::<usize>() {
-            if index > 0 && index <= devices.len() {
-                return Ok(devices[index - 1].0.clone());
-            }
-        }
-    }
-}
-
-fn setup(store: &ConfigStore, force: bool) -> Result<()> {
+fn setup(store: &ConfigStore) -> Result<()> {
     let _lock = interaction_lock(store)?;
     let cwd = env::current_dir()?;
-    let local_root = suggest_root(&cwd)?;
-    if !force && resolve_binding(&store.load()?, &cwd).is_some() {
+    let local_root = uu_cli::workspace::canonical(&cwd)?;
+    let cli = OfficialCli::locate()?;
+    let config = store.load()?;
+    let snapshot = discover_inventory(&cli)?;
+    let mut candidates = sessions(&snapshot)?;
+    // Never clear quarantine or probe a possibly unfinished job during binding.
+    let mut safe = Vec::new();
+    for session in candidates.drain(..) {
+        match WorkerLease::try_acquire(store.path(), &session)? {
+            AcquireResult::Quarantined => {}
+            AcquireResult::Acquired(lease) => {
+                drop(lease);
+                safe.push(session);
+            }
+            AcquireResult::Busy if config.is_session_authorized(&session) => safe.push(session),
+            AcquireResult::Busy => {}
+        }
+    }
+    let new_sessions: Vec<_> = safe
+        .iter()
+        .filter(|session| !config.is_session_authorized(session))
+        .cloned()
+        .collect();
+    if new_sessions.is_empty() {
+        bail!("no available new dedicated Terminal; open one in official UU, close its tab without typing exit, then run uu bind again; unknown workers remain quarantined");
+    }
+    if new_sessions.len() != 1 {
+        bail!("ambiguous Terminal hand-off: expected exactly one new live detached Terminal; leave only the intended Terminal available, then run uu bind again");
+    }
+    let session = &new_sessions[0];
+    let device_id = session.device_identity.clone();
+    let device_name = session.device_name.clone();
+    // Running bind is the human's explicit hand-off; no redundant accept prompt.
+    store.update(|config| {
+        config.accept_session(session);
+        Ok(())
+    })?;
+    let config = store.load()?;
+    let old_root = config
+        .bindings
+        .iter()
+        .find(|binding| {
+            uu_cli::workspace::same_path(&binding.local_root, &local_root)
+                && binding.device_identity == device_id
+        })
+        .map(|b| b.remote_root.clone());
+    if let Some(root) = old_root {
+        println!(
+            "已交给 CLI：{} · {}；保留远端目录 {}",
+            device_name, session.session_name, root
+        );
         return Ok(());
     }
-    let cli = OfficialCli::locate()?;
-    let initial = sessions(&discover_inventory(&cli)?)?;
-    let mut baseline = fingerprint_baseline(&initial);
-    let mut waiting = false;
-    let (device_id, device_name) = loop {
-        let snapshot = discover_inventory(&cli)?;
-        let config = store.load()?;
-        let current = binding_sessions(store, &snapshot, &config)?;
-        let candidates = binding_candidates(
-            &current,
-            &config.authorized_workers,
-            &config.declined_workers,
-            waiting.then_some(&baseline),
-        );
-        if candidates.is_empty() {
-            if !waiting {
-                println!("请在官方 UU 中打开目标设备的 Terminal；接下来打开的 Terminal 将用于本次请求。看到提示符后关闭专用 Terminal 的标签页以释放官方连接，不输入 exit。Ctrl+C取消。");
-                baseline = fingerprint_baseline(&current);
-                waiting = true;
-            }
-            thread::sleep(Duration::from_secs(2));
-            continue;
-        }
-        let selected = choose_device(&candidates)?;
-        let selected_sessions: Vec<_> = candidates
-            .iter()
-            .filter(|s| s.device_identity == selected)
-            .collect();
-        let name = selected_sessions[0].device_name.clone();
-        let mut accepted = selected_sessions
-            .iter()
-            .any(|s| config.is_session_authorized(s));
-        for session in selected_sessions {
-            if config.is_session_authorized(session) {
-                continue;
-            }
-            if waiting
-                && classify_session(
-                    session,
-                    &config.authorized_workers,
-                    &config.declined_workers,
-                    Some(&baseline),
-                ) == SessionDecision::AutoAuthorizeForPendingRequest
-            {
-                store.update(|config| {
-                    config.authorize_session(session);
-                    Ok(())
-                })?;
-                accepted = true;
-            } else if !accepted && accept_one(store, session)? {
-                accepted = true;
-            }
-        }
-        if accepted {
-            break (selected, name);
-        }
-        waiting = false;
-    };
-    let config = store.load()?;
-    let old_root = resolve_binding(&config, &local_root)
-        .filter(|binding| binding.device_identity == device_id)
-        .map(|b| b.remote_root.clone());
-    let default_root = if let Some(root) = old_root {
-        root
-    } else {
-        capture_pwd(store, &cli, &device_id)?
-    };
+    let default_root = capture_pwd(store, &cli, session)?;
     let remote_root = loop {
         let answer = prompt(&format!("Remote root [{default_root}] (Ctrl+C取消): "))?;
         if answer.contains('\u{1b}') {
@@ -483,7 +274,9 @@ fn setup(store: &ConfigStore, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn capture_pwd(store: &ConfigStore, cli: &OfficialCli, device: &str) -> Result<String> {
+fn capture_pwd(store: &ConfigStore, cli: &OfficialCli, selected: &SessionInfo) -> Result<String> {
+    let device = selected.device_identity.as_str();
+    let fingerprint = selected.authorization_fingerprint();
     loop {
         let config = store.load()?;
         let snapshot = discover_inventory(cli)?;
@@ -507,7 +300,9 @@ fn capture_pwd(store: &ConfigStore, cli: &OfficialCli, device: &str) -> Result<S
         let current: Vec<_> = device_inventory
             .sessions
             .iter()
-            .filter(|session| is_live_session(session))
+            .filter(|session| {
+                is_live_session(session) && session.authorization_fingerprint() == fingerprint
+            })
             .cloned()
             .collect();
         let helper_fingerprints: HashSet<_> = worker_host::live_sessions(store)?
@@ -613,27 +408,43 @@ fn with_worker<T>(
     cancelled: &AtomicBool,
     operation: impl FnOnce(&mut WorkerClient) -> std::result::Result<T, JobRunError>,
 ) -> Result<T> {
-    let mut wait_guard: Option<File> = None;
-    let mut baseline = HashSet::new();
-    let mut announced = false;
+    let ticket = QueueTicket::join(store.path(), &binding.device_identity)?;
+    let mut announced = None;
     loop {
         if cancelled.load(Ordering::SeqCst) {
             bail!("cancelled before dispatch");
+        }
+        let ahead = ticket.position()?;
+        if ahead > 0 {
+            if announced != Some(ahead) {
+                eprintln!(
+                    "排队等待 {}：前面还有 {} 个等待中的命令。Ctrl+C 取消本次排队。",
+                    binding.device_name, ahead
+                );
+                announced = Some(ahead);
+            }
+            thread::sleep(Duration::from_millis(200));
+            continue;
         }
         // Live helpers own the exact authorized attachment. Routing a new job
         // through one does not need another remote list/connect/attach cycle.
         // A stale cache entry never grants authority or triggers dispatch.
         let config = store.load()?;
+        let mut busy_authorized = false;
         for session in worker_host::live_sessions(store)?.iter().filter(|session| {
             session.device_identity == binding.device_identity
                 && config.is_session_authorized(session)
         }) {
             let lease = match WorkerLease::try_acquire(store.path(), session)? {
                 AcquireResult::Acquired(lease) => lease,
-                AcquireResult::Busy | AcquireResult::Quarantined => continue,
+                AcquireResult::Busy => {
+                    busy_authorized = true;
+                    continue;
+                }
+                AcquireResult::Quarantined => continue,
             };
             if let Some(transport) = WorkerClient::try_connect(store, session)? {
-                drop(wait_guard);
+                drop(ticket);
                 return dispatch(lease, transport, cancelled, operation);
             }
         }
@@ -662,7 +473,11 @@ fn with_worker<T>(
         {
             let lease = match WorkerLease::try_acquire(store.path(), session)? {
                 AcquireResult::Acquired(lease) => lease,
-                AcquireResult::Busy | AcquireResult::Quarantined => continue,
+                AcquireResult::Busy => {
+                    busy_authorized = true;
+                    continue;
+                }
+                AcquireResult::Quarantined => continue,
             };
             // Recheck instance under our lease immediately before attach.
             if !cli
@@ -676,52 +491,17 @@ fn with_worker<T>(
                 continue;
             }
             let transport = WorkerClient::connect_or_start(store, cli.path(), session)?;
-            drop(wait_guard);
+            drop(ticket);
             return dispatch(lease, transport, cancelled, operation);
         }
-        if wait_guard.is_none() {
-            if let Some(lock) = watcher::try_interaction_lock(store.path())? {
-                let undecided = current.iter().any(|s| {
-                    is_eligible_session(s)
-                        && s.authorization_fingerprint().is_some()
-                        && !config.is_session_authorized(s)
-                        && !config.is_session_declined(s)
-                });
-                if undecided {
-                    drop(lock);
-                    launch_console("__authorize", Some(&binding.device_identity))?;
-                    continue;
-                }
-                baseline = fingerprint_baseline(&current);
-                eprintln!("等待 {} 的可用 Terminal；接下来打开的匹配 Terminal 将用于本次请求。看到提示符后关闭专用 Terminal 的标签页以释放官方连接，不输入 exit。unknown/may-still-be-running 的 worker 不会复用。Ctrl+C取消。", binding.device_name);
-                announced = true;
-                wait_guard = Some(lock);
-            }
-        } else if announced {
-            let newly_opened: Vec<_> = current
-                .iter()
-                .filter(|s| {
-                    is_eligible_session(s)
-                        && classify_session(
-                            s,
-                            &config.authorized_workers,
-                            &config.declined_workers,
-                            Some(&baseline),
-                        ) == SessionDecision::AutoAuthorizeForPendingRequest
-                })
-                .cloned()
-                .collect();
-            if !newly_opened.is_empty() {
-                store.update(|config| {
-                    for session in &newly_opened {
-                        config.authorize_session(session);
-                    }
-                    Ok(())
-                })?;
-                continue;
-            }
+        if !busy_authorized {
+            bail!("no authorized available Terminal for {}; ask the human to open a dedicated Terminal, close its tab, and run uu bind; unknown/may-still-be-running workers are not reused", binding.device_name);
         }
-        thread::sleep(Duration::from_secs(2));
+        if announced != Some(0) {
+            eprintln!("排队等待 {}：前面还有 0 个等待中的命令，全部已绑定 Terminal 正忙；任务完成后自动执行。Ctrl+C 取消本次排队。", binding.device_name);
+            announced = Some(0);
+        }
+        thread::sleep(Duration::from_secs(1));
     }
 }
 
@@ -827,81 +607,4 @@ fn list(store: &ConfigStore, cwd: &Path) -> Result<u8> {
         );
     }
     Ok(0)
-}
-
-fn decision_console() -> Result<()> {
-    use std::ffi::c_void;
-    use std::fs::OpenOptions;
-    use std::os::windows::io::IntoRawHandle;
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn SetStdHandle(kind: u32, handle: *mut c_void) -> i32;
-        fn SetConsoleOutputCP(code_page: u32) -> i32;
-    }
-    // A console created by the hidden watcher may inherit null std handles.
-    // Reopen only this dedicated decision console, never the caller's job I/O.
-    let input = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open("CONIN$")
-        .context("no interactive console is available for a human decision")?
-        .into_raw_handle();
-    let output = OpenOptions::new()
-        .write(true)
-        .open("CONOUT$")?
-        .into_raw_handle();
-    unsafe {
-        if SetConsoleOutputCP(65001) == 0
-            || SetStdHandle(-10i32 as u32, input) == 0
-            || SetStdHandle(-11i32 as u32, output) == 0
-            || SetStdHandle(-12i32 as u32, output) == 0
-        {
-            return Err(io::Error::last_os_error().into());
-        }
-    }
-    Ok(())
-}
-
-fn read_accept_key() -> Result<bool> {
-    use std::ffi::c_void;
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn GetStdHandle(kind: u32) -> *mut c_void;
-        fn GetConsoleMode(handle: *mut c_void, mode: *mut u32) -> i32;
-        fn SetConsoleMode(handle: *mut c_void, mode: u32) -> i32;
-        fn ReadConsoleW(
-            handle: *mut c_void,
-            buffer: *mut u16,
-            count: u32,
-            read: *mut u32,
-            reserved: *mut c_void,
-        ) -> i32;
-    }
-    let handle = unsafe { GetStdHandle(-10i32 as u32) };
-    let mut mode = 0;
-    if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
-        bail!("cannot read human decision from a console");
-    }
-    struct Restore(*mut c_void, u32);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            unsafe {
-                SetConsoleMode(self.0, self.1);
-            }
-        }
-    }
-    let _restore = Restore(handle, mode);
-    // Disable line input and echo; N/Esc cancel immediately without Enter.
-    if unsafe { SetConsoleMode(handle, mode & !(0x2 | 0x4)) } == 0 {
-        return Err(io::Error::last_os_error().into());
-    }
-    let mut key = 0u16;
-    let mut count = 0;
-    if unsafe { ReadConsoleW(handle, &mut key, 1, &mut count, std::ptr::null_mut()) } == 0
-        || count == 0
-    {
-        bail!("decision console closed");
-    }
-    println!();
-    Ok(key == 13)
 }

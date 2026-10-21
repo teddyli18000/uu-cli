@@ -26,9 +26,8 @@ local_root
 
 默认行为：
 
-- Git 仓库内以 Git root 作为建议 local root；
-- 非 Git 目录采用当前目录或合理的最近根目录；
-- 从子目录执行时使用最近的已存在 binding；
+- 用户运行 `uu bind` 时，当前目录就是精确 local root，即使它位于 Git 仓库内；
+- 普通 `uu` 从子目录执行时使用最近的已存在 binding；
 - binding 存在用户侧，不向 repo 写 `.uu` 等项目文件；
 - v1 暂不处理一个 workspace 同时操作两台远端设备。
 
@@ -45,11 +44,11 @@ device B → workers B1 B2
 
 不同设备的 worker 绝不能混用。
 
-首次绑定时如果多台设备都有可用 Terminal，只让用户通过简短人类选择器选择一次 friendly name；内部保存经过验证的稳定 identity。Codex 不直接选择 deviceId。
+通常只处理一个新出现且可用的 detached Terminal；`uu bind` 用户调用即授权它。若有多个设备/Terminal 候选则报明确歧义并退出，不弹 picker、不猜，用户在官方 UU 中整理后重跑。Codex 不直接选择 deviceId，也不代替用户运行 bind。
 
 ## 4. Terminal worker pool
 
-官方 UU Terminal 由用户自己在官方 UU 中打开。`uu-cli` 自动发现已经存在的 Terminal，并把被用户允许使用的 Terminal 视为 worker。
+官方 UU Terminal 由用户自己在官方 UU 中逐个打开。库存发现不会授权；只有用户运行 `uu bind` 并选择的 Terminal 才进入 worker pool。
 
 ```text
 device A
@@ -64,44 +63,27 @@ device A
 - 一个 worker 同时只属于一个正在运行的 job；
 - 长任务持续占用原 worker，并持续把输出返回给调用方；
 - 其他命令可调度到其他 idle worker；
-- worker 全忙时等待；
+- 已授权 worker 全忙时排队并报告队列位置；
 - 不抢占、不串流、不跨设备；
 - worker/session 的内部名字不要求用户记忆。
 
 ## 5. Terminal 发现与人类授权
 
-用户打开新官方 Terminal 后，`uu-cli` 应尽快自动发现，但**发现不等于可以静默接管**。
+设备/Terminal 列表可以被刷新，但发现始终只是库存信息，不会授权或接管新 Terminal。授权只能由用户手动运行 `uu bind` 发起，并在该调用终端中完成；不得弹出独立授权窗口，也不得由后台 watcher 自动授权。
 
-### 5.1 有请求正在等待
+用户按自己的节奏在官方 UU 中逐个打开专用 Terminal；按需关闭对应官方标签页以释放连接，再切到目标 workspace 目录运行 `uu bind`。该目录精确成为 local root。唯一新出现且可用的 detached Terminal 即明确授权，无需设备/session picker 或再次问“是否交给 uu-cli”。
 
-如果 `uu` 已经明确告诉用户“请打开目标设备 Terminal；新打开的 Terminal 将用于本次请求”，那么用户随后打开匹配 Terminal 的动作本身就是本次授权。
+### 5.1 首次绑定
 
-如果 workspace 尚未绑定，而用户被提示“打开你想使用设备的 Terminal”，等待期间唯一新出现的 Terminal 可以同时完成：
+正常情况 `uu bind` 只找到一个新出现且可用的 detached Terminal，并直接授权。多个候选则给出歧义诊断并结束，不展示选择器或猜测；用户自行整理到唯一候选后重跑。首次绑定时在调用终端确认 remote root，默认值可来自该 Terminal 的 `pwd`。没有可用 Terminal 时命令清楚提示用户先打开 Terminal 并再次运行 `uu bind`，不让普通命令停在等待授权状态。
 
-```text
-identify device
-→ authorize worker for this pending request
-→ collect/confirm remote root
-→ continue original command
-```
+### 5.2 同设备增加 worker
 
-不要让用户重新运行原命令，也不要再弹第二个“是否交给 uu-cli”确认。
+已绑定 workspace 再运行 `uu bind` 时，将唯一新出现且可用的 detached Terminal 加入同一设备 pool。重复绑定保留现有 remote root；只有用户明确选择更改时才改 root。一次 bind 只处理一个 Terminal，便于用户逐个添加。
 
-若同时出现多个候选设备/Terminal，则只弹一次短选择，不能猜。
+### 5.3 普通命令与 worker 状态
 
-### 5.2 没有请求正在等待
-
-新 Terminal 必须经过一次极短授权：
-
-```text
-AIC-Car-1 新终端已打开
-[Enter] 交给 uu-cli    [N] 保留手动使用
-```
-
-- Enter 后加入 device pool；
-- `N`、Esc、关闭或取消都视为不授权；
-- v1 不提供“以后这个设备所有新 Terminal 都自动接管”的永久策略；
-- 多个 Terminal 短时间出现时应在同一个交互窗口里顺序/批量处理，避免多个窗口抢焦点。
+普通 `uu <command>`、`put` 和 `get` 只使用当前 workspace 已绑定且已授权的 worker。它们不自动绑定/授权、不提示或等待用户开新 Terminal。若 workspace 没有 binding 或没有已授权可用 worker，返回明确诊断，要求用户运行 `uu bind`。已授权 worker 全忙时排队并报告队列位置；unknown/quarantined worker 必须继续隔离。
 
 ### 5.3 不存在“同设备多个 workspace 的 Terminal 归属问题”
 
@@ -109,22 +91,20 @@ AIC-Car-1 新终端已打开
 
 ## 6. Interaction channel
 
-人类配置/授权和远端命令数据流必须分离。
+人类配置/授权只属于 `uu bind`；它使用当前调用终端。普通远端命令数据流不承担配置交互。
 
 ```text
-Codex / shell ── uu stdin/stdout ── remote job
-                       │
-                       └── human decision → short separate interaction when required
+human ── uu bind in exact workspace directory ── authorize sole new Terminal, confirm root
+Agent ── uu stdin/stdout ── remote job on already authorized worker
 ```
 
 要求：
 
 - 正常 `uu` stdout 不混入选择菜单；
 - 工具诊断走 stderr；
-- 选择器不能消费原命令 stdin；
-- 被 pipe/Agent 调用时，也不能因为需要人选择而把菜单文本伪装成远端输出；
-- 当前环境无法安全展示交互时，不猜选择结果；
-- 不依赖 PowerShell 7 必须存在：可以优先使用 `pwsh`，但必须能回退系统自带 Windows PowerShell 或项目自己的最小原生交互。
+- 只有用户明确运行 `uu bind` 时才读取当前控制台的人类输入；
+- 普通命令在缺少 binding/worker 时给出“请用户运行 `uu bind`”的诊断，不尝试弹窗或读取 stdin；
+- 不依赖 PowerShell 7，也不创建独立 PowerShell/console 窗口。
 
 ## 7. Shell-state isolation
 
@@ -163,7 +143,7 @@ enter isolated shell scope
 
 ```text
 resolve workspace binding
-→ choose one idle worker on bound device
+→ choose one idle worker on bound device, or report/queue safely
 → enter job-local shell scope at remote_root
 → stream output in real time
 → determine completion + exit status
@@ -222,19 +202,19 @@ uu get <remote> <local>
 ```text
 官方 UU 正常使用
 → uu-cli 随时可以响应
-→ 用户打开 Terminal 后自动发现
+→ 用户手动运行 `uu bind` 后发现并授权唯一候选 Terminal
 → 没任务时尽可能不占资源
 ```
 
 实现者可以选择 broker、watcher、事件通知、lazy process 或其他结构。概念架构只要求：
 
 - 用户不手工管理第二个服务；
-- 新 Terminal 能自动被发现；
+- Terminal 库存可刷新，但发现不授权；`uu bind` 的用户选择才会授权；
 - 空闲 CPU 接近 0；
 - 不永久高频 polling/spawn 官方组件；
 - 不需要时不保持昂贵连接；
 - 无 tray、额外 GUI 或常驻可见 console；
-- 需要用户决定时可以弹短人类交互；
+- 不弹独立窗口；交互只在用户运行 `uu bind` 的调用终端中进行；
 - 后台能力失效后，下一次 `uu` 可以恢复或给出明确错误。
 
 “随 UU 一起可用”是产品语义，不要求通过 hook/patch 强行让两个进程严格同生共死。
@@ -297,7 +277,7 @@ uu put <local> <remote>
 uu get <remote> <local>
 ```
 
-首次配置/诊断：
+由用户手动执行的首次配置/诊断：
 
 ```powershell
 uu bind
@@ -310,7 +290,7 @@ uu list
 uu -- <remote command...>
 ```
 
-`uu list` 可以展示：
+`uu list` 是只读、人类手动执行的诊断命令，可以展示：
 
 ```text
 Workspace  D:\projects\aic
@@ -322,7 +302,7 @@ Workers    3
   worker 3   idle
 ```
 
-这里 worker 名称只用于诊断，不构成 Agent API。
+这里 worker 名称只用于诊断，不构成 Agent API。Agent 不得运行 `uu bind` 或 `uu list`；缺少 binding/worker 时请用户在 workspace 调用终端运行 `uu bind`，需要诊断时请用户运行 `uu list`。
 
 ## 16. v1 非目标
 
@@ -338,15 +318,15 @@ Workers    3
 
 ## 当前实现映射
 
-- `windows_app` 连接公共 CLI 与绑定、独立决策 console、worker 调度及 put/get。
-- `model/config/authorization/workspace` 保存用户侧绑定及具体 Terminal 实例授权；N/Esc/关闭采用持久 default-deny。
+- `windows_app` 连接公共 CLI、调用终端内的显式绑定交互、worker 调度及 put/get；`uu list` 是人类手动执行的只读诊断。
+- `model/config/authorization/workspace` 保存用户侧绑定及具体 Terminal 实例授权；普通命令和后台进程不能添加授权。
 - `worker_lease` 通过 OS 文件锁让同设备多 workspace 共享实例 worker；发送前同步写入 inflight 记录，只有可靠完成才能删除。崩溃释放文件锁但保留记录。
 - `uuyc/discovery/inventory` 发现官方组件并查询设备、Terminal，不创建或关闭官方 Terminal。
 - `transport/runner/job` 附着已授权 Terminal，经一个本地 ConPTY reader 收发、识别完成边界，并流式返回合流输出；每条普通命令使用 subshell。
 - `worker_host` 为每个实际使用的 Terminal 保留一个隐藏附着进程。公共 CLI 通过仅当前用户可访问的本机 named pipe 路由 job；活连接不重新查询/附着，空闲五分钟或官方 UU 退出时退出。transport 的空闲检查与任务 liveness 同时检查官方 UU 的进程句柄；已经发送但未确认完成的 job 不重试。缓存不是授权，调度仍验证用户授权和实例 lease。
 - 专用 Bash worker 在父 shell 关闭作业控制并启用 `ignoreeof`：前台命令照常收到 Ctrl+C/EOF，命令完成后迟到的调用方 EOF 不得关闭 worker。业务命令仍在嵌套 subshell 中隔离自身状态。
 - `transfer` 复用同一 worker 的隔离 job，base64 分块上传 / 流式下载，size 与 SHA-256 校验后同目录发布。
-- `uu-background` 承载隐藏的发现或专用 worker 模式；安装不加开机启动项、不立即启动后台。watcher 由公开 `uu` 调用按需启动，以 OS 锁防重复，并等待官方 UU 进程退出后退出，不在无 UU 时常驻。决策由同目录 `uu.exe` 在独立 console 中执行，job 不经 watcher。
+- `uu-background` 只承载专用 worker attachment；不设置登录启动项，也不运行发现 watcher。绑定/授权由用户直接运行 `uu bind`，选择在调用终端内完成。普通命令可定位并复用已授权 worker；缺少 binding/worker 时给出运行 `uu bind` 的明确诊断，不自动授权或弹窗。
 - 用户安装包只含两个原生可执行文件、PowerShell 5.1 安装/卸载脚本及 Agent Skill，不含官方 UU 二进制或开发运行时。
 
 实例身份依赖官方列表提供 device identity、session name 和 createdAt。字段不足时拒绝授权；不能把名字当作旧实例证明。官方 attach 只接受设备与名字，列表复查与 attach 之间能否获得更强的原子实例保证尚无官方能力证据，需纳入真实互操作检查。

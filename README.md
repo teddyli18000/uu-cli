@@ -6,7 +6,7 @@
 
 ## 当前状态与安装
 
-main 提供 Windows 原生实现；当前 Latest 为 `v0.1.0-preview.2`。2026-10-21 已用登录中的官方 UU 4.43.0.3607、用户授权的 disposable Ubuntu 18.04 WSL host 和 `uu-remote-linux` v0.2.12-aic.3 验证后台发现与授权、两个 worker 并发、跨 workspace 隔离、真实 `put/get`，以及 caller 崩溃后不重放已发送任务。随后已用真实小车 `abot-robot` 验证首次绑定、连续命令、中文、shell 隔离、文件往返、Ctrl+C 后复用与双 Terminal 并发。这些实测和 hosted CI 都不代表全部 v1 验收已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
+当前已发布版本为 `v0.1.0-preview.2`；本次手动绑定体验的发布目标为 `v0.1.1`。2026-10-21 的 WSL 和小车实测证明了 shell、文件通道、取消和并发等能力，但其中的弹窗/等待请求授权流程属于旧交互设计，不能作为新 UX 的验收证据。当前契约要求用户在调用终端手动运行 `uu bind` / `uu list`；新交互需随 v0.1.1 实现并重新验收。实测证据见 `TESTING.md` 和 `REAL_UU_FINDINGS.md`。这些实测和 hosted CI 都不代表全部 v1 验收已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
 
 从 [GitHub Latest Release](https://github.com/teddyli18000/uu-cli/releases/latest) 下载 `uu-cli-windows-package.zip`，解压后，在 Windows 自带 PowerShell 中运行：
 
@@ -14,11 +14,11 @@ main 提供 Windows 原生实现；当前 Latest 为 `v0.1.0-preview.2`。2026-1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1
 ```
 
-安装到当前用户的 `%LOCALAPPDATA%\Programs\uu-cli`，添加用户 PATH，不设置开机启动，也不在安装时启动后台。首次执行 `uu` 时按需启动发现组件；官方 UU 退出时发现组件和本工具的附着连接随之退出。无需 Rust、Python、Node、WSL 或 PowerShell 7；新终端会收到更新后的 PATH。卸载运行同包中的 `installer\uninstall.ps1`。安装、升级和卸载不修改官方 UU；卸载保留用户绑定及 unknown worker 安全记录，避免重装后误复用可能仍忙的 Terminal。
+安装到当前用户的 `%LOCALAPPDATA%\Programs\uu-cli`，添加用户 PATH，不设置开机启动，也不启动发现 watcher。需要选择或授权 Terminal 时，由用户在 workspace 调用终端手动运行 `uu bind`；普通 `uu` 只定位/使用已授权 worker，不自动做 binding 或授权。无需 Rust、Python、Node、WSL 或 PowerShell 7；新终端会收到更新后的 PATH。卸载运行同包中的 `installer\uninstall.ps1`。安装、升级和卸载不修改官方 UU；卸载保留用户绑定及 unknown worker 安全记录，避免重装后误复用可能仍忙的 Terminal。
 
 Agent Skill 已写好，随包放在 `skills/uu-cli/SKILL.md`，Release 也提供独立的 `uu-cli-skill.zip`。将其中的 `uu-cli` 文件夹放入 Codex 的 `$CODEX_HOME/skills`（未设置时为 `%USERPROFILE%\.codex\skills`），在新会话中使用。CLI installer 不修改 Codex 配置或自动安装 Skill。
 
-当前版本交付已实测的 shell、自动发现/授权、worker pool 与文件通道；按当前使用范围，断网等异常恢复不作为这次交付的阻塞项。后续完整验收仍按 `TESTING.md` 记录。
+旧版实测覆盖 shell、自动发现/授权、worker pool 与文件通道；自动授权和弹窗属于已废弃的旧交互证据，不代表当前 binding 契约已经通过实机验收。断网等异常恢复按当前范围暂不作为本次交付阻塞项；其他验收状态见 `TESTING.md`。
 
 ## 日常使用
 
@@ -38,14 +38,14 @@ uu put .\main.py ~/aic/main.py
 uu get ~/aic/result.csv .\result.csv
 ```
 
-首次配置/诊断最多保留：
+首次配置和诊断命令由用户本人执行：
 
 ```powershell
 uu bind
 uu list
 ```
 
-正常情况下 Codex 不需要使用 `bind/list`。
+Agent 不得替用户执行 `uu bind` 或 `uu list`。缺少 workspace binding 或没有已授权 Terminal 时，Agent 应提示用户在工作区运行 `uu bind`；需要诊断时提示用户运行 `uu list`。
 
 ## 核心模型
 
@@ -57,29 +57,23 @@ uu list
 该设备上的 UU Terminal worker pool
 ```
 
-用户通过官方 UU 手工打开 Terminal；`uu-cli` 自动发现这些已有 session，把被允许使用的 Terminal 当成执行槽。开 1 个 Terminal 就有 1 个 worker，开 3 个就可以让最多 3 个前台 job 并行。
+用户通过官方 UU 手工逐个打开专用 Terminal，并通过自己运行的 `uu bind` 选择并授权。发现 Terminal 不等于授权；只有已授权的 Terminal 才进入该设备 worker pool。开 1 个就有 1 个 worker，开 3 个就可以让最多 3 个前台 job 并行。
 
 Terminal 本身不属于 Codex，也不作为长期 shell 上下文。具体某条命令落到哪个 session，由 `uu-cli` 内部调度。
 
-## 第一次使用
+## 首次绑定与增加 Terminal
 
-当前分析的官方 Windows UU 4.43.x 没有对外暴露可复用的 headless terminal launcher，因此第一个官方 Terminal 仍由用户手工打开。
-
-第一次在某个项目中执行：
+官方 Windows UU 没有稳定的外部入口创建第一个 Terminal，因此用户先在官方 UU 中手工打开一个专用 Terminal。按需关闭它自己的官方标签页以释放连接，然后在目标 workspace 的 PowerShell 中由用户本人运行：
 
 ```powershell
-uu git status
+uu bind
 ```
 
-如果还没有 binding，`uu-cli` 会自动确定 workspace、发现用户打开的 Terminal，并在需要时做一次很短的人类选择。
+`uu bind` 将调用时的当前目录精确保存为 workspace root，即使它位于 Git 仓库内。通常只有一个新出现且可用的 detached Terminal，运行 `uu bind` 就把它明确交给 uu-cli，不弹窗也不再问一次。若候选不唯一，命令直接报告歧义，用户在官方 UU 中整理候选后再运行。首次绑定时，用户也在当前 PowerShell 确认远端工作目录，默认值来自该 Terminal 的 `pwd`。没有可用 Terminal 时，命令说明下一步；用户准备好后再次运行 `uu bind`。
 
-- Git 仓库默认使用 Git root；
-- 只有一台明确设备时尽量自动完成；
-- 多台设备同时有 Terminal 时，弹一个简单 独立 console 选择器；
-- 用户只选择友好设备名，不接触裸 `deviceId`；
-- binding 完成后，原命令继续执行，不要求重跑。
+要逐个增加并发 worker：在官方 UU 中再开一个专用 Terminal，按需关闭它自己的标签页，再由用户在同一 workspace 再运行一次 `uu bind`。新 Terminal 唯一可用时会加入同一设备的 pool，并保留 workspace 已记住的 remote root。多个候选时不会猜选；先在官方 UU 中整理为唯一候选。只有用户明确选择更改设备或 remote root 时才更改绑定。
 
-等待中的请求会明确提示新开的匹配 Terminal 将用于本次请求，随后不会重复授权。若官方连接仍被该 Terminal 标签页占用，按提示关闭这个专用标签页以释放连接；不要在里面输入 `exit`。没有等待请求时，新 Terminal 需要一次短授权：Enter 交给 uu-cli，N/Esc/关闭保留手动使用。授权绑定到具体实例，重建的同名 Terminal 不继承旧授权。
+Agent 的正常 `uu <command>` 不会自动绑定、授权或等待新 Terminal。若 workspace 未绑定或没有已授权 worker，命令会提示用户手动运行 `uu bind`。已授权 worker 全忙时，命令排队并报告队列位置，不会取消或 kill 其他 job；状态未知的 worker 会保持隔离。
 
 ## 多个 Terminal
 
@@ -92,7 +86,7 @@ AIC-Car-1
   terminal 3  idle
 ```
 
-`uu-cli` 自动调度空闲 worker。长任务持续占用自己的 terminal，并实时把输出返回给调用它的 Codex；其他命令使用其他空闲 worker。没有空闲 worker 时等待。
+`uu-cli` 自动调度已授权的空闲 worker。长任务持续占用自己的 terminal，并实时把输出返回给调用它的 Codex；其他命令使用其他空闲 worker。已授权 worker 全忙时命令排队并报告位置；仅被发现但未由 `uu bind` 授权的 Terminal 不会自动加入 pool。
 
 真实验证中，`sleep 30` 与短任务同时运行且使用不同远端 Bash PID；短任务在长任务结束前完成。两个 workspace 也通过同一 pool 运行，并各自从绑定的 remote root 开始，`cd`/`export` 不泄漏到另一个 workspace 或后续 job。
 
@@ -145,10 +139,10 @@ uu "cd src && source .venv/bin/activate && python main.py"
 
 内部可以有轻量后台组件，也可以采用其他实现。无论如何都必须：
 
-- 自动发现新开的官方 Terminal；
+- 可以刷新新开的官方 Terminal 库存，但发现本身不能授权或接管；
 - 空闲时 CPU 接近 0，不高频轮询；
 - 无 tray、额外 GUI 或常驻可见 console；
-- 只有真正需要用户选择时才弹短 console 交互；
+- 不自动弹窗；只有用户手动运行 `uu bind` 时才在当前调用终端进行选择；
 - 用户不需要手工管理第二个服务；
 - 不拖累 UU 的启动、退出和升级。
 
@@ -171,7 +165,7 @@ https://uuyc.163.com/download/
 - `windows_terminal -> new_console -> detached_process` 都属于官方 GUI launcher 链；
 - 当前没有稳定的 CLI / IPC / deeplink 外部入口可以无点击创建第一个 session。
 
-因此 v1 不注入 GameViewer、不伪造官方客户端、不绕过 host registration。用户只负责用官方 UI 打开 Terminal，之后的发现、绑定和调度由 `uu-cli` 处理。
+因此 v1 不注入 GameViewer、不伪造官方客户端、不绕过 host registration。用户用官方 UI 打开 Terminal，并手动运行 `uu bind` 完成选择和授权；之后已授权 Terminal 的调度由 `uu-cli` 处理。
 
 ## 非目标
 
@@ -203,4 +197,4 @@ https://uuyc.163.com/download/
 
 文件通道通过同一已授权 worker 传输 base64，远端需要 `base64`、`dd`、`wc`、`tr`、`cut`、`sha256sum` 和 `mv`。上传按 768 字节分块；下载逐块确认并解码。两端核对字节数和 SHA-256 后才替换目标。真实 `put/get` 已对 16,385 个随机二进制字节完成哈希一致验证，也覆盖零字节、相对/绝对/`~` 路径及中英文和空格路径；该样本之外的大文件吞吐仍未实测。失败上传可能留下相邻的 `.uu-cli-*.part` 文件，不会作为成功目标发布。
 
-默认状态放在 `%LOCALAPPDATA%\uu-cli`，不写入 workspace。隐藏 watcher 由 `uu` 按需启动，官方 UU 开启期间每 20 秒检查新 Terminal；前台等待 Terminal 时每 2 秒检查。watcher 用进程句柄等待官方 UU 退出，无 UU 时不常驻轮询。专用 worker helper 保持连接供后续命令复用，空闲五分钟或官方 UU 退出时释放。退出官方 UU 后，尚未确认完成的命令仍按 unknown 处理，不自动重放。发现和授权的实测结果及资源采样见 [TESTING.md](TESTING.md)。
+默认状态放在 `%LOCALAPPDATA%\uu-cli`，不写入 workspace。没有常驻发现 watcher 或开机启动项。用户运行 `uu bind` 时前台刷新设备/Terminal 列表并在当前调用终端完成选择和授权；普通命令只使用已授权 worker，必要时按需建立附件连接。worker helper 空闲五分钟后释放；退出官方 UU 后，尚未确认完成的命令仍按 unknown 处理，不自动重放。旧版 watcher、授权弹窗实测和资源采样见 [TESTING.md](TESTING.md)。

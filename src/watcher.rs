@@ -1,8 +1,5 @@
-//! Low-idle Windows watcher for newly opened official UU terminals.
-//!
-//! The GUI process-name probe is a cheap capability check based on the currently
-//! observed GameViewer.exe host. A renamed or materially different client may
-//! not be detected; in that case the watcher exits without querying uuyc-cli.
+//! Compatibility entry points for the removed background watcher, plus the
+//! official UU process lifetime handle used by active terminal attachments.
 
 use anyhow::{Context, Result};
 use fs2::FileExt;
@@ -10,9 +7,6 @@ use std::fs::{self, File, OpenOptions};
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use std::time::Duration;
-
-#[cfg(windows)]
-const ACTIVE_POLL: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Runtime data is stored beside the per-user config, outside the workspace.
 pub fn runtime_dir(config_path: &Path) -> PathBuf {
@@ -22,7 +16,7 @@ pub fn runtime_dir(config_path: &Path) -> PathBuf {
         .join("runtime")
 }
 
-/// Shared by short setup/authorization consoles and the watcher prompt check.
+/// Shared by inline setup and binding interactions.
 /// The returned file must stay alive for the full interactive operation.
 pub fn interaction_lock_path(config_path: &Path) -> PathBuf {
     runtime_dir(config_path).join("interaction.lock")
@@ -30,16 +24,9 @@ pub fn interaction_lock_path(config_path: &Path) -> PathBuf {
 
 /// Try to acquire the shared human-interaction lock.
 ///
-/// Ok(None) means another setup or authorization interaction is already
-/// active. A console mode must recheck its session candidates after acquiring
-/// this lock, because a waiting uu invocation may have authorized them meanwhile.
+/// Ok(None) means another setup or binding interaction is already active.
 pub fn try_interaction_lock(config_path: &Path) -> Result<Option<File>> {
     try_lock_file(&interaction_lock_path(config_path))
-}
-
-#[cfg(windows)]
-fn watcher_lock_path(config_path: &Path) -> PathBuf {
-    runtime_dir(config_path).join("watcher.lock")
 }
 
 fn try_lock_file(path: &Path) -> Result<Option<File>> {
@@ -82,67 +69,16 @@ fn is_lock_contended(error: &std::io::Error) -> bool {
     }
 }
 
-/// Start one hidden watcher when the official UU GUI is already running.
-///
-/// Each uu invocation may call this function. The cross-process watcher lock
-/// prevents a second long-lived watcher; the process only polls at 20 seconds
-/// while UU is active and exits as soon as the captured UU GUI process exits.
-pub fn spawn_if_needed(executable: &Path, config_path: &Path) -> Result<()> {
-    if std::env::var("UU_CLI_NO_BACKGROUND").is_ok_and(|value| value == "1") {
-        return Ok(());
-    }
-
-    #[cfg(windows)]
-    {
-        if !matches!(is_official_uu_running(), Ok(true)) {
-            return Ok(());
-        }
-
-        // This probe avoids spawning helpers on ordinary uu invocations while a
-        // watcher is alive. A simultaneous startup race is resolved by the
-        // child's lifetime lock in run().
-        if try_lock_file(&watcher_lock_path(config_path))?.is_none() {
-            return Ok(());
-        }
-
-        use std::os::windows::process::CommandExt;
-        use std::process::{Command, Stdio};
-
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
-        Command::new(executable)
-            .arg("__watch")
-            .env("UU_CLI_CONFIG", config_path.as_os_str())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
-            .spawn()
-            .with_context(|| format!("cannot start hidden watcher {}", executable.display()))?;
-    }
-
-    #[cfg(not(windows))]
-    {
-        let _ = (executable, config_path);
-    }
-
+/// Kept as a compatibility shim for older callers. Terminal discovery and
+/// human choices belong to explicit foreground commands; ordinary commands
+/// never start background work.
+pub fn spawn_if_needed(_executable: &Path, _config_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Run the hidden watcher mode. The process keeps an exclusive runtime lock
-/// until it exits, so only one inventory poller is active per user config.
-pub fn run(config_path: &Path) -> Result<()> {
-    #[cfg(windows)]
-    {
-        run_windows(config_path)
-    }
-
-    #[cfg(not(windows))]
-    {
-        let _ = config_path;
-        Ok(())
-    }
+/// Kept so an obsolete `__watch` invocation exits immediately and harmlessly.
+pub fn run(_config_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 /// A waitable handle to the official UU GUI process captured by process name.
@@ -173,138 +109,6 @@ pub fn is_official_uu_running() -> Result<bool> {
 #[cfg(not(windows))]
 pub fn is_official_uu_running() -> Result<bool> {
     Ok(false)
-}
-
-#[cfg(windows)]
-fn authorization_executable(current_executable: &Path) -> Result<PathBuf> {
-    let is_background_helper = current_executable
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("uu-background.exe"));
-
-    if is_background_helper {
-        let directory = current_executable
-            .parent()
-            .context("uu-background.exe has no parent directory")?;
-        Ok(directory.join("uu.exe"))
-    } else {
-        Ok(current_executable.to_path_buf())
-    }
-}
-
-#[cfg(windows)]
-fn run_windows(config_path: &Path) -> Result<()> {
-    use crate::config::ConfigStore;
-    use crate::inventory::discover_inventory;
-    use crate::uuyc::OfficialCli;
-    use std::os::windows::process::CommandExt;
-    use std::process::{Child, Command};
-
-    const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
-
-    let Some(_watcher_lock) = try_lock_file(&watcher_lock_path(config_path))? else {
-        return Ok(());
-    };
-
-    let Some(official_lifetime) = official_lifetime()? else {
-        return Ok(());
-    };
-
-    let config_store = ConfigStore::at(config_path.to_path_buf());
-    let current_executable = std::env::current_exe().context("cannot locate uu executable")?;
-    let authorization_executable = authorization_executable(&current_executable)?;
-    let mut official_cli = None;
-    let mut authorization_console: Option<Child> = None;
-
-    loop {
-        if official_lifetime.wait(Duration::ZERO)? {
-            stop_authorization_console(&mut authorization_console);
-            return Ok(());
-        }
-
-        let authorization_finished = match authorization_console.as_mut() {
-            Some(child) => child.try_wait()?.is_some(),
-            None => false,
-        };
-        if authorization_finished {
-            authorization_console = None;
-        }
-
-        if authorization_console.is_none() {
-            if official_cli.is_none() {
-                official_cli = OfficialCli::locate().ok();
-            }
-
-            if let Some(cli) = official_cli.as_ref() {
-                // Foreground waiting/decision flows own this lock and perform
-                // their own discovery; skip a duplicate official CLI query.
-                let Some(interaction_lock) = try_interaction_lock(config_path)? else {
-                    if official_lifetime.wait(ACTIVE_POLL)? {
-                        stop_authorization_console(&mut authorization_console);
-                        return Ok(());
-                    }
-                    continue;
-                };
-
-                let snapshot = match discover_inventory(cli) {
-                    Ok(snapshot) => snapshot,
-                    Err(_) => {
-                        official_cli = None;
-                        if official_lifetime.wait(ACTIVE_POLL)? {
-                            stop_authorization_console(&mut authorization_console);
-                            return Ok(());
-                        }
-                        continue;
-                    }
-                };
-
-                let config = config_store.load()?;
-                if has_promptable_sessions(&snapshot, &config) {
-                    // Release before launch so the child can acquire the lock
-                    // and recheck the sessions before prompting.
-                    drop(interaction_lock);
-                    authorization_console = Command::new(&authorization_executable)
-                        .arg("__authorize")
-                        .env("UU_CLI_CONFIG", config_path.as_os_str())
-                        .creation_flags(CREATE_NEW_CONSOLE)
-                        .spawn()
-                        .ok();
-                }
-            }
-        }
-
-        if official_lifetime.wait(ACTIVE_POLL)? {
-            stop_authorization_console(&mut authorization_console);
-            return Ok(());
-        }
-    }
-}
-
-#[cfg(windows)]
-fn stop_authorization_console(console: &mut Option<std::process::Child>) {
-    if let Some(mut child) = console.take() {
-        if child.try_wait().ok().flatten().is_none() {
-            let _ = child.kill();
-        }
-        let _ = child.wait();
-    }
-}
-
-#[cfg(windows)]
-fn has_promptable_sessions(
-    snapshot: &crate::inventory::InventorySnapshot,
-    config: &crate::model::Config,
-) -> bool {
-    use crate::authorization::{classify_session, SessionDecision};
-
-    snapshot.eligible_sessions().into_iter().any(|session| {
-        classify_session(
-            session,
-            &config.authorized_workers,
-            &config.declined_workers,
-            None,
-        ) == SessionDecision::Prompt
-    })
 }
 
 #[cfg(windows)]
@@ -452,39 +256,14 @@ mod windows_process {
 
 #[cfg(test)]
 mod tests {
-    use super::{runtime_dir, try_interaction_lock, try_lock_file};
+    use super::{run, runtime_dir, spawn_if_needed, try_interaction_lock};
+    #[cfg(windows)]
     use std::path::Path;
+    #[cfg(windows)]
     use std::process::Command;
     use tempfile::tempdir;
 
     #[test]
-    fn runtime_lock_is_exclusive_across_processes_and_released() {
-        let temp = tempdir().unwrap();
-        let config_path = temp.path().join("config.json");
-        let lock_path = runtime_dir(&config_path).join("watcher.lock");
-        let lock = try_lock_file(&lock_path)
-            .unwrap()
-            .expect("acquire watcher lock");
-
-        let status = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "watcher::tests::runtime_lock_child_probe"])
-            .env("UU_CLI_TEST_LOCK_PATH", &lock_path)
-            .status()
-            .unwrap();
-        assert!(status.success(), "child process could acquire held lock");
-
-        drop(lock);
-        assert!(try_lock_file(&lock_path).unwrap().is_some());
-    }
-
-    #[test]
-    fn runtime_lock_child_probe() {
-        let Some(path) = std::env::var_os("UU_CLI_TEST_LOCK_PATH") else {
-            return;
-        };
-        assert!(try_lock_file(Path::new(&path)).unwrap().is_none());
-    }
-
     #[test]
     fn interaction_lock_is_exclusive_until_released() {
         let temp = tempdir().unwrap();
@@ -499,16 +278,16 @@ mod tests {
         assert!(try_interaction_lock(&config_path).unwrap().is_some());
     }
 
-    #[cfg(windows)]
     #[test]
-    fn background_helper_authorizes_with_sibling_cli() {
-        let current = Path::new(r"C:\Tools\uu-background.exe");
-        assert_eq!(
-            super::authorization_executable(current).unwrap(),
-            Path::new(r"C:\Tools\uu.exe")
-        );
-        let normal = Path::new(r"C:\Tools\UU.EXE");
-        assert_eq!(super::authorization_executable(normal).unwrap(), normal);
+    fn legacy_background_entry_points_return_without_starting_work() {
+        let temp = tempdir().unwrap();
+        let config_path = temp.path().join("config.json");
+        let impossible_executable = temp.path().join("missing-uu.exe");
+
+        spawn_if_needed(&impossible_executable, &config_path).unwrap();
+        run(&config_path).unwrap();
+
+        assert!(!runtime_dir(&config_path).exists());
     }
 
     #[cfg(windows)]

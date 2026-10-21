@@ -6,9 +6,9 @@
 
 ## 当前进度（2026-10-21）
 
-PR [#7](https://github.com/teddyli18000/uu-cli/pull/7) 已实现原生 CLI、用户侧 binding、按设备共享的 worker pool、实例授权、shell 隔离、流式 I/O、no-replay/quarantine、校验文件传输、隐藏 watcher、用户级安装包及 Agent Skill。真实 Windows UU + disposable Ubuntu 18.04 WSL host 已验证 watcher 发现和授权、等待中的新 Terminal 无二次授权、两个 worker 并发、跨 workspace root/shell 隔离、16,385 字节二进制 `put/get`。详细证据见 [TESTING.md](TESTING.md#当前实现与证据2026-10-21) 和 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
+已发布 `v0.1.0-preview.2`；本次手动绑定 UX 的发布目标为 `v0.1.1`。2026-10-21 的 WSL/小车实测证明 shell、worker 并发、跨 workspace 隔离和文件通道等能力；当时的 watcher、弹窗授权及等待请求自动接收属于历史交互，不能作为新契约的验收证据。详细历史见 [TESTING.md](TESTING.md#历史实现与实测记录2026-10-21) 和 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
 
-当前仍为验证候选，不是 v1 完成。另已验证真实 public caller 在已发送长任务期间崩溃后不重放任务；一次 watcher 自身空闲资源采样也已完成，但不含它启动的官方子进程。已有 helper 保持连接时的新 workspace 绑定已在修复候选实测通过，无需新 Terminal。网络/UU/Terminal/worker-helper 故障恢复、真实多设备、完整 watcher 进程树空闲资源，以及外部干净 Windows 从安装到实际使用仍待 `requires-real-uu` 验收。
+当前仍为验证候选，不是 v1 完成。真实 public caller 在已发送长任务期间崩溃后不重放任务的证据仍有效。新的 inline `uu bind`、当前目录作为 workspace root、候选歧义诊断和队列位置需实现并验证；网络/UU/Terminal/worker-helper 故障恢复、真实多设备，以及外部干净 Windows 从安装到实际使用仍待 `requires-real-uu` 验收。
 
 ## 当前产品模型
 
@@ -20,7 +20,7 @@ Remote Binding = device + remote root
 Device-level Terminal Worker Pool
 ```
 
-用户手工通过官方 UU 打开 Terminal；uu-cli 自动发现。Codex 不选择 deviceId，不管理 session，也不依赖某个 Terminal 的长期 shell-local 状态。
+用户在官方 UU 中手工逐个打开 Terminal，并在目标当前目录手动运行 `uu bind`。`uu-cli` 不自动授权；候选不唯一时诊断退出。Codex 不运行 `uu bind`/`uu list`，不选择 deviceId，不管理 session，也不依赖某个 Terminal 的长期 shell-local 状态。
 
 同一 remote device 可以服务多个 local workspace；worker pool 归 device，共享 worker，但每个 job 使用自己 workspace 的 remote root。
 
@@ -53,7 +53,7 @@ uu -- <remote command...>
 - terminal 是持续 PTY 字节流；
 - 官方协议没有逐命令 exec/exit-code API；
 - 第一个 terminal 的 host registration 没有稳定外部 headless launcher；
-- v1 接受“用户手工打开官方 Terminal，uu-cli 自动发现”的 bootstrap；
+- v1 接受“用户手工打开 Terminal，再由用户运行 `uu bind` 显式授权”的 bootstrap；
 - 不继续投入 GameViewer 注入、签名伪造或 host-registration 绕过。
 
 研究资料见 `docs/` 和 `proto/terminal.proto`。
@@ -63,10 +63,10 @@ uu -- <remote command...>
 目标：证明最小产品闭环，而不是先堆框架。
 
 ```text
-全新 local workspace
-→ 用户在官方 UU 打开 Terminal
-→ uu-cli 自动发现
-→ 必要时短交互选择设备
+用户切到准确 workspace 目录（包括 Git 仓库内子目录）
+→ 用户在官方 UU 打开一个专用 Terminal 并按需关闭其标签页
+→ 用户在调用终端运行 uu bind
+→ 唯一新出现且可用的 detached Terminal 被授权
 → 确认 remote root
 → uu <command> 真实执行并实时返回输出
 ```
@@ -74,10 +74,12 @@ uu -- <remote command...>
 验收：
 
 - workspace root 识别正确；
-- 多设备不会误绑；
+- 候选唯一时完成绑定；有歧义时明确失败，不弹 picker、不猜；
 - Codex 不需要 deviceId/session；
-- 等待中的 `uu` 明确告诉用户新开 Terminal 会用于本次请求；用户打开后继续原请求，不要求重跑，也不重复确认；
-- 人类选择不污染 job stdin/stdout；
+- `uu bind` 将当前目录精确保存为 workspace root；
+- 用户运行 bind 即明确授权，无弹窗或第二次授权确认；
+- 普通 `uu` 不自动绑定/授权，缺少绑定时提示用户运行 `uu bind`；
+- 重复 bind 增加同设备 worker 并保留 remote root；
 - 普通命令只需增加 `uu` 前缀；
 - 每个 job 从 remote root 开始，并尽量隔离 shell-local 变化；
 - exit status 和错误语义可信；
@@ -88,22 +90,21 @@ uu -- <remote command...>
 
 ## Phase 2 — Multiple Terminal workers + automatic discovery
 
-目标：用户开几个官方 Terminal，就自然得到对应并发能力。
+目标：用户逐个开官方 Terminal 并运行 `uu bind`，就得到对应并发能力。
 
 验收：
 
-- 新 Terminal 自动发现；
-- 有等待请求时按 Phase 1 语义直接满足，不重复确认；
-- 没有等待请求时弹一次短授权：Enter=交给 uu-cli，N/Esc/关闭=保留手动使用；
-- v1 不提供永久自动接管某设备后续新 Terminal 的开关；
-- 多个新 Terminal 尽量在同一交互窗口处理；
+- `uu bind` 只接受唯一新出现且可用的 detached Terminal；
+- 用户每次只绑定一个 Terminal，候选不唯一时诊断并退出；
+- 授权交互只在调用终端内；没有弹窗、后台授权或普通命令 setup；
+- 重复 bind 为同设备 pool 添加 worker，并保留 remote root；
 - 一个 worker 同时只执行一个 job；
 - 多个 `uu` 调用能够并发；
-- worker 全忙时安全等待；
+- 已授权 worker 全忙时排队并报告位置，不抢占或 kill；
 - 长任务一直占用自己的 worker并实时输出；
 - 不跨设备调度；
 - 同设备多个 workspace 共享 pool 时不会串 remote root；
-- 用户未授权/正在手工使用的 Terminal 不被偷偷接管；
+- 只有显式 bind 涉及的唯一 Terminal 被授权，其他新 Terminal 不会自动接管；
 - 后台组件异常后，可能仍忙的 worker 不会被错误当 idle。
 
 ## Phase 3 — Reliable file transfer
@@ -165,7 +166,7 @@ CI-first：凡是能在 GitHub-hosted Windows 上做的构建、故障注入、c
 - 可以通过 scheduled/manual workflow 定期检测最新版官方 UU 的安装/组件发现兼容性；
 - CI 不保存真实 UU 登录凭据；
 - 如果 hosted runner 的 OS/SKU 不受官方 UU 支持，UU 安装 smoke 可以 non-gating/manual，但其他 clean-state CI 仍必须 gating；
-- 至少一个真实非开发/干净环境，从安装到首次 binding 再到真实执行完整通过。
+- 至少一个真实非开发/干净环境，从安装到当前目录首次 `uu bind` 再到真实执行完整通过。
 
 GitHub-hosted runner 不能替代真实登录后的 UU 端到端测试；只把真实 Terminal/远端设备必须验证的最后一小段留给实机。
 
@@ -184,6 +185,7 @@ Skill 只需要：
 > 不同 `uu` 调用之间不要依赖 `cd/export/source/alias/virtualenv` 等 shell-local 状态。需要连续状态时放在同一条命令；每个普通 job 从 workspace remote root 开始。
 
 Agent 永远不选择 deviceId/session/worker。
+Agent 不执行 `uu bind`/`uu list`；缺少绑定或需要诊断时请用户亲自运行。
 
 ## v1 freeze
 
@@ -195,15 +197,17 @@ uu python3 main.py
 uu "source .venv/bin/activate && pytest -q"
 uu put .\test.bin remote/test.bin
 uu get remote/test.bin .\roundtrip.bin
-uu list
 ```
+
+`uu list` 仅作为用户手动执行的只读诊断，不由 Agent 代跑。
 
 并满足：
 
-- 首次绑定交互短、明确；
-- 多设备不会误绑；
-- 等待中的 `uu` + 新 Terminal 无重复确认；
-- 没有等待请求时未授权 Terminal 不被接管；
+- 首次绑定在用户运行的 `uu bind` 中完成，current directory 原样作为 workspace root；
+- 唯一 Terminal 直接授权，候选歧义时报错且不弹窗、不猜；
+- 无需重复确认，也不会由后台或普通命令自动授权；
+- 重复 bind 保留 root 并增加同设备 worker；
+- 已授权 worker 忙时队列位置明确；
 - 同设备多 workspace 不串目录；
 - 多 Terminal 可安全并发；
 - 长任务输出实时可见；

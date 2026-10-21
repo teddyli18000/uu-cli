@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -860,5 +860,114 @@ fn windows_cli_put_get_binary_files_through_git_bash() {
         b"",
         &fs::read(&downloaded_empty).expect("read downloaded empty file"),
         "empty-file round-trip",
+    );
+}
+
+#[test]
+fn windows_cli_streams_before_completion_and_queues_when_worker_is_busy() {
+    struct LiveJob {
+        child: Child,
+        stdout: Receiver<Vec<u8>>,
+        stderr: Receiver<Vec<u8>>,
+    }
+    impl Drop for LiveJob {
+        fn drop(&mut self) {
+            if self.child.try_wait().ok().flatten().is_none() {
+                kill_process_tree(self.child.id());
+                let _ = self.child.wait();
+            }
+        }
+    }
+    fn chunks(mut reader: impl Read + Send + 'static) -> Receiver<Vec<u8>> {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let mut buffer = [0; 1024];
+            while let Ok(count) = reader.read(&mut buffer) {
+                if count == 0 || sender.send(buffer[..count].to_vec()).is_err() {
+                    break;
+                }
+            }
+        });
+        receiver
+    }
+    fn start(command: &mut Command) -> LiveJob {
+        let mut child = command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let stdout = chunks(child.stdout.take().unwrap());
+        let stderr = chunks(child.stderr.take().unwrap());
+        LiveJob {
+            child,
+            stdout,
+            stderr,
+        }
+    }
+    fn until(receiver: &Receiver<Vec<u8>>, marker: &str) -> Vec<u8> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut received = Vec::new();
+        while !String::from_utf8_lossy(&received).contains(marker) {
+            received.extend(
+                receiver
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .expect("expected streaming output before job completion"),
+            );
+        }
+        received
+    }
+    fn finished(job: &mut LiveJob) {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if let Some(status) = job.child.try_wait().unwrap() {
+                assert!(status.success(), "job failed: {status}");
+                return;
+            }
+            assert!(Instant::now() < deadline, "job did not finish");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    let (bash, cygpath) = find_git_bash();
+    let test = TestWorkspace::new();
+    let remote = test._temp.path().join("streaming remote");
+    fs::create_dir_all(&remote).unwrap();
+    test.set_remote_root(&cygpath_unix(&remote, &cygpath));
+    let fake = fake_cli_path();
+    let mut first_command = uu_command(&test, &fake, "bash");
+    first_command.env("UU_TEST_BASH", &bash).arg(
+        "printf 'stream-early\\n'; while [ ! -f ./release-first ]; do sleep 0.1; done; printf 'stream-late\\n'",
+    );
+    let mut first = start(&mut first_command);
+    let early = until(&first.stdout, "stream-early");
+    assert!(!String::from_utf8_lossy(&early).contains("stream-late"));
+    assert!(
+        first.child.try_wait().unwrap().is_none(),
+        "output was buffered until completion"
+    );
+
+    let mut second_command = uu_command(&test, &fake, "bash");
+    second_command
+        .env("UU_TEST_BASH", &bash)
+        .arg("printf 'queued-result\\n'");
+    let mut second = start(&mut second_command);
+    until(&second.stderr, "排队等待");
+    assert!(second.child.try_wait().unwrap().is_none());
+    assert_eq!(
+        read_dispatches(&test.log_path).len(),
+        1,
+        "busy worker was reused before completion"
+    );
+
+    fs::write(remote.join("release-first"), b"release").unwrap();
+    until(&first.stdout, "stream-late");
+    finished(&mut first);
+    until(&second.stdout, "queued-result");
+    finished(&mut second);
+    assert_eq!(read_dispatches(&test.log_path).len(), 2);
+    assert_eq!(
+        count_events(&read_fixture_events(&test.events_path), "attach_started"),
+        1
     );
 }

@@ -40,6 +40,8 @@ uu bind
 uu list
 ```
 
+`uu bind` 和 `uu list` 是人类手动执行的命令。Agent 不得代替用户运行它们；需要配置或查看状态时，明确告诉用户在目标 workspace 自己运行对应命令。
+
 保留词冲突时：
 
 ```powershell
@@ -65,8 +67,8 @@ Device-level Terminal Worker Pool
 - 同一 remote device 可以服务多个 workspace；
 - worker pool 属于 device，不属于 workspace；
 - 每个 job 携带自己的 workspace remote root；
-- 用户在官方 UU 中手工打开 Terminal；
-- uu-cli 自动发现并只使用被允许的 Terminal；
+- 用户在官方 UU 中手工打开 Terminal，并通过自己运行的 `uu bind` 明确授权；
+- 发现 Terminal 不等于授权；普通命令和后台组件不得自动绑定或授权新 Terminal；
 - Terminal 是 worker，不是 Agent 的长期 shell 上下文；
 - 多 Terminal 用于并发；长任务持续占用自己的 worker 并实时输出；
 - 不跨设备调度。
@@ -93,39 +95,36 @@ uu "cd src && source .venv/bin/activate && python main.py"
 
 最终 Agent Skill 必须明确写出这条规则。
 
-## Interaction UX — HARD RULE
+## Binding and authorization UX — HARD RULE
 
-目标是：**没有歧义就自动，有歧义才问，同一个决定只问一次。**
+绑定和 Terminal 授权只发生在用户明确运行 `uu bind` 时，并在调用它的终端内完成；不得弹出独立窗口。`uu list` 是只读诊断，也只能由用户运行。Agent 不得代替用户调用这两条命令。
 
 必须遵守：
 
-- `uu` 正在等待 Terminal 时，提示必须明确说明“接下来打开的匹配 Terminal 会用于本次请求”；用户随后打开它即可作为本次授权，不要再弹第二轮“是否交给 uu-cli”；
-- workspace 未绑定时，唯一新出现的 Terminal 可以同时完成设备识别、本次 worker 授权和后续 remote-root 确认；
-- 没有等待请求时，新 Terminal 必须经过一次短授权：Enter=交给 uu-cli，N/Esc/关闭=保留手动使用；
-- v1 不提供设备级永久自动接管新 Terminal 的开关，避免未来用户手动开的 Terminal 被静默抢走；
-- 同一设备多个 workspace **不是** Terminal 归属歧义，因为它们共享 device-level pool；
-- 多个新 Terminal 短时间出现时尽量在同一交互窗口顺序/批量处理；
-- 用户未授权的 session 不得偷偷使用；
-- 已确认过的 binding/session 不重复骚扰。
+- 用户在官方 UU 中逐个打开专用 Terminal；按需关闭该 Terminal 自己的官方标签页以释放连接，然后在目标 workspace 的调用终端运行 `uu bind`；
+- 用户运行 `uu bind` 的动作授权本次唯一新出现、可用的 detached Terminal；若候选设备或 Terminal 不唯一，明确报歧义并退出，让用户手动处理后重跑，不弹窗、不猜；
+- 首次绑定时确认 remote root；重复 `uu bind` 为同一设备 worker pool 增加所选 Terminal，并保留现有 remote root；只有用户明确选择更改时才修改 remote root 或设备绑定；
+- Terminal 自动发现/库存刷新不构成授权；后台组件不得弹窗或自动授权；
+- 普通 `uu <command>`、`put`、`get` 不得自动绑定、授权或等待新 Terminal；若 workspace 未绑定或没有已授权 worker，清楚提示用户自行运行 `uu bind`；
+- 已授权 worker 全忙时，job 排队并报告当前队列位置；不取消、不 kill 其他 job。unknown/quarantined worker 保持隔离，不能当作空闲 worker；
+- 用户未授权的 session 不得偷偷使用；不同 workspace 仍共享同设备 pool，但每个 job 使用自己的 remote root。
 
-人类选择和 job I/O 必须分离：选择器不能污染 `uu` stdout，也不能消费远端命令 stdin。需要人决定时用独立、短、可取消的 PowerShell/console 交互或等价方式。
-
-不能要求用户预装 PowerShell 7。若使用 `pwsh`，必须在不存在时回退 Windows 自带能力或自己的最小原生交互。
+人类交互只属于明确的 `uu bind` 调用，使用当前调用终端完成，不污染普通远端 job 的 stdout，也不消费普通 job 的 stdin。不得要求用户预装 PowerShell 7 或创建额外交互窗口。
 
 ## Workspace and device UX
 
-- Git repo 默认以 Git root 作为 workspace；非 Git 目录采用合理根目录；
+- `uu bind` 将调用时的当前目录精确保存为 workspace root，即使它位于 Git repo 内；从子目录运行普通 `uu` 时仍查找最近的已有 binding；
 - binding 存在用户侧，不污染 repo；
 - 从子目录运行时使用最近的 workspace binding；
-- 多设备同时可用时，只让用户按 friendly name 做一次短选择；
+- 通常只允许一个新出现且可用的 detached Terminal；候选不唯一时给出明确错误，用户自行整理后再次运行 `uu bind`；
 - 不要求用户或 Codex 看到裸 deviceId；
 - 绝不能根据相似名字猜错设备；
 - 已绑定后日常 `uu` 不再要求设备选择；
-- remote root 首次可用所选 Terminal 的 `pwd` 作默认值，用户 Enter 接受或输入修改，之后记住。
+- remote root 首次可用唯一 Terminal 的 `pwd` 作默认值，由用户在调用终端确认；重复绑定保留该值，只有明确选择更改时才更新。
 
 ## Terminal bootstrap and discovery
 
-当前官方 Windows UU 的研究结论已经收口：已有 Terminal 可以查询/附着/复用，但第一个官方 Terminal 没有稳定外部 headless 创建入口。因此用户负责在官方 UU 中打开 Terminal，uu-cli 负责之后的发现和使用。
+当前官方 Windows UU 的研究结论已经收口：已有 Terminal 可以查询/附着/复用，但第一个官方 Terminal 没有稳定外部 headless 创建入口。因此用户负责在官方 UU 中逐个打开 Terminal，再运行 `uu bind` 选择并授权；普通命令只使用已授权 worker。
 
 不要为了“自动创建第一个 Terminal”重新走注入、签名伪造、host-registration 绕过或 GUI 自动点击。
 
@@ -187,11 +186,11 @@ uu-cli 必须是旁路工具，不能破坏或劫持官方 UU。
 最终行为应满足：
 
 - 官方 UU 在用时，uu-cli 随时可用；
-- 自动发现用户新开的 Terminal；
+- 可刷新 Terminal 库存，但发现不授权；只有用户运行 `uu bind` 并选择 Terminal 才加入 pool；
 - 无任务、无 Terminal 或 UU 未运行时资源占用尽可能低；
 - 禁止永久高频 polling/spawn 官方 CLI；
 - 无 tray、额外 GUI、常驻可见 console；
-- 只有真正需要人类决定时才弹短交互；
+- 不为自动发现或普通命令弹交互窗口；`uu bind` 的选择只在调用终端内进行；
 - 后台组件异常后，下一次 `uu` 可以自动恢复或明确报错；
 - 不拖累 UU 的启动、退出、升级。
 
@@ -248,10 +247,12 @@ v1 不扩：
 
 不要把“代码写完”当完成。v1 必须按 `TESTING.md` 做 CI + 真实环境分层验证，并至少证明：
 
-- 干净 workspace 首次绑定；
-- 多设备同时开 Terminal 时选择正确且不会误绑；
-- 等待中的 `uu` + 新 Terminal 不重复询问；
-- 没有等待请求时未授权 Terminal 不会被接管；
+- 干净 workspace 由用户运行 `uu bind` 完成首次绑定；
+- 多设备同时存在时只在 `uu bind` 中由用户选择，不误绑；
+- 绑定选择在调用终端内完成，无独立弹窗或二次授权；
+- 用户重复运行 `uu bind` 为同设备 pool 增加 Terminal，保留现有 remote root；
+- 普通 `uu`、`put`、`get` 不会自动绑定/授权；缺少绑定或 worker 时提示用户运行 `uu bind`；
+- 已发现但未经 `uu bind` 选择的 Terminal 不会被接管；
 - 同设备多 workspace 共享 worker pool 不串 remote root；
 - 多 Terminal 并发和长任务；
 - shell-local 状态不成为跨 job 隐式上下文；

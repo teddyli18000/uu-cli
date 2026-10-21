@@ -60,7 +60,9 @@ GitHub-hosted runner **不能被当作真实 UU 端到端环境的替代品**。
 - 多个真实 UU Terminal 的并发；
 - UU 重启、远端网络异常、真实 session 消失；
 - 原生文件通道的真实 round-trip；
-- 新 Terminal 打开后的人类交互体验。
+- 用户手动运行 `uu bind` 后，当前目录成为 workspace root，唯一候选 Terminal 获得授权，并在调用终端确认 remote root；
+- 多个设备/Terminal 候选时直接诊断退出，不弹 picker、不猜；
+- 普通命令遇到缺少 binding/授权 worker 时是否只给出清楚诊断，不弹窗、不等待授权。
 
 CI 做不到时要明确标记 `requires-real-uu`，不能通过 mock 以后声称端到端已经验证。
 
@@ -84,28 +86,30 @@ CI 做不到时要明确标记 `requires-real-uu`，不能通过 mock 以后声�
 ```text
 workspace: bound / unbound
 UU: absent / installed-stopped / running
-worker: none / idle / all-busy / disappears
+worker: none / idle / all-busy / unknown-quarantined / disappears
 remote devices: one / multiple
-new terminal: waiting-request / unsolicited
-human decision: accept / reject / cancel-close
+bind command: first-bind / add-worker / change-root / ambiguous / no-candidate
+caller: interactive terminal / redirected or non-interactive
 job: not-sent / running / finished / connection-unknown
 ```
 
 关键行为必须固定：
 
-- 没有歧义就不要问；
-- 真有歧义才弹短人类选择；
-- 弹窗不能污染 `uu` 的 stdout，也不能偷走命令 stdin；
-- 一个等待中的 `uu` 请求在提示中明确说明“新打开的匹配 Terminal 将用于本次请求”，随后用户打开它时不得再弹第二个重复授权；
-- 没有等待请求时，新 Terminal 必须经过一次授权；N/Esc/关闭/取消都表示不使用；
-- v1 不存在“设备以后所有新 Terminal 自动接管”的持久设置；
-- 多个新 Terminal 短时间出现时尽量在一个交互窗口处理，不连续抢焦点；
+- `uu bind` 与 `uu list` 只能由用户手动执行，Agent 不代跑；`uu list` 只读；
+- `uu bind` 所有交互在调用终端内进行，不出现独立弹窗/console；
+- 用户运行 `uu bind` 即表示要绑定；唯一新出现且可用的 detached Terminal 直接授权，不追加二次确认；候选不唯一时诊断退出，不保存授权；
+- `uu bind` 以调用时的当前目录精确作为 local workspace root，即使该目录在 Git 仓库内；
+- 用户逐个打开官方 UU Terminal 并逐个运行 `uu bind`；同设备重复绑定增加 worker 并保留当前 remote root；
+- 重复 bind 保留原 remote root，除非用户明确选择更改；
+- 背景 inventory refresh 可以识别 session，但发现不等于授权，不可弹窗或授权；
+- 普通 `uu`/`put`/`get` 缺少 binding 或已授权 worker 时清楚提示用户运行 `uu bind`，不自动 setup/授权或等待新 Terminal；
+- 已授权 worker 全忙时排队并报告队列位置，不取消/kill 其他 job；unknown/quarantined worker 不得复用或由 bind 清除；
 - 同一设备多个 workspace 不构成 Terminal 归属歧义；
 - 用户未授权的 Terminal 不得随后被自动调度；
 - Terminal 授权必须绑定到可验证的 session 实例；如果 UU 重启/重建后只能看到相同名字、却无法证明还是同一实例，不得仅凭 session name 继承旧授权；
 - 已绑定 workspace 不因为其他设备上线而静默切换；
 - 已经发送的命令绝不因为恢复/重连自动重复执行；
-- 交互实现不能要求 PowerShell 7 预装，fallback 也必须测试。
+- 普通命令即使由 Agent/pipeline 调用，也不读取 stdin 进行 binding 交互。
 
 ## 7. Shell-state isolation tests
 
@@ -154,6 +158,7 @@ Windows workspace key 至少验证：
 - drive-letter/case 差异不会把同一目录误当两个 binding；
 - trailing separator 不产生重复 binding；
 - 从子目录能选择最近的已存在 binding；
+- 在 Git 仓库子目录运行 `uu bind` 时该精确目录成为 workspace root，不改用 Git root；
 - nested Git repo/submodule 不会错误跳到更远的 parent binding；
 - 空格和 Unicode 本地路径可用。
 
@@ -167,13 +172,16 @@ Windows workspace key 至少验证：
 2. installer 在全新 hosted Windows job 中完成安装/基础诊断/卸载；
 3. 如果 CI 环境允许，当前官方 UU 客户端下载、签名与组件发现 smoke test 通过；如果环境不支持，清楚标记而不是伪造通过；
 4. 真实 Windows + 已登录官方 UU + 真实远端设备完成 shell、多 worker、长任务、异常恢复、`put/get` 验收；
-5. 非开发机或干净 Windows 环境完成至少一次从安装到首次 binding 的完整体验验证。
+5. 非开发机或干净 Windows 环境完成从安装到首次 `uu bind`、普通命令执行的完整体验；
+6. 在真实 Windows 验证 inline `uu bind`、当前目录 workspace root、唯一候选直接授权、歧义时报错、重复绑定保留 remote root、无 popup、普通命令不自动绑定/授权；旧版弹窗和等待请求的结果不得作为此项通过证据。
 
 只有 mock 通过不等于 v1 完成。
 
-## 当前实现与证据（2026-10-21）
+## 历史实现与实测记录（2026-10-21）
 
-生命周期要求已调整为：不设置 Windows 登录启动项；安装/升级清除旧的 `uu-cli` Run 项且不启动后台；首次 `uu` 调用按需启动发现组件，官方 UU 退出时结束 watcher 和附着连接。Hosted installer 必须检查无启动项、安装/升级后无后台，并使用文档中的无 `-PackageRoot` 安装入口覆盖 Windows PowerShell 5.1。
+以下记录描述 2026-10-21 preview.2 及当时的授权交互。其中“新 Terminal 自动授权”“等待请求自动接收新 Terminal”以及独立授权 console 都属于旧行为，已被当前契约废弃，不能作为新绑定流程的验收证据。shell、worker、取消和文件通道实测仍是功能历史证据；每个新 release 仍需按上面的新交互矩阵复测。原始细节保留在 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
+
+历史生命周期记录：当时不设置 Windows 登录启动项；安装/升级清除旧的 `uu-cli` Run 项，首次 `uu` 调用按需启动发现组件并随官方 UU 退出。新契约已移除发现 watcher 和自动授权；Hosted installer 的旧结果仅说明当时包的安装/卸载行为，不代表新 binding UX。
 
 该调整在 `30f7f9b` 完成：[Windows/Linux CI](https://github.com/teddyli18000/uu-cli/actions/runs/39547381263) 与 [打包/干净安装升级卸载](https://github.com/teddyli18000/uu-cli/actions/runs/39547381226) 全部通过，包含受控进程退出等待、无 UU 时 watcher 返回。已在用户当前 Windows 用 `pwsh` 安装同一 Actions 包和 Skill：二进制哈希一致、Run 项不存在、安装后后台进程为零，`uu list` 识别官方 UU，原官方 GUI 进程保持不变。本次未关闭官方 UU 做整体退出联调，也未将这次开发机安装记为外部干净 Windows 端到端验收。
 
@@ -182,7 +190,7 @@ Windows workspace key 至少验证：
 | 层级 | 已验证范围 | 证据 |
 | --- | --- | --- |
 | 公共 CLI / 持久 worker | 实时输出、stdin EOF、状态 0/7、Ctrl+C 返回 130（108.2 ms）及取消后复用同一 helper；更早在候选 `edea7ca` 完成 | [Actions package/install](https://github.com/teddyli18000/uu-cli/actions/runs/39524610449)；[真机记录](REAL_UU_FINDINGS.md) |
-| 自动发现 / 授权 | 无前台请求时 watcher 发现两个新 detached Terminal；同一个真实授权 console 依次确认两次。等待中的绑定请求遇到新 Terminal 后直接进入 remote-root 确认，无第二次授权 | 本轮 disposable WSL 实测；详见 [真机记录](REAL_UU_FINDINGS.md) |
+| 自动发现 / 授权（旧交互） | watcher 发现新 detached Terminal 并启动独立授权 console；等待请求可自动接收新 Terminal。该授权流程已废弃 | 仅作历史记录；详见 [真机记录](REAL_UU_FINDINGS.md) |
 | 多 worker / workspace | `sleep 30` 与短命令并发且使用不同远端 Bash PID；短任务在长任务结束前完成。两个 workspace 共享 pool 时各自 remote root 正确，`cd`/`export` 不串到另一 workspace 或后续 job | 本轮 disposable WSL 实测；详见 [真机记录](REAL_UU_FINDINGS.md) |
 | 真实文件通道 | 16,385 与新候选 65,537 字节随机二进制哈希一致；覆盖中英文/空格路径、相对/绝对/`~`、零字节及后续命令。768 字节分块确认后完整校验再发布 | 本轮 disposable WSL 实测；详见 [真机记录](REAL_UU_FINDINGS.md) |
 | Caller crash / no-replay | 只杀掉 owned public caller；已发送的远端 job 继续运行但没有重放，原 inflight marker 保留，下一 job 由另一 worker 成功完成，远端计数仍为 1 | 本轮 disposable WSL 实测；不代表网络中断或 worker-helper 崩溃恢复 |
@@ -194,6 +202,6 @@ Windows workspace key 至少验证：
 
 已经修复的安全边界包括：`running` 且 `attachable` 未知/false 的 session 不尝试 attach；等待提示指导用户关闭专用 Terminal 标签页释放官方连接、不输入 `exit`；30 秒内缺失 BEGIN 时报告 unknown 且不重放；启动前清理 stale helper metadata。较早的 `edea7ca` 公共命令通道验收包括 stdin EOF、Ctrl+C 和后续复用，详见真实记录。
 
-仍待验证：网络断线、UU/Terminal 重启及 worker-helper 崩溃恢复、真实多设备、包含官方子进程的完整 watcher 空闲占用，以及至少一台外部干净 Windows 从安装到登录使用。Caller 崩溃时的 no-replay 已单独验证；大文件吞吐仍未测量。故 v1 尚未完成。
+仍待验证：新 `uu bind` 交互、网络断线、UU/Terminal 重启及 worker-helper 崩溃恢复、真实多设备，以及至少一台外部干净 Windows 从安装到登录使用。Caller 崩溃时的 no-replay 已单独验证；大文件吞吐仍未测量。故 v1 尚未完成。
 
-新版已有 helper 绑定复测通过：新 workspace 直接进入 remote-root 确认，保存 `/tmp/uu-cli-root-b` 后公开 `uu pwd` 返回正确目录。helper PID 保持 277356，主机日志仅一次 OPEN；没有新建 Terminal、重复授权或另一次 attach。
+旧 helper 绑定路径曾通过复测：新 workspace 进入 remote-root 确认，保存 `/tmp/uu-cli-root-b` 后公开 `uu pwd` 返回正确目录；helper PID 保持 277356，主机日志仅一次 OPEN。该记录属于旧交互实现，不证明新的手动 `uu bind` UX。

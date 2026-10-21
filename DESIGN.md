@@ -28,12 +28,7 @@ local workspace
 → remote root
 ```
 
-首次绑定时：
-
-- Git 仓库内默认使用 Git root；
-- 非 Git 目录默认使用当前目录或合理的最近根目录；
-- binding 存在用户配置目录，不往项目仓库写额外文件；
-- 一个 workspace v1 只绑定一个远端设备。
+`uu bind` 将调用时的当前目录精确保存为 workspace root，包括 Git 仓库内的子目录；不会自动改用 Git root。binding 存在用户配置目录，不往项目仓库写额外文件。一个 workspace v1 只绑定一个远端设备。
 
 从子目录执行 `uu` 时，使用最近的 workspace binding。
 
@@ -41,7 +36,7 @@ local workspace
 
 ## 3. Terminal 是设备级执行资源，不是 Agent 上下文
 
-用户通过官方 UU GUI 手工打开 Terminal；`uu-cli` 自动发现并把用户允许使用的 session 组成 **该设备的 worker pool**。
+用户通过官方 UU GUI 手工逐个打开 Terminal，并在目标 workspace 运行 `uu bind`。发现 session 不等于授权；只有由这次显式 bind 唯一识别的 session 才进入 **该设备的 worker pool**。
 
 ```text
 device A
@@ -55,7 +50,7 @@ device A
 - 一个 terminal 同一时刻只执行一个 uu job；
 - 长任务持续占用自己的 terminal，并实时回传输出；
 - 其他并发命令使用其他 idle terminal；
-- 没有空闲 worker 时等待；
+- 已授权 worker 全忙时排队并报告队列位置，不抢占或 kill 其他 job；
 - 绝不跨设备借 terminal；
 - 同设备不同 workspace 可以复用同一 pool，但每个 job 的 remote root 独立；
 - session name/id 不进入日常用户体验。
@@ -84,7 +79,7 @@ uu "cd src && source .venv/bin/activate && python main.py"
 
 Codex Skill 必须明确写出这一点。
 
-## 5. 第一个 Terminal 由用户创建
+## 5. Terminal 由用户创建并手动绑定
 
 当前研究的官方 Windows UU 4.43.x 没有对外暴露稳定的 headless terminal launcher。官方 GUI 会在 GameViewer 主进程内注册 local host/token，再启动官方 CLI；这个创建链没有可复用的外部入口。
 
@@ -93,57 +88,38 @@ Codex Skill 必须明确写出这一点。
 ```text
 UU 已运行并登录
 → 用户手工打开官方 Terminal
-→ uu-cli 自动发现
-→ 必要时做一次极短的人类确认
-→ workspace 完成 device + remote-root binding
-→ 后续 Codex 只执行 uu ...
+→ 用户按需关闭该 Terminal 自己的官方标签页
+→ 用户切到目标 workspace 目录运行 uu bind
+→ 唯一新出现且可用的 detached Terminal 明确交给 uu-cli
+→ 首次确认 remote root
+→ Agent 只执行 uu ...
 ```
 
 `uu-cli` 不自动点击 GUI，不注入 GameViewer，不伪造签名，不绕过 host registration。
 
-## 6. 交互逻辑 — 没有歧义就不问，同一个决定只问一次
+## 6. 绑定和授权交互 — 只在用户运行 `uu bind` 时发生
 
-### 6.1 Workspace 尚未绑定，用户执行 `uu ...`
+`uu bind` 与 `uu list` 由人类手动执行。Agent 不得代跑它们。`uu bind` 的交互在调用它的终端内完成，不弹独立窗口：用户运行 bind 后，唯一新出现且可用的 detached Terminal 即明确交给 uu-cli，不需要设备/session 选择或第二次“是否授权”确认。
 
-- 已经只有一台明确设备有已授权 worker：选择该设备，不要求用户输入 deviceId；
-- 多台设备都有已授权 worker：弹一次设备选择，以 friendly name + terminal 数量展示；
-- 当前没有 worker：`uu` 等待，并明确提示“请在官方 UU 中打开想使用设备的 Terminal；新打开的 Terminal 将用于本次请求”；用户随后打开的唯一匹配 Terminal 视为对本次请求的明确授权，原命令继续，不要求重跑，也不再弹第二个“是否交给 uu-cli”确认；
-- 如果等待期间同时出现多个设备/多个新 Terminal，才弹一次短选择，不能猜。
+### 6.1 首次绑定
 
-第一次 binding 还需要 `remote_root`。默认值可以来自所选远端 Terminal 当前 `pwd`；用户只需 Enter 接受或输入正确目录。之后不重复询问。
+- 用户逐个在官方 UU 打开专用 Terminal；按需关闭该 Terminal 自己的官方标签页以释放连接，再在目标 workspace 当前目录运行 `uu bind`；该当前目录就是 local workspace root，不按 Git root 改写；
+- 正常情况只有一个新出现、可用的 detached Terminal，`uu bind` 直接将其授权给当前 workspace；
+- 若设备/Terminal 候选不唯一，报明确歧义并结束，不弹选择器、不猜；用户自行整理到候选唯一后再次运行；
+- 首次绑定时在同一个调用终端确认 remote root，默认可取唯一 Terminal 的 `pwd`；
+- 没有可用 Terminal 时，`uu bind` 清楚提示用户先打开 Terminal，结束本次命令；用户准备好后自行再次运行 bind，不让远端命令等待。
 
-### 6.2 没有请求正在等待，新 Terminal 出现
+### 6.2 为同设备增加 worker
 
-发现不等于可以静默接管。
+已绑定 workspace 再次执行 `uu bind` 时，将唯一新出现且可用的 detached Terminal 加入同一设备 pool。保留当前 remote root；只有用户明确选择更改 remote root 或设备时才改写 binding。一次 bind 只处理一个 Terminal，便于用户逐个添加。`uu list` 只读显示当前 binding 与 worker 状态。
 
-弹一个很短的人类确认：
+### 6.3 普通命令的行为
 
-```text
-AIC-Car-1 新终端已打开
-[Enter] 交给 uu-cli    [N] 保留手动使用
-```
+普通 `uu <command>`、`uu put` 和 `uu get` 只使用当前 binding 中已授权的 worker。它们不自动绑定、不自动授权新发现的 Terminal、不弹窗，也不等待用户开新 Terminal。缺少 binding 或没有已授权 worker 时，返回清楚提示，要求用户运行 `uu bind`。如果已有授权 worker 全忙，命令排队并报告队列位置，不取消或 kill 其他 job；状态 unknown/quarantined 的 worker 仍隔离，不会被当作空闲 worker。
 
-规则：
+### 6.4 交互与 job I/O 分离
 
-- Enter 后该 session 成为该 device pool 的 worker；
-- `N`、Esc、关闭窗口或取消都视为 **不使用**；
-- v1 不提供“以后该设备所有新 Terminal 都自动接管”的永久开关，避免用户未来手动开的 Terminal 被无感抢走；
-- 短时间连续出现多个新 Terminal 时应在同一个交互窗口里顺序/批量处理，避免连续弹多个窗口；
-- 同一设备存在多个 workspace **不构成歧义**，因为 pool 属于 device。
-
-### 6.3 交互与命令 I/O 必须分离
-
-人类选择窗口不能污染正常 `uu` 的 stdout，也不能偷走远端命令 stdin。
-
-要求：
-
-- `uu <command>` 的 stdout 尽量只保留远端输出；
-- 工具错误/状态提示走 stderr；
-- 需要人类选择时使用独立的短 PowerShell/console 交互，而不是把菜单插进一个可能正在被 Codex 或 pipe 使用的命令流；
-- 不能把 PowerShell 7 (`pwsh`) 当作用户必须预装的运行时：若存在可优先使用，否则可回退系统自带 Windows PowerShell 或项目自身的最小原生交互窗口；
-- 如果环境当前不能安全展示交互，宁可等待/给明确错误，也不要猜。
-
-Codex 不接触裸 `deviceId`。
+只有明确的 `uu bind` 调用会读取当前终端的人类输入；普通远端 job 的 stdin/stdout 保持独立。禁止弹出独立授权窗口或让后台发现流程代替用户作决定。Codex 不接触裸 `deviceId`。
 
 ## 7. 公共 CLI
 
@@ -170,7 +146,7 @@ uu -- <remote command...>
 
 例如远端确实有名为 `list`/`bind`/`put`/`get` 的命令时，用 `uu -- ...` 强制按远端命令执行。
 
-`uu bind` 用于首次或重新建立当前 workspace binding；`uu list` 只给人类查看当前 workspace、remote 和 worker 状态。
+`uu bind` 由用户手动运行，用于首次绑定或给已绑定设备增加 Terminal worker；重复绑定保留 remote root。只有用户明确选择修改时才改 remote root/设备。`uu list` 是只读诊断，也只由用户手动运行；Agent 不执行这两条命令。
 
 v1 不把 `devices/use` 作为主要公共模型。设备只是 workspace binding 的内部组成部分。
 
@@ -252,11 +228,11 @@ uu get remote/path.bin .\roundtrip.bin
 实现方式不固定，可以是 broker、watcher、事件驱动、lazy process 或其他方案。但结果必须满足：
 
 - 用户不需要手工 start/stop 第二个服务；
-- 新开的官方 Terminal 能被自动发现；
+- 可以刷新新开的官方 Terminal 库存，但库存发现不等于授权；只有用户运行 `uu bind` 并选择后才能加入 pool；
 - 空闲时 CPU 接近 0，不永久高频轮询或反复 spawn 官方 CLI；
 - 没必要时不保持昂贵连接；
 - 无 tray、额外 GUI 或常驻可见 console；
-- 只有真正需要用户选择时才弹短人类交互；
+- 不弹独立交互窗口；需要选择时只在用户执行 `uu bind` 的调用终端交互；
 - 后台组件异常后，下一次 `uu` 可以恢复或给出明确错误；
 - 不拖累或阻止官方 UU 的启动、退出、升级。
 
@@ -295,7 +271,7 @@ Agent 只需要知道：
 
 > 不依赖不同 `uu` 调用之间的 shell-local 状态；需要连续 `cd/source/export` 时放进同一条命令。每个普通 job 从 workspace remote root 开始。
 
-Agent 不选择 deviceId、不选择 session、不管理 worker，也不管理后台组件。
+Agent 不选择 deviceId、不选择 session、不管理 worker，也不管理后台组件。Agent 也不得代替用户执行 `uu bind` 或 `uu list`。如果缺少 binding/worker，告知用户在 workspace 调用终端运行 `uu bind`；如果需要诊断状态，告知用户运行 `uu list`。
 
 ## 15. 非目标
 
