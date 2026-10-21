@@ -171,30 +171,23 @@ Windows workspace key 至少验证：
 
 只有 mock 通过不等于 v1 完成。
 
-## 当前实现与证据（2026-10-20）
+## 当前实现与证据（2026-10-21）
 
-当前为 PR [#7](https://github.com/teddyli18000/uu-cli/pull/7) 中的原生 Windows 验证候选，尚未满足下面的真实 UU release gate。产品代码、构建、测试和安装检查在远端完成。之后经用户授权，仅在开发者电脑运行独立观察探针，连接用户交出的专用 Terminal；没有本地安装产品或修改官方 UU。
+当前仍是验证候选，尚未满足 v1 release gate。真实官方 UU 集成使用开发机已登录的 Windows UU 4.43.0.3607、用户授权的 disposable Ubuntu 18.04 WSL host 和 `uu-remote-linux` v0.2.12-aic.3；没有把它描述成外部干净 Windows 或真实多设备验收。完整实测记录见 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
 
 | 层级 | 已验证范围 | 证据 |
 | --- | --- | --- |
-| 纯逻辑与真实 Bash | 授权实例、设备选择、workspace、shell 隔离、并发锁、崩溃 quarantine、no-replay；真实持久 Bash 的 shell 隔离 | [Actions prepare](https://github.com/teddyli18000/uu-cli/actions/runs/39433019505) |
-| 文件传输 | 真实 Bash 中随机二进制、空文件、Unicode/空格、绝对路径、tilde；中断、unknown、完整性错误时保留目标且不报告成功 | [Actions transfer](https://github.com/teddyli18000/uu-cli/actions/runs/39433019285) |
-| 干净 Windows 安装 | 原生包在另一台全新 hosted VM 安装、真实后台进程唯一性、空闲 CPU、无 UU 诊断、升级、锁定文件失败、PATH、卸载、保留 binding/quarantine；Windows PowerShell 5.1 | [Actions installer](https://github.com/teddyli18000/uu-cli/actions/runs/39433019285) |
-| 官方安装发现 | 运行时从官方来源下载，验证 Authenticode/版本/hash，安装后由 uu-cli 发现组件并保留官方“未运行”诊断，卸载完成 | [Official UU smoke](https://github.com/teddyli18000/uu-cli/actions/runs/39412368759) |
+| 公共 CLI / 持久 worker | 实时输出、stdin EOF、状态 0/7、Ctrl+C 返回 130（108.2 ms）及取消后复用同一 helper；更早在候选 `edea7ca` 完成 | [Actions package/install](https://github.com/teddyli18000/uu-cli/actions/runs/39524610449)；[真机记录](REAL_UU_FINDINGS.md) |
+| 自动发现 / 授权 | 无前台请求时 watcher 发现两个新 detached Terminal；同一个真实授权 console 依次确认两次。等待中的绑定请求遇到新 Terminal 后直接进入 remote-root 确认，无第二次授权 | 本轮 disposable WSL 实测；详见 [真机记录](REAL_UU_FINDINGS.md) |
+| 多 worker / workspace | `sleep 30` 与短命令并发且使用不同远端 Bash PID；短任务在长任务结束前完成。两个 workspace 共享 pool 时各自 remote root 正确，`cd`/`export` 不串到另一 workspace 或后续 job | 本轮 disposable WSL 实测；详见 [真机记录](REAL_UU_FINDINGS.md) |
+| 真实文件通道 | 16,385 字节随机二进制哈希一致；覆盖中英文/空格路径、相对/绝对/`~`、零字节及后续命令。768 字节分块确认后完整校验再发布 | 本轮 disposable WSL 实测；详见 [真机记录](REAL_UU_FINDINGS.md) |
+| Caller crash / no-replay | 只杀掉 owned public caller；已发送的远端 job 继续运行但没有重放，原 inflight marker 保留，下一 job 由另一 worker 成功完成，远端计数仍为 1 | 本轮 disposable WSL 实测；不代表网络中断或 worker-helper 崩溃恢复 |
+| Watcher idle sample | watcher 自身 30.017 秒 CPU 78.125 ms、working set 6.25 MiB | 一次真实进程采样；未包含 watcher 启动的官方子进程，不足以判定完整进程树空闲资源 |
+| Actions CI / 安装 | `249ddd5` CI 与 transfer/installer 均通过；`d262917` transfer/installer 全通过；最新 `98850b8` installer/transfer 全通过，CI 的 Windows tests 当时仍运行中 | [249ddd5 CI](https://github.com/teddyli18000/uu-cli/actions/runs/39534790844)、[249ddd5 installer](https://github.com/teddyli18000/uu-cli/actions/runs/39534790934)、[d262917 installer](https://github.com/teddyli18000/uu-cli/actions/runs/39535179959)、[98850b8 CI](https://github.com/teddyli18000/uu-cli/actions/runs/39535706612)、[98850b8 installer](https://github.com/teddyli18000/uu-cli/actions/runs/39535706578) |
+| 官方安装 smoke | 从官方来源下载、验证签名/版本/hash、安装发现组件和未运行诊断 | [Official UU smoke](https://github.com/teddyli18000/uu-cli/actions/runs/39412368759) |
 
-官方安装 smoke 使用的 Windows UU 为 `4.43.0.3607`，NetEase 签名有效；安装包 SHA256 为 `F26F84F01551538B9F6996D5CF0CCBF884FB12731903A4F3EFA73BE712C44DA4`。这只证明该次下载、安装、发现与未运行诊断，不证明登录或真实 Terminal attach。
+该次官方安装 smoke 使用 Windows UU `4.43.0.3607`，NetEase 签名有效，安装包 SHA-256 为 `F26F84F01551538B9F6996D5CF0CCBF884FB12731903A4F3EFA73BE712C44DA4`。它只证明下载、安装、组件发现和未运行诊断，不证明登录或真实 Terminal attach。
 
-以下仍为 **requires-real-uu**，不得标记通过：首次 binding 的完整人类交互、多设备/新 Terminal 的真实授权体验、完整产品 attach/reuse、真实多 Terminal 并发与长任务、产品 stdin/Ctrl+C、UU/Terminal/网络重启、真实文件 round-trip，以及至少一台非开发环境从安装到首次绑定和执行。正式发布应逐项记录真实验收结果，再决定 release；当前没有发布正式版本。
+已经修复的安全边界包括：`running` 且 `attachable` 未知/false 的 session 不尝试 attach；等待提示指导用户关闭专用 Terminal 标签页释放官方连接、不输入 `exit`；30 秒内缺失 BEGIN 时报告 unknown 且不重放；启动前清理 stale helper metadata。较早的 `edea7ca` 公共命令通道验收包括 stdin EOF、Ctrl+C 和后续复用，详见真实记录。
 
-
-### 独立真机命令通道观察
-
-用户提供已登录的官方 UU 和明确交出的专用 Linux/bash Terminal。观察结果见 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)；早期原始收发字节及真实设备标识只保存在本地忽略目录。
-
-[探针 Actions 39431629252](https://github.com/teddyli18000/uu-cli/actions/runs/39431629252) 编译生产提交 3c2e44725b8f80ac09c593482ebcc964190c27c6 未修改的 job/runner/transport 模块。通过真实官方 CLI/ConPTY，实际 transport attach 后立即调用目录捕获，约 400 ms 验证并读回预期绝对路径；随后同一附着内完成退出码 0/7、Unicode、两秒间隔实时输出。sleep 30 在两秒时排入 Interrupt，实际 runner 于发送命令后 2.064 秒返回 130，中断后下一条命令成功。
-
-探针释放自己的本地 attach 子进程，无未完成任务。查询确认原远端实例仍在且 detached，另一未授权运行中 Terminal 的身份/状态未变，探针从未连接它。本轮记录实际 API 输出及时间点；transport 私有 RX/TX 未导出，不把 API 日志称作原始字节日志。
-
-这证明当前模块组成的最小命令闭环。完整 CLI、绑定/授权交互、真实断线恢复、多 worker、真实文件传输及其他 release gate 仍需逐项验收；不据此宣称 v1 完成。ConPTY 输出保持 presentation bytes，不承诺等于远端原始字节流。
-
-命令通道收口提交 8e1d3624d33586608d644ed9aced1f342e4a2afd 的 Windows/Linux fmt、Clippy、tests、release build 全部通过；Windows 四个 CLI integration 包括真实 Git Bash 二进制 put/get 往返均通过。独立 installer/transfer workflow 的三个 job 全通过。此提交相对真机探针引用的 runtime 仅新增测试夹具与断言调整（及文档），不把 fake-provider/Git Bash 结果当作真实 UU 文件通道验收。
+仍待验证：已有 worker 全部 attached 时为新 workspace 建立 binding 的路径正在修复，需在新候选上复测；网络断线、UU/Terminal 重启及 worker-helper 崩溃恢复、真实多设备、包含官方子进程的完整 watcher 空闲占用，以及至少一台外部干净 Windows 从安装到登录使用。Caller 崩溃时的 no-replay 已单独验证；大文件吞吐仍未测量。故 v1 尚未完成。

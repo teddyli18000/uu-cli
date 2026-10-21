@@ -4,11 +4,11 @@
 
 详细产品契约见 `DESIGN.md`，概念架构见 `ARCHITECTURE.md`，实现目标与验收见 `IMPLEMENTATION.md`，验证策略见 `TESTING.md`。
 
-## 当前进度（2026-10-20）
+## 当前进度（2026-10-21）
 
-PR [#7](https://github.com/teddyli18000/uu-cli/pull/7) 已实现原生 CLI、用户侧 binding、按设备共享的 worker pool、实例授权与一次性交互、shell 隔离、流式输出与 stdin/Ctrl+C 转发、no-replay/quarantine、校验文件传输、隐藏 watcher、用户级安装包及 Agent Skill。实现状态和验证证据见 [TESTING.md](TESTING.md#当前实现与证据2026-10-20)。
+PR [#7](https://github.com/teddyli18000/uu-cli/pull/7) 已实现原生 CLI、用户侧 binding、按设备共享的 worker pool、实例授权、shell 隔离、流式 I/O、no-replay/quarantine、校验文件传输、隐藏 watcher、用户级安装包及 Agent Skill。真实 Windows UU + disposable Ubuntu 18.04 WSL host 已验证 watcher 发现和授权、等待中的新 Terminal 无二次授权、两个 worker 并发、跨 workspace root/shell 隔离、16,385 字节二进制 `put/get`。详细证据见 [TESTING.md](TESTING.md#当前实现与证据2026-10-21) 和 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
 
-CI/hosted Windows 的通过不代表下面各阶段的真实 UU 验收完成。当前保持验证候选；真正登录后的 attach、授权交互、多 Terminal、异常恢复、文件通道及非开发环境完整使用仍待 `requires-real-uu` 验收。本轮按用户约束不触碰本地 UU，不跳过这些 gate，也不扩展 v1 范围。
+当前仍为验证候选，不是 v1 完成。另已验证真实 public caller 在已发送长任务期间崩溃后不重放任务；一次 watcher 自身空闲资源采样也已完成，但不含它启动的官方子进程。已发现并正在修复旧候选在已有 Terminal 全部被 helper 附着时为新 workspace 建立 binding 仍等待的问题，修复版需复测。网络/UU/Terminal/worker-helper 故障恢复、真实多设备、完整 watcher 进程树空闲资源，以及外部干净 Windows 从安装到实际使用仍待 `requires-real-uu` 验收。
 
 ## 当前产品模型
 

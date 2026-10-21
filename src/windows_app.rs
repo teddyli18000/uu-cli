@@ -550,7 +550,7 @@ fn capture_pwd(store: &ConfigStore, cli: &OfficialCli, device: &str) -> Result<S
                     continue;
                 }
             };
-            let transport = if has_helper {
+            let mut transport = if has_helper {
                 match WorkerClient::try_connect(store, &session)? {
                     Some(transport) => transport,
                     None if is_eligible_session(&session) => {

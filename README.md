@@ -6,7 +6,7 @@
 
 ## 当前状态与安装
 
-当前分支提供 Windows 原生候选实现；真实登录后的 UU Terminal、远端设备以及非开发机端到端验收仍属于 `requires-real-uu`，通过 hosted CI 不代表 v1 已完成。
+当前分支提供 Windows 原生候选实现。2026-10-21 已用登录中的官方 UU 4.43.0.3607、用户授权的 disposable Ubuntu 18.04 WSL host 和 `uu-remote-linux` v0.2.12-aic.3 验证后台发现与授权、两个 worker 并发、跨 workspace 隔离、真实 `put/get`，以及 caller 崩溃后不重放已发送任务。这些开发机实测和 hosted CI 都不代表 v1 已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
 
 从 [Installer and transfer validation](https://github.com/teddyli18000/uu-cli/actions/workflows/installer.yml) 的成功运行下载 `uu-cli-windows-package` artifact，解压内层 ZIP 后，在 Windows 自带 PowerShell 中运行：
 
@@ -77,7 +77,7 @@ uu git status
 - 用户只选择友好设备名，不接触裸 `deviceId`；
 - binding 完成后，原命令继续执行，不要求重跑。
 
-等待中的请求会明确提示新开的匹配 Terminal 将用于本次请求，打开后不会重复授权。没有等待请求时，新 Terminal 需要一次短授权：Enter 交给 uu-cli，N/Esc/关闭保留手动使用。授权绑定到具体实例，重建的同名 Terminal 不继承旧授权。
+等待中的请求会明确提示新开的匹配 Terminal 将用于本次请求，随后不会重复授权。若官方连接仍被该 Terminal 标签页占用，按提示关闭这个专用标签页以释放连接；不要在里面输入 `exit`。没有等待请求时，新 Terminal 需要一次短授权：Enter 交给 uu-cli，N/Esc/关闭保留手动使用。授权绑定到具体实例，重建的同名 Terminal 不继承旧授权。
 
 ## 多个 Terminal
 
@@ -91,6 +91,8 @@ AIC-Car-1
 ```
 
 `uu-cli` 自动调度空闲 worker。长任务持续占用自己的 terminal，并实时把输出返回给调用它的 Codex；其他命令使用其他空闲 worker。没有空闲 worker 时等待。
+
+真实验证中，`sleep 30` 与短任务同时运行且使用不同远端 Bash PID；短任务在长任务结束前完成。两个 workspace 也通过同一 pool 运行，并各自从绑定的 remote root 开始，`cd`/`export` 不泄漏到另一个 workspace 或后续 job。
 
 ## 很重要：不同 `uu` 调用不共享 shell-local 状态
 
@@ -197,6 +199,6 @@ https://uuyc.163.com/download/
 
 远端使用兼容 POSIX 的交互 shell；普通 job 在 subshell 中从 remote root 开始。PTY 将 stdout/stderr 合流，uu 直接转发合流输出，返回远端 exit code。命令一旦发送，断连只会报告 unknown/may-still-be-running 并隔离 worker，不会换 Terminal 重放。需要继续使用时，在官方 UU 中打开新 Terminal。
 
-文件通道通过同一已授权 worker 传输 base64，远端需要 `base64`、`dd`、`wc`、`tr`、`cut`、`sha256sum` 和 `mv`。上传按 768 字节分块，适合可靠传输，当前大文件吞吐尚未实机测量；下载也按小块确认并解码。两端核对字节数和 SHA-256 后才替换目标。失败上传可能留下相邻的 `.uu-cli-*.part` 文件，不会作为成功目标发布。
+文件通道通过同一已授权 worker 传输 base64，远端需要 `base64`、`dd`、`wc`、`tr`、`cut`、`sha256sum` 和 `mv`。上传按 768 字节分块；下载逐块确认并解码。两端核对字节数和 SHA-256 后才替换目标。真实 `put/get` 已对 16,385 个随机二进制字节完成哈希一致验证，也覆盖零字节、相对/绝对/`~` 路径及中英文和空格路径；该样本之外的大文件吞吐仍未实测。失败上传可能留下相邻的 `.uu-cli-*.part` 文件，不会作为成功目标发布。
 
-默认状态放在 `%LOCALAPPDATA%\uu-cli`，不写入 workspace。隐藏 watcher 负责发现，专用 worker helper 保持官方连接供后续命令复用，空闲五分钟后释放；当前用低频进程探测和 20 秒有 UU / 60 秒无 UU 的发现间隔，前台等待 Terminal 时每 2 秒检查。此间隔是实现配置，空闲 CPU 和官方互操作仍需真实环境测量。
+默认状态放在 `%LOCALAPPDATA%\uu-cli`，不写入 workspace。隐藏 watcher 负责发现，专用 worker helper 保持官方连接供后续命令复用，空闲五分钟后释放；当前用低频进程探测和 20 秒有 UU / 60 秒无 UU 的发现间隔，前台等待 Terminal 时每 2 秒检查。发现和授权的实测结果及资源采样见 [TESTING.md](TESTING.md)。
