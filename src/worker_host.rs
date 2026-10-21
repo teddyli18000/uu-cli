@@ -762,8 +762,9 @@ fn set_pipe_mode(pipe: &File, mode: u32) -> io::Result<()> {
 
 fn accept(pipe: &File) -> io::Result<bool> {
     if unsafe { ConnectNamedPipe(pipe.as_raw_handle(), std::ptr::null_mut()) } != 0 {
-        set_pipe_mode(pipe, 0)?;
-        return Ok(true);
+        // With PIPE_NOWAIT a nonzero return after disconnect only means the
+        // instance is listening again. A client exists only at error 535.
+        return Ok(false);
     }
     match io::Error::last_os_error().raw_os_error() {
         Some(535) => {
@@ -771,6 +772,12 @@ fn accept(pipe: &File) -> io::Result<bool> {
             Ok(true)
         }
         Some(536) => Ok(false),
+        Some(232) => {
+            unsafe {
+                DisconnectNamedPipe(pipe.as_raw_handle());
+            }
+            Ok(false)
+        }
         _ => Err(io::Error::last_os_error()),
     }
 }
