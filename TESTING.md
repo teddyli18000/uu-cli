@@ -175,6 +175,8 @@ Windows workspace key 至少验证：
 
 生命周期要求已调整为：不设置 Windows 登录启动项；安装/升级清除旧的 `uu-cli` Run 项且不启动后台；首次 `uu` 调用按需启动发现组件，官方 UU 退出时结束 watcher 和附着连接。Hosted installer 必须检查无启动项、安装/升级后无后台，并使用文档中的无 `-PackageRoot` 安装入口覆盖 Windows PowerShell 5.1。
 
+该调整在 `30f7f9b` 完成：[Windows/Linux CI](https://github.com/teddyli18000/uu-cli/actions/runs/39547381263) 与 [打包/干净安装升级卸载](https://github.com/teddyli18000/uu-cli/actions/runs/39547381226) 全部通过，包含受控进程退出等待、无 UU 时 watcher 返回。已在用户当前 Windows 用 `pwsh` 安装同一 Actions 包和 Skill：二进制哈希一致、Run 项不存在、安装后后台进程为零，`uu list` 识别官方 UU，原官方 GUI 进程保持不变。本次未关闭官方 UU 做整体退出联调，也未将这次开发机安装记为外部干净 Windows 端到端验收。
+
 当前仍是验证候选，尚未满足 v1 release gate。真实官方 UU 集成使用开发机已登录的 Windows UU 4.43.0.3607、用户授权的 disposable Ubuntu 18.04 WSL host 和 `uu-remote-linux` v0.2.12-aic.3；没有把它描述成外部干净 Windows 或真实多设备验收。完整实测记录见 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
 
 | 层级 | 已验证范围 | 证据 |

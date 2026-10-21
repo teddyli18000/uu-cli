@@ -8,7 +8,7 @@
 
 当前分支提供 Windows 原生候选实现。2026-10-21 已用登录中的官方 UU 4.43.0.3607、用户授权的 disposable Ubuntu 18.04 WSL host 和 `uu-remote-linux` v0.2.12-aic.3 验证后台发现与授权、两个 worker 并发、跨 workspace 隔离、真实 `put/get`，以及 caller 崩溃后不重放已发送任务。这些开发机实测和 hosted CI 都不代表 v1 已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
 
-从 [GitHub Release v0.1.0-preview.1](https://github.com/teddyli18000/uu-cli/releases/tag/v0.1.0-preview.1) 下载 `uu-cli-windows-package.zip`，解压后，在 Windows 自带 PowerShell 中运行：
+从 [GitHub Release v0.1.0-preview.2](https://github.com/teddyli18000/uu-cli/releases/tag/v0.1.0-preview.2) 下载 `uu-cli-windows-package.zip`，解压后，在 Windows 自带 PowerShell 中运行：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1
