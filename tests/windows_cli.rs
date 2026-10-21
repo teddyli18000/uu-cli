@@ -794,7 +794,9 @@ fn windows_cli_put_get_binary_files_through_git_bash() {
         .arg(remote_payload);
     let output = run_bounded(
         &mut put_payload,
-        Duration::from_secs(180),
+        // Hosted Git Bash executes more than 1,300 acknowledged chunks. Its
+        // process/pipe overhead varies by runner; integrity remains mandatory.
+        Duration::from_secs(240),
         "uu put 1 MiB+1 binary payload through Git Bash",
     );
     assert_transfer_success(output, "uu put 1 MiB+1 binary payload");
@@ -819,7 +821,7 @@ fn windows_cli_put_get_binary_files_through_git_bash() {
         .arg(&downloaded_payload);
     let output = run_bounded(
         &mut get_payload,
-        Duration::from_secs(180),
+        Duration::from_secs(240),
         "uu get 1 MiB+1 binary payload through Git Bash",
     );
     assert_transfer_success(output, "uu get 1 MiB+1 binary payload");
