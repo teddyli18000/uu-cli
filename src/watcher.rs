@@ -264,7 +264,6 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    #[test]
     fn interaction_lock_is_exclusive_until_released() {
         let temp = tempdir().unwrap();
         let config_path = temp.path().join("config.json");

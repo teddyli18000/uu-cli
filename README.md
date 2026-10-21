@@ -6,7 +6,7 @@
 
 ## 当前状态与安装
 
-当前已发布版本为 `v0.1.0-preview.2`；本次手动绑定体验的发布目标为 `v0.1.1`。2026-10-21 的 WSL 和小车实测证明了 shell、文件通道、取消和并发等能力，但其中的弹窗/等待请求授权流程属于旧交互设计，不能作为新 UX 的验收证据。当前契约要求用户在调用终端手动运行 `uu bind` / `uu list`；新交互需随 v0.1.1 实现并重新验收。实测证据见 `TESTING.md` 和 `REAL_UU_FINDINGS.md`。这些实测和 hosted CI 都不代表全部 v1 验收已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
+`v0.1.1` 包含手动绑定、无弹窗和按设备排队。2026-10-21 的 WSL 和小车实测证明了 shell、文件通道、取消和并发等能力，但其中的弹窗/等待请求授权流程属于旧交互设计，不能作为新 UX 的验收证据。当前契约要求用户在调用终端手动运行 `uu bind` / `uu list`；新交互有独立的 Windows fixture 验收，真实 UU 手动绑定流程仍需用户验收。实测证据见 `TESTING.md` 和 `REAL_UU_FINDINGS.md`。这些实测和 hosted CI 都不代表全部 v1 验收已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
 
 从 [GitHub Latest Release](https://github.com/teddyli18000/uu-cli/releases/latest) 下载 `uu-cli-windows-package.zip`，解压后，在 Windows 自带 PowerShell 中运行：
 
