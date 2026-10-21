@@ -336,7 +336,7 @@ fn setup(store: &ConfigStore, force: bool) -> Result<()> {
         );
         if candidates.is_empty() {
             if !waiting {
-                println!("请在官方 UU 中打开目标设备的 Terminal；接下来打开的 Terminal 将用于本次请求。Ctrl+C取消。");
+                println!("请在官方 UU 中打开目标设备的 Terminal；接下来打开的 Terminal 将用于本次请求。看到提示符后关闭专用 Terminal 的标签页以释放官方连接，不输入 exit。Ctrl+C取消。");
                 baseline = fingerprint_baseline(&current);
                 waiting = true;
             }

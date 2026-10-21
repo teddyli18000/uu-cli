@@ -197,6 +197,6 @@ https://uuyc.163.com/download/
 
 远端使用兼容 POSIX 的交互 shell；普通 job 在 subshell 中从 remote root 开始。PTY 将 stdout/stderr 合流，uu 直接转发合流输出，返回远端 exit code。命令一旦发送，断连只会报告 unknown/may-still-be-running 并隔离 worker，不会换 Terminal 重放。需要继续使用时，在官方 UU 中打开新 Terminal。
 
-文件通道通过同一已授权 worker 传输 base64，远端需要 `base64`、`wc`、`tr`、`cut`、`sha256sum` 和 `mv`。上传按 768 字节分块，适合可靠传输，当前大文件吞吐尚未实机测量；下载流式解码。两端核对字节数和 SHA-256 后才替换目标。失败上传可能留下相邻的 `.uu-cli-*.part` 文件，不会作为成功目标发布。
+文件通道通过同一已授权 worker 传输 base64，远端需要 `base64`、`dd`、`wc`、`tr`、`cut`、`sha256sum` 和 `mv`。上传按 768 字节分块，适合可靠传输，当前大文件吞吐尚未实机测量；下载也按小块确认并解码。两端核对字节数和 SHA-256 后才替换目标。失败上传可能留下相邻的 `.uu-cli-*.part` 文件，不会作为成功目标发布。
 
-默认状态放在 `%LOCALAPPDATA%\uu-cli`，不写入 workspace。后台仅做发现，不承载 job；当前用低频进程探测和 20 秒有 UU / 60 秒无 UU 的发现间隔，前台等待 Terminal 时每 2 秒检查。此间隔是实现配置，空闲 CPU 和官方互操作仍需真实环境测量。
+默认状态放在 `%LOCALAPPDATA%\uu-cli`，不写入 workspace。隐藏 watcher 负责发现，专用 worker helper 保持官方连接供后续命令复用，空闲五分钟后释放；当前用低频进程探测和 20 秒有 UU / 60 秒无 UU 的发现间隔，前台等待 Terminal 时每 2 秒检查。此间隔是实现配置，空闲 CPU 和官方互操作仍需真实环境测量。
