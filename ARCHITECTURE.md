@@ -335,3 +335,18 @@ Workers    3
 - Git/Python/CMake 专用远程 API。
 
 任何内部设计如果需要新增大量用户概念才能成立，默认应该重新考虑。
+
+## 当前实现映射
+
+- `windows_app` 连接公共 CLI 与绑定、独立决策 console、worker 调度及 put/get。
+- `model/config/authorization/workspace` 保存用户侧绑定及具体 Terminal 实例授权；N/Esc/关闭采用持久 default-deny。
+- `worker_lease` 通过 OS 文件锁让同设备多 workspace 共享实例 worker；发送前同步写入 inflight 记录，只有可靠完成才能删除。崩溃释放文件锁但保留记录。
+- `uuyc/discovery/inventory` 发现官方组件并查询设备、Terminal，不创建或关闭官方 Terminal。
+- `transport/runner/job` 附着已授权 Terminal，经一个本地 ConPTY reader 收发、识别完成边界，并流式返回合流输出；每条普通命令使用 subshell。
+- `worker_host` 为每个实际使用的 Terminal 保留一个隐藏附着进程。公共 CLI 通过仅当前用户可访问的本机 named pipe 路由 job；活连接不重新查询/附着，空闲五分钟或官方 UU 退出时退出。transport 的空闲检查与任务 liveness 同时检查官方 UU 的进程句柄；已经发送但未确认完成的 job 不重试。缓存不是授权，调度仍验证用户授权和实例 lease。
+- 专用 Bash worker 在父 shell 关闭作业控制并启用 `ignoreeof`：前台命令照常收到 Ctrl+C/EOF，命令完成后迟到的调用方 EOF 不得关闭 worker。业务命令仍在嵌套 subshell 中隔离自身状态。
+- `transfer` 复用同一 worker 的隔离 job，base64 分块上传 / 流式下载，size 与 SHA-256 校验后同目录发布。
+- `uu-background` 承载隐藏的发现或专用 worker 模式；安装不加开机启动项、不立即启动后台。watcher 由公开 `uu` 调用按需启动，以 OS 锁防重复，并等待官方 UU 进程退出后退出，不在无 UU 时常驻。决策由同目录 `uu.exe` 在独立 console 中执行，job 不经 watcher。
+- 用户安装包只含两个原生可执行文件、PowerShell 5.1 安装/卸载脚本及 Agent Skill，不含官方 UU 二进制或开发运行时。
+
+实例身份依赖官方列表提供 device identity、session name 和 createdAt。字段不足时拒绝授权；不能把名字当作旧实例证明。官方 attach 只接受设备与名字，列表复查与 attach 之间能否获得更强的原子实例保证尚无官方能力证据，需纳入真实互操作检查。

@@ -1,0 +1,64 @@
+name: Official UU download smoke
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/official-uu-smoke.yml'
+      - 'scripts/official-uu-smoke.ps1'
+      - 'scripts/inspect-official-uu.ps1'
+      - 'scripts/install-official-uu-smoke.ps1'
+      - 'src/discovery.rs'
+      - 'src/uuyc.rs'
+      - 'src/main.rs'
+      - 'src/windows_app.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+  schedule:
+    - cron: '18 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  probe-official-download:
+    # Compatibility signal only: no CI credentials or real-device acceptance.
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build uu-cli release candidate
+        shell: pwsh
+        run: cargo build --locked --release
+      - name: Discover and verify official Windows installer
+        id: probe
+        shell: pwsh
+        run: ./scripts/official-uu-smoke.ps1
+      - name: Inspect verified package and embedded CLI
+        shell: pwsh
+        run: ./scripts/inspect-official-uu.ps1
+      - name: Clean install, uu-cli discovery probe, and uninstall on disposable runner
+        shell: pwsh
+        env:
+          UU_CLI_UNDER_TEST: ${{ github.workspace }}\target\release\uu.exe
+        run: ./scripts/install-official-uu-smoke.ps1
+      - name: Summary
+        if: always()
+        shell: pwsh
+        env:
+          INSTALLER_URL: ${{ steps.probe.outputs.installer_url }}
+          UU_VERSION: ${{ steps.probe.outputs.version }}
+          UU_PRODUCT: ${{ steps.probe.outputs.product }}
+          UU_SIGNER: ${{ steps.probe.outputs.signer }}
+          UU_SHA256: ${{ steps.probe.outputs.sha256 }}
+        run: |
+          "## Official UU smoke" >> $env:GITHUB_STEP_SUMMARY
+          "- Source page: https://uuyc.163.com/download/" >> $env:GITHUB_STEP_SUMMARY
+          "- Installer URL: $env:INSTALLER_URL" >> $env:GITHUB_STEP_SUMMARY
+          "- Version: $env:UU_VERSION" >> $env:GITHUB_STEP_SUMMARY
+          "- Product: $env:UU_PRODUCT" >> $env:GITHUB_STEP_SUMMARY
+          "- Signer: $env:UU_SIGNER" >> $env:GITHUB_STEP_SUMMARY
+          "- SHA256: $env:UU_SHA256" >> $env:GITHUB_STEP_SUMMARY

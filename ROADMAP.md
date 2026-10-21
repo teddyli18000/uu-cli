@@ -4,6 +4,12 @@
 
 详细产品契约见 `DESIGN.md`，概念架构见 `ARCHITECTURE.md`，实现目标与验收见 `IMPLEMENTATION.md`，验证策略见 `TESTING.md`。
 
+## 当前进度（2026-10-21）
+
+PR [#7](https://github.com/teddyli18000/uu-cli/pull/7) 已实现原生 CLI、用户侧 binding、按设备共享的 worker pool、实例授权、shell 隔离、流式 I/O、no-replay/quarantine、校验文件传输、隐藏 watcher、用户级安装包及 Agent Skill。真实 Windows UU + disposable Ubuntu 18.04 WSL host 已验证 watcher 发现和授权、等待中的新 Terminal 无二次授权、两个 worker 并发、跨 workspace root/shell 隔离、16,385 字节二进制 `put/get`。详细证据见 [TESTING.md](TESTING.md#当前实现与证据2026-10-21) 和 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
+
+当前仍为验证候选，不是 v1 完成。另已验证真实 public caller 在已发送长任务期间崩溃后不重放任务；一次 watcher 自身空闲资源采样也已完成，但不含它启动的官方子进程。已有 helper 保持连接时的新 workspace 绑定已在修复候选实测通过，无需新 Terminal。网络/UU/Terminal/worker-helper 故障恢复、真实多设备、完整 watcher 进程树空闲资源，以及外部干净 Windows 从安装到实际使用仍待 `requires-real-uu` 验收。
+
 ## 当前产品模型
 
 ```text

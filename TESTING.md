@@ -170,3 +170,30 @@ Windows workspace key 至少验证：
 5. 非开发机或干净 Windows 环境完成至少一次从安装到首次 binding 的完整体验验证。
 
 只有 mock 通过不等于 v1 完成。
+
+## 当前实现与证据（2026-10-21）
+
+生命周期要求已调整为：不设置 Windows 登录启动项；安装/升级清除旧的 `uu-cli` Run 项且不启动后台；首次 `uu` 调用按需启动发现组件，官方 UU 退出时结束 watcher 和附着连接。Hosted installer 必须检查无启动项、安装/升级后无后台，并使用文档中的无 `-PackageRoot` 安装入口覆盖 Windows PowerShell 5.1。
+
+该调整在 `30f7f9b` 完成：[Windows/Linux CI](https://github.com/teddyli18000/uu-cli/actions/runs/39547381263) 与 [打包/干净安装升级卸载](https://github.com/teddyli18000/uu-cli/actions/runs/39547381226) 全部通过，包含受控进程退出等待、无 UU 时 watcher 返回。已在用户当前 Windows 用 `pwsh` 安装同一 Actions 包和 Skill：二进制哈希一致、Run 项不存在、安装后后台进程为零，`uu list` 识别官方 UU，原官方 GUI 进程保持不变。本次未关闭官方 UU 做整体退出联调，也未将这次开发机安装记为外部干净 Windows 端到端验收。
+
+当前仍是验证候选，尚未满足 v1 release gate。真实官方 UU 集成使用开发机已登录的 Windows UU 4.43.0.3607、用户授权的 disposable Ubuntu 18.04 WSL host 和 `uu-remote-linux` v0.2.12-aic.3；没有把它描述成外部干净 Windows 或真实多设备验收。完整实测记录见 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。随后停止全部 WSL，使用已安装的 preview.2 与真实小车 `abot-robot` 完成首次绑定 `/home/abot`、连续命令/中文/退出码 7、shell 隔离、4,097 字节随机二进制哈希一致及 Ctrl+C 后复用；取消耗时 89.6 ms。随后双 Terminal 实车并发通过：短任务与等待输入的长任务使用不同 Bash PID，短任务完成时长任务仍在运行；释放输入后长任务 exit 0，后续命令复用成功。等待中的新 Terminal 没有重复授权，首段输出 256.1 ms。这增加了真实小车验收，不替代其余独立 release gate。
+
+| 层级 | 已验证范围 | 证据 |
+| --- | --- | --- |
+| 公共 CLI / 持久 worker | 实时输出、stdin EOF、状态 0/7、Ctrl+C 返回 130（108.2 ms）及取消后复用同一 helper；更早在候选 `edea7ca` 完成 | [Actions package/install](https://github.com/teddyli18000/uu-cli/actions/runs/39524610449)；[真机记录](REAL_UU_FINDINGS.md) |
+| 自动发现 / 授权 | 无前台请求时 watcher 发现两个新 detached Terminal；同一个真实授权 console 依次确认两次。等待中的绑定请求遇到新 Terminal 后直接进入 remote-root 确认，无第二次授权 | 本轮 disposable WSL 实测；详见 [真机记录](REAL_UU_FINDINGS.md) |
+| 多 worker / workspace | `sleep 30` 与短命令并发且使用不同远端 Bash PID；短任务在长任务结束前完成。两个 workspace 共享 pool 时各自 remote root 正确，`cd`/`export` 不串到另一 workspace 或后续 job | 本轮 disposable WSL 实测；详见 [真机记录](REAL_UU_FINDINGS.md) |
+| 真实文件通道 | 16,385 与新候选 65,537 字节随机二进制哈希一致；覆盖中英文/空格路径、相对/绝对/`~`、零字节及后续命令。768 字节分块确认后完整校验再发布 | 本轮 disposable WSL 实测；详见 [真机记录](REAL_UU_FINDINGS.md) |
+| Caller crash / no-replay | 只杀掉 owned public caller；已发送的远端 job 继续运行但没有重放，原 inflight marker 保留，下一 job 由另一 worker 成功完成，远端计数仍为 1 | 本轮 disposable WSL 实测；不代表网络中断或 worker-helper 崩溃恢复 |
+| Watcher idle sample | watcher 自身 30.017 秒 CPU 78.125 ms、working set 6.25 MiB | 一次真实进程采样；未包含 watcher 启动的官方子进程，不足以判定完整进程树空闲资源 |
+| Actions CI / 安装 | `99dd09a` Windows/Linux fmt、Clippy、全套 tests/release build 及 transfer/package/clean-install 全通过，包含 Windows 1 MiB+1 round-trip | [CI](https://github.com/teddyli18000/uu-cli/actions/runs/39537336135)、[installer](https://github.com/teddyli18000/uu-cli/actions/runs/39537336110) |
+| 官方安装 smoke | 从官方来源下载、验证签名/版本/hash、安装发现组件和未运行诊断 | [Official UU smoke](https://github.com/teddyli18000/uu-cli/actions/runs/39412368759) |
+
+该次官方安装 smoke 使用 Windows UU `4.43.0.3607`，NetEase 签名有效，安装包 SHA-256 为 `F26F84F01551538B9F6996D5CF0CCBF884FB12731903A4F3EFA73BE712C44DA4`。它只证明下载、安装、组件发现和未运行诊断，不证明登录或真实 Terminal attach。
+
+已经修复的安全边界包括：`running` 且 `attachable` 未知/false 的 session 不尝试 attach；等待提示指导用户关闭专用 Terminal 标签页释放官方连接、不输入 `exit`；30 秒内缺失 BEGIN 时报告 unknown 且不重放；启动前清理 stale helper metadata。较早的 `edea7ca` 公共命令通道验收包括 stdin EOF、Ctrl+C 和后续复用，详见真实记录。
+
+仍待验证：网络断线、UU/Terminal 重启及 worker-helper 崩溃恢复、真实多设备、包含官方子进程的完整 watcher 空闲占用，以及至少一台外部干净 Windows 从安装到登录使用。Caller 崩溃时的 no-replay 已单独验证；大文件吞吐仍未测量。故 v1 尚未完成。
+
+新版已有 helper 绑定复测通过：新 workspace 直接进入 remote-root 确认，保存 `/tmp/uu-cli-root-b` 后公开 `uu pwd` 返回正确目录。helper PID 保持 277356，主机日志仅一次 OPEN；没有新建 Terminal、重复授权或另一次 attach。
