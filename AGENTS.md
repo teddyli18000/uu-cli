@@ -115,6 +115,7 @@ uu "cd src && source .venv/bin/activate && python main.py"
 
 - `uu bind` 将调用时的当前目录精确保存为 workspace root，即使它位于 Git repo 内；从子目录运行普通 `uu` 时仍查找最近的已有 binding；
 - binding 存在用户侧，不污染 repo；
+- Windows 默认状态使用 `%USERPROFILE%\.uu-cli`，避免打包应用的 AppData 虚拟化分裂授权、锁和队列；旧配置导入必须保留 unknown/quarantine，不得恢复已拒绝授权；
 - 从子目录运行时使用最近的 workspace binding；
 - 通常只允许一个新出现且可用的 detached Terminal；候选不唯一时给出明确错误，用户自行整理后再次运行 `uu bind`；
 - 不要求用户或 Codex 看到裸 deviceId；

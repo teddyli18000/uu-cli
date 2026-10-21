@@ -14,3 +14,5 @@ The human opens a dedicated Terminal in official UU, closes that Terminal's offi
 Never choose device IDs, sessions, workers, or silently operate an unapproved Terminal. When uu reports unknown/may-still-be-running, do not replay a command with side effects; report the uncertainty and inspect before any retry.
 
 Use `uu -- <command...>` when the remote command starts with a reserved word (`put/get/bind/list`).
+
+Windows shares binding and worker state under `%USERPROFILE%\.uu-cli` across human terminals and Codex. Existing legacy state is imported automatically; do not create separate per-agent config overrides. If the human reports successful binding but execution cannot see it, ask for the `Config` path shown by their `uu list` instead of repeatedly asking them to open new Terminals.

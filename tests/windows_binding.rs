@@ -452,9 +452,18 @@ fn windows_bind_is_inline_and_uses_enter_from_caller_stdin() {
 }
 
 #[test]
-fn windows_repeated_bind_keeps_root_and_adds_one_new_terminal() {
+fn windows_repeated_bind_adds_and_routes_new_terminal() {
     let test = Workspace::new();
-    let old_fingerprint = fingerprint("bash-existing", "2026-10-20T12:30:00Z");
+    let bash = bash_path();
+    let remote_directory = test._temp.path().join("remote-root");
+    fs::create_dir_all(&remote_directory).unwrap();
+    let kept_root = remote_pwd(&bash, &remote_directory);
+    let old_created_at = "2026-10-20T12:30:00Z";
+    let old_fingerprint = fingerprint("bash-existing", old_created_at);
+    let new_created_at = "2026-10-21T12:01:00Z";
+    let mut old_terminal = fixture_terminal("bash-existing", old_created_at);
+    old_terminal["state"] = json!("running");
+    old_terminal["attachable"] = json!(false);
     fs::create_dir_all(test.config.parent().unwrap()).unwrap();
     fs::write(
         &test.config,
@@ -464,7 +473,7 @@ fn windows_repeated_bind_keeps_root_and_adds_one_new_terminal() {
                 "local_root": fs::canonicalize(&test.root).unwrap().to_string_lossy(),
                 "device_identity": DEVICE_ID,
                 "device_name": DEVICE_NAME,
-                "remote_root": "/home/kept-root",
+                "remote_root": kept_root,
             }],
             "authorized_workers": [old_fingerprint],
             "declined_workers": [],
@@ -478,11 +487,11 @@ fn windows_repeated_bind_keeps_root_and_adds_one_new_terminal() {
             "deviceId": DEVICE_ID,
             "deviceName": DEVICE_NAME,
             "isOnline": true,
-            "terminals": [fixture_terminal("bash-new", "2026-10-21T12:01:00Z")]
+            "terminals": [old_terminal, fixture_terminal("bash-new", new_created_at)]
         }]}),
     );
 
-    let mut command = base_command(&test, &bash_path());
+    let mut command = base_command(&test, &bash);
     command.arg("bind");
     let output = Running::start(command, b"").finish(Duration::from_secs(20), &test);
     assert_success(&output, "repeat bind");
@@ -506,7 +515,7 @@ fn windows_repeated_bind_keeps_root_and_adds_one_new_terminal() {
         1,
         "{config:#}"
     );
-    assert_eq!(config["bindings"][0]["remote_root"], "/home/kept-root");
+    assert_eq!(config["bindings"][0]["remote_root"], kept_root);
     let authorized = config["authorized_workers"].as_array().unwrap();
     assert_eq!(
         authorized.len(),
@@ -514,16 +523,57 @@ fn windows_repeated_bind_keeps_root_and_adds_one_new_terminal() {
         "bind must add one worker only: {config:#}"
     );
     assert!(authorized.contains(&json!(old_fingerprint)));
-    assert!(authorized.contains(&json!(fingerprint("bash-new", "2026-10-21T12:01:00Z"))));
+    assert!(authorized.contains(&json!(fingerprint("bash-new", new_created_at))));
 
-    let events = read_events(&test.events);
+    let bind_events = read_events(&test.events);
     assert!(
-        events_named(&events, "attach_started").is_empty(),
-        "same-device rebind should not attach: {events:#?}"
+        events_named(&bind_events, "attach_started").is_empty(),
+        "same-device rebind should not attach: {bind_events:#?}"
     );
     assert!(
-        events_named(&events, "dispatch").is_empty(),
-        "same-device rebind should not run a remote command: {events:#?}"
+        events_named(&bind_events, "dispatch").is_empty(),
+        "same-device rebind should not run a remote command: {bind_events:#?}"
+    );
+
+    for (shell_command, expected_output) in [
+        ("printf 'new-worker-first\\n'", "new-worker-first"),
+        ("printf 'new-worker-second\\n'", "new-worker-second"),
+    ] {
+        let mut command = base_command(&test, &bash);
+        command.arg(shell_command);
+        let output = Running::start(command, b"").finish(Duration::from_secs(30), &test);
+        assert_success(&output, "command after repeated bind");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(expected_output),
+            "command output did not come back from the bound worker: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    let events = read_events(&test.events);
+    let attaches = events_named(&events, "attach_started");
+    assert_eq!(
+        attaches.len(),
+        1,
+        "the new worker should attach only once: {events:#?}"
+    );
+    assert_eq!(
+        attaches[0]["sessionName"], "bash-new",
+        "must not attach the old busy instance: {events:#?}"
+    );
+    assert_eq!(attaches[0]["createdAt"], new_created_at);
+    assert_eq!(attaches[0]["available"], true);
+    let dispatches = events_named(&events, "dispatch");
+    assert_eq!(
+        dispatches.len(),
+        2,
+        "both ordinary commands should dispatch: {events:#?}"
+    );
+    assert!(
+        dispatches.iter().all(|event| {
+            event["sessionName"] == "bash-new" && event["createdAt"] == new_created_at
+        }),
+        "commands must use the newly authorized instance, never the old one: {dispatches:#?}"
     );
 }
 

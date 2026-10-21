@@ -6,7 +6,7 @@
 
 ## 当前进度（2026-10-21）
 
-`v0.1.1` 已实现手动绑定、无弹窗和按设备排队。2026-10-21 的 WSL/小车实测证明 shell、worker 并发、跨 workspace 隔离和文件通道等能力；当时的 watcher、弹窗授权及等待请求自动接收属于历史交互，不能作为新契约的验收证据。详细历史见 [TESTING.md](TESTING.md#历史实现与实测记录2026-10-21) 和 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
+`v0.1.2` 在手动绑定、无弹窗和按设备排队基础上，统一 Windows 用户状态目录，修复人类终端与 Codex 因 AppData 虚拟化读到不同授权的问题。2026-10-21 的 WSL/小车实测证明 shell、worker 并发、跨 workspace 隔离和文件通道等能力；当时的 watcher、弹窗授权及等待请求自动接收属于历史交互，不能作为新契约的验收证据。详细历史见 [TESTING.md](TESTING.md#历史实现与实测记录2026-10-21) 和 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
 
 当前仍为验证候选，不是 v1 完成。真实 public caller 在已发送长任务期间崩溃后不重放任务的证据仍有效。新的 inline `uu bind`、当前目录作为 workspace root、候选歧义诊断和队列位置已实现并加入自动化验收；网络/UU/Terminal/worker-helper 故障恢复、真实多设备，以及外部干净 Windows 从安装到实际使用仍待 `requires-real-uu` 验收。
 

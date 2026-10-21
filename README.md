@@ -6,7 +6,7 @@
 
 ## 当前状态与安装
 
-`v0.1.1` 包含手动绑定、无弹窗和按设备排队。2026-10-21 的 WSL 和小车实测证明了 shell、文件通道、取消和并发等能力，但其中的弹窗/等待请求授权流程属于旧交互设计，不能作为新 UX 的验收证据。当前契约要求用户在调用终端手动运行 `uu bind` / `uu list`；新交互有独立的 Windows fixture 验收，真实 UU 手动绑定流程仍需用户验收。实测证据见 `TESTING.md` 和 `REAL_UU_FINDINGS.md`。这些实测和 hosted CI 都不代表全部 v1 验收已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
+`v0.1.2` 修复 Windows 打包应用导致的配置隔离：人类终端与 Codex 统一使用用户目录下的状态，已有绑定和授权自动导入。手动绑定、无弹窗和按设备排队的用法不变。2026-10-21 的 WSL 和小车实测证明了 shell、文件通道、取消和并发等能力，但其中的弹窗/等待请求授权流程属于旧交互设计，不能作为新 UX 的验收证据。当前契约要求用户在调用终端手动运行 `uu bind` / `uu list`；新交互有独立的 Windows fixture 验收。实测证据见 `TESTING.md` 和 `REAL_UU_FINDINGS.md`。这些实测和 hosted CI 都不代表全部 v1 验收已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
 
 从 [GitHub Latest Release](https://github.com/teddyli18000/uu-cli/releases/latest) 下载 `uu-cli-windows-package.zip`，解压后，在 Windows 自带 PowerShell 中运行：
 
@@ -197,4 +197,6 @@ https://uuyc.163.com/download/
 
 文件通道通过同一已授权 worker 传输 base64，远端需要 `base64`、`dd`、`wc`、`tr`、`cut`、`sha256sum` 和 `mv`。上传按 768 字节分块；下载逐块确认并解码。两端核对字节数和 SHA-256 后才替换目标。真实 `put/get` 已对 16,385 个随机二进制字节完成哈希一致验证，也覆盖零字节、相对/绝对/`~` 路径及中英文和空格路径；该样本之外的大文件吞吐仍未实测。失败上传可能留下相邻的 `.uu-cli-*.part` 文件，不会作为成功目标发布。
 
-默认状态放在 `%LOCALAPPDATA%\uu-cli`，不写入 workspace。没有常驻发现 watcher 或开机启动项。用户运行 `uu bind` 时前台刷新设备/Terminal 列表并在当前调用终端完成选择和授权；普通命令只使用已授权 worker，必要时按需建立附件连接。worker helper 空闲五分钟后释放；退出官方 UU 后，尚未确认完成的命令仍按 unknown 处理，不自动重放。旧版 watcher、授权弹窗实测和资源采样见 [TESTING.md](TESTING.md)。
+Windows 默认状态放在 `%USERPROFILE%\.uu-cli`，不写入 workspace，也不受 Codex 等打包应用的 AppData 虚拟化影响。旧版 `%LOCALAPPDATA%\uu-cli` 中当前上下文可见的绑定、授权及 unknown 记录会自动导入一次，原文件保留；已有共享绑定优先，拒绝记录优先于授权。升级前先等旧任务结束。显式 `UU_CLI_CONFIG` 仍使用指定路径，选择该路径时需保证各调用方能访问同一份文件。用户运行 `uu list` 可查看实际配置路径。
+
+没有常驻发现 watcher 或开机启动项。用户运行 `uu bind` 时前台刷新设备/Terminal 列表并在当前调用终端完成选择和授权；普通命令只使用已授权 worker，必要时按需建立附件连接。worker helper 空闲五分钟后释放；退出官方 UU 后，尚未确认完成的命令仍按 unknown 处理，不自动重放。旧版 watcher、授权弹窗实测和资源采样见 [TESTING.md](TESTING.md)。

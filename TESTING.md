@@ -4,6 +4,8 @@
 
 ## 1. CI-first
 
+Windows 配置兼容性回归：为同一用户模拟两个旧 AppData 上下文，验证绑定和授权汇入同一 `%USERPROFILE%\.uu-cli`，既有绑定及拒绝记录优先、迁移仅执行一次、unknown marker 保留、活跃旧 job 阻止迁移。重复 `bind` 集成测试必须接着执行普通命令，证明新授权可路由且后续命令复用同一 attach。安装验收使用临时 USERPROFILE，验证旧状态导入及卸载保留共享状态。真实打包应用的文件虚拟化仍需跨上下文实机验证。
+
 仓库是公开仓库，应充分利用 GitHub-hosted Windows runners 做构建、测试、打包和干净环境验证。
 
 每个 PR 至少应尽可能覆盖：

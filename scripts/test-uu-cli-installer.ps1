@@ -204,6 +204,7 @@ function Assert-NoInstalledBackgroundProcesses {
 }
 
 $oldLocalAppData = [Environment]::GetEnvironmentVariable('LOCALAPPDATA', 'Process')
+$oldUserProfile = [Environment]::GetEnvironmentVariable('USERPROFILE', 'Process')
 $oldConfigOverride = [Environment]::GetEnvironmentVariable('UU_CLI_CONFIG', 'Process')
 $oldProcessPath = $env:PATH
 $oldUserPath = Read-RegistryValue -SubKey 'Environment' -Name 'Path'
@@ -211,6 +212,8 @@ $oldRunValue = Read-RegistryValue -SubKey 'Software\Microsoft\Windows\CurrentVer
 $testRoot = Join-Path $env:RUNNER_TEMP ('uu-cli-installer-' + [guid]::NewGuid().ToString('N'))
 $unicode = ([char]0x6D4B).ToString() + ([char]0x8BD5).ToString()
 $localAppData = Join-Path $testRoot ('Local Data ' + $unicode)
+$userProfile = Join-Path $testRoot ('User Profile ' + $unicode)
+$sharedConfigPath = Join-Path $userProfile '.uu-cli\config.json'
 $configPath = Join-Path $localAppData 'uu-cli\config.json'
 $lockPath = Join-Path (Split-Path -Parent $configPath) '.config.json.lock'
 $backupPath = Join-Path (Split-Path -Parent $configPath) '.config.json.bak'
@@ -234,6 +237,7 @@ try {
     [IO.File]::WriteAllText($workerStatePath, 'pid=999999' + [Environment]::NewLine + 'worker=fixture-worker')
 
     [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, 'Process')
+    [Environment]::SetEnvironmentVariable('USERPROFILE', $userProfile, 'Process')
     [Environment]::SetEnvironmentVariable('UU_CLI_CONFIG', $null, 'Process')
     Set-LegacyRunEntry -Target (Join-Path $testRoot 'legacy-install\uu-background.exe')
 
@@ -267,6 +271,17 @@ try {
     if ($listResult.ExitCode -ne 0 -or $listResult.Output -notmatch '(?im)^UU\s+not found\b') {
         throw "uu list did not report a missing official UU cleanly (exit $($listResult.ExitCode)): $($listResult.Output)"
     }
+    if ($listResult.Output -notmatch '(?im)^Config\s+.*\.uu-cli\\config\.json\s*$' -or
+        -not (Test-Path -LiteralPath $sharedConfigPath -PathType Leaf)) {
+        throw "The installed program did not use the shared user-profile state: $($listResult.Output)"
+    }
+    $migrated = [IO.File]::ReadAllText($sharedConfigPath) | ConvertFrom-Json
+    if ($migrated.bindings[0].remote_root -cne '/home/sentinel' -or
+        $migrated.authorized_workers -notcontains 'authorized-worker-fingerprint' -or
+        -not (Test-Path -LiteralPath (Join-Path $userProfile '.uu-cli\workers\fixture-worker.inflight'))) {
+        throw 'Legacy binding, authorization, or quarantine state did not migrate to shared state.'
+    }
+    $sharedConfigBytes = [Convert]::ToBase64String([IO.File]::ReadAllBytes($sharedConfigPath))
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf) -or
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -cne $configBytes) {
         throw 'Install changed the existing workspace binding config.'
@@ -313,6 +328,11 @@ try {
     if (Test-Path -LiteralPath $installRoot) {
         throw 'Uninstall left the uu-cli program directory behind.'
     }
+    if (-not (Test-Path -LiteralPath $sharedConfigPath -PathType Leaf) -or
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($sharedConfigPath)) -cne $sharedConfigBytes -or
+        -not (Test-Path -LiteralPath (Join-Path $userProfile '.uu-cli\workers\fixture-worker.inflight'))) {
+        throw 'Upgrade/uninstall changed or removed shared binding or quarantine state.'
+    }
     if (-not (Test-Path -LiteralPath $configPath -PathType Leaf) -or
         [Convert]::ToBase64String([IO.File]::ReadAllBytes($configPath)) -cne $configBytes) {
         throw 'Uninstall changed or removed the user binding and authorization config.'
@@ -351,6 +371,7 @@ finally {
     }
 
     [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $oldLocalAppData, 'Process')
+    [Environment]::SetEnvironmentVariable('USERPROFILE', $oldUserProfile, 'Process')
     [Environment]::SetEnvironmentVariable('UU_CLI_CONFIG', $oldConfigOverride, 'Process')
     $env:PATH = $oldProcessPath
     Restore-RegistryValue -SubKey 'Environment' -Name 'Path' -Snapshot $oldUserPath

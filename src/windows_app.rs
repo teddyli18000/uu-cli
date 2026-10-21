@@ -536,6 +536,7 @@ fn dispatch<T>(
 fn list(store: &ConfigStore, cwd: &Path) -> Result<u8> {
     let config = store.load()?;
     println!("Workspace  {}", suggest_root(cwd)?.display());
+    println!("Config     {}", store.path().display());
     let binding = resolve_binding(&config, cwd);
     if let Some(binding) = binding {
         println!(

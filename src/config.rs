@@ -6,29 +6,66 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+mod migration {
+    include!("config_migration.rs");
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigStore {
     path: PathBuf,
+    legacy_sources: Vec<PathBuf>,
 }
 
 impl ConfigStore {
     pub fn from_env() -> Result<Self> {
         if let Some(path) = env::var_os("UU_CLI_CONFIG") {
-            return Ok(Self { path: path.into() });
+            return Ok(Self::at(path));
         }
 
-        let base = env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .ok_or_else(|| anyhow!("cannot determine per-user config directory"))?;
+        #[cfg(windows)]
+        {
+            let profile = env::var_os("USERPROFILE")
+                .map(PathBuf::from)
+                .ok_or_else(|| anyhow!("cannot determine Windows user profile directory"))?;
+            let path = profile.join(".uu-cli").join("config.json");
+            let legacy_sources = env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .map(|base| base.join("uu-cli").join("config.json"))
+                .into_iter()
+                .collect();
+            Ok(Self {
+                path,
+                legacy_sources,
+            })
+        }
 
-        Ok(Self {
-            path: base.join("uu-cli").join("config.json"),
-        })
+        #[cfg(not(windows))]
+        {
+            let base = env::var_os("LOCALAPPDATA")
+                .map(PathBuf::from)
+                .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+                .ok_or_else(|| anyhow!("cannot determine per-user config directory"))?;
+
+            Ok(Self::at(base.join("uu-cli").join("config.json")))
+        }
     }
 
     pub fn at(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            legacy_sources: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn at_with_legacy_sources(
+        path: impl Into<PathBuf>,
+        legacy_sources: impl IntoIterator<Item = PathBuf>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            legacy_sources: legacy_sources.into_iter().collect(),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -37,6 +74,18 @@ impl ConfigStore {
 
     pub fn load(&self) -> Result<Config> {
         let lock = self.open_lock()?;
+
+        if !self.legacy_sources.is_empty() {
+            FileExt::lock_exclusive(&lock).context("cannot lock uu-cli config for migration")?;
+            let result = self.migrate_unlocked().and_then(|_| self.load_unlocked());
+            let unlock = FileExt::unlock(&lock).context("cannot unlock uu-cli config");
+            return match (result, unlock) {
+                (Err(error), _) => Err(error),
+                (Ok(_), Err(error)) => Err(error),
+                (Ok(config), Ok(())) => Ok(config),
+            };
+        }
+
         FileExt::lock_shared(&lock).context("cannot lock uu-cli config for reading")?;
         let result = self.load_unlocked();
         let unlock = FileExt::unlock(&lock).context("cannot unlock uu-cli config");
@@ -50,7 +99,9 @@ impl ConfigStore {
     pub fn save(&self, config: &Config) -> Result<()> {
         let lock = self.open_lock()?;
         FileExt::lock_exclusive(&lock).context("cannot lock uu-cli config for writing")?;
-        let result = self.save_unlocked(config);
+        let result = self
+            .migrate_unlocked()
+            .and_then(|_| self.save_unlocked(config));
         let unlock = FileExt::unlock(&lock).context("cannot unlock uu-cli config");
         match (result, unlock) {
             (Err(error), _) => Err(error),
@@ -71,6 +122,7 @@ impl ConfigStore {
         FileExt::lock_exclusive(&lock).context("cannot lock uu-cli config for update")?;
 
         let result = (|| {
+            self.migrate_unlocked()?;
             let mut config = self.load_unlocked()?;
             mutate(&mut config)?;
             self.save_unlocked(&config)?;
@@ -105,6 +157,13 @@ impl ConfigStore {
             .write(true)
             .open(&lock_path)
             .with_context(|| format!("cannot open config lock {}", lock_path.display()))
+    }
+
+    fn migrate_unlocked(&self) -> Result<()> {
+        for source in &self.legacy_sources {
+            migration::migrate_source(self, source)?;
+        }
+        Ok(())
     }
 
     fn load_unlocked(&self) -> Result<Config> {
