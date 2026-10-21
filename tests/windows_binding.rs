@@ -541,7 +541,25 @@ fn windows_force_binding_reuses_live_helper_and_keeps_other_device_candidate() {
         .expect("probe remote cwd");
     assert!(probe.status.success());
     let expected_root = String::from_utf8_lossy(&probe.stdout).trim().to_owned();
-    assert_eq!(second_binding["remote_root"], expected_root);
+    let saved_root = second_binding["remote_root"]
+        .as_str()
+        .expect("saved remote root");
+    let same_directory = Command::new(&bash)
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "test \"$1\" -ef \"$2\"",
+            "root-check",
+            saved_root,
+            &expected_root,
+        ])
+        .output()
+        .expect("compare saved remote directory");
+    assert!(
+        same_directory.status.success(),
+        "wrong bound directory: {saved_root:?} != {expected_root:?}"
+    );
 
     let events = read_events(&test.events);
     let attaches: Vec<_> = events
