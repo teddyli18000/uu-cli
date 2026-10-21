@@ -258,8 +258,6 @@ mod windows_process {
 mod tests {
     use super::{run, runtime_dir, spawn_if_needed, try_interaction_lock};
     #[cfg(windows)]
-    use std::path::Path;
-    #[cfg(windows)]
     use std::process::Command;
     use tempfile::tempdir;
 
