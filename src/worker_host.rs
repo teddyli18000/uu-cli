@@ -758,14 +758,14 @@ fn quote_argument(argument: &str) -> String {
             continue;
         }
         if ch == '"' {
-            quoted.extend(std::iter::repeat_n('\\', slashes * 2 + 1));
+            quoted.push_str(&"\\".repeat(slashes * 2 + 1));
         } else {
-            quoted.extend(std::iter::repeat_n('\\', slashes));
+            quoted.push_str(&"\\".repeat(slashes));
         }
         slashes = 0;
         quoted.push(ch);
     }
-    quoted.extend(std::iter::repeat_n('\\', slashes * 2));
+    quoted.push_str(&"\\".repeat(slashes * 2));
     quoted.push('"');
     quoted
 }
