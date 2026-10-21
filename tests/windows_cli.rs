@@ -541,7 +541,7 @@ fn windows_cli_streams_unicode_output_and_propagates_remote_exit_code() {
 }
 
 #[test]
-fn windows_cli_reuses_one_persistent_worker_across_workspace_jobs() {
+fn windows_cli_recovers_stale_worker_metadata_before_restarting_helper() {
     let (bash, cygpath) = find_git_bash();
     let fake_cli = fake_cli_path();
     let test = TestWorkspace::new();
@@ -581,6 +581,24 @@ fn windows_cli_reuses_one_persistent_worker_across_workspace_jobs() {
         terminal_lists_after_first > 0,
         "first call should discover the worker"
     );
+    let first_helper_pid = first_events
+        .iter()
+        .find(|event| event.get("event").and_then(Value::as_str) == Some("worker_host_started"))
+        .and_then(|event| event.get("pid").and_then(Value::as_u64))
+        .map(|pid| pid as u32)
+        .expect("first call should start a hidden worker helper");
+    let attachments_dir = uu_cli::watcher::runtime_dir(&test.config_path).join("attachments");
+    let stale_metadata_path = fs::read_dir(&attachments_dir)
+        .expect("worker helper should create the attachments directory")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension() == Some(std::ffi::OsStr::new("json")))
+        .expect("worker helper should create attachment metadata");
+    kill_process_tree(first_helper_pid);
+    assert!(
+        stale_metadata_path.is_file(),
+        "killing an idle helper should leave the stale metadata fixture"
+    );
 
     let mut second = uu_command(&test, &fake_cli, "bash");
     second
@@ -605,9 +623,14 @@ fn windows_cli_reuses_one_persistent_worker_across_workspace_jobs() {
     );
     let second_events = read_fixture_events(&test.events_path);
     assert_eq!(
-        count_events(&second_events, "terminal_list"),
-        terminal_lists_after_first,
-        "a live helper should avoid another official terminal inventory"
+        count_events(&second_events, "worker_host_started"),
+        2,
+        "a stale metadata entry should be replaced by a fresh helper before dispatch"
+    );
+    let terminal_lists_after_second = count_events(&second_events, "terminal_list");
+    assert!(
+        terminal_lists_after_second > terminal_lists_after_first,
+        "a dead helper should trigger a fresh official terminal inventory"
     );
 
     let mut third = uu_command(&test, &fake_cli, "bash");
@@ -634,18 +657,18 @@ fn windows_cli_reuses_one_persistent_worker_across_workspace_jobs() {
     let events = read_fixture_events(&test.events_path);
     assert_eq!(
         count_events(&events, "attach_started"),
-        1,
-        "all three public calls should share one official terminal attach"
+        2,
+        "recovery should start one replacement attach, then reuse it"
     );
     assert_eq!(
         count_events(&events, "terminal_list"),
-        terminal_lists_after_first,
-        "later calls should not re-list official terminals"
+        terminal_lists_after_second,
+        "later calls should reuse the replacement helper without another inventory"
     );
     assert_eq!(
         count_events(&events, "worker_host_started"),
-        1,
-        "the test should start exactly one hidden worker helper"
+        2,
+        "the test should start one original and one replacement helper"
     );
     assert_eq!(
         read_dispatches(&test.log_path).len(),

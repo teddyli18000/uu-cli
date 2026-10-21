@@ -129,6 +129,15 @@ fn metadata_path(store: &ConfigStore, session: &SessionInfo) -> Result<PathBuf> 
     Ok(host_dir(store).join(format!("{}.json", key(store, session)?)))
 }
 
+fn remove_stale_metadata(store: &ConfigStore, session: &SessionInfo) -> Result<()> {
+    let path = metadata_path(store, session)?;
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).context("cannot remove stale local worker metadata"),
+    }
+}
+
 fn pipe_name(store: &ConfigStore, session: &SessionInfo) -> Result<String> {
     Ok(format!(r"\\.\pipe\uu-cli-worker-{}", key(store, session)?))
 }
@@ -242,6 +251,10 @@ impl WorkerClient {
         if let Some(client) = Self::try_connect(store, session)? {
             return Ok(client);
         }
+        // The caller holds this session's lease. Clear the stale candidate
+        // before a replacement helper creates the same named pipes, so retries
+        // cannot pair the old PID with the new server endpoints.
+        remove_stale_metadata(store, session)?;
         let child = spawn_helper(session, cli_path)?;
         let deadline = Instant::now() + Duration::from_secs(15);
         loop {
