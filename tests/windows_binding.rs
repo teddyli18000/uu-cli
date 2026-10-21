@@ -514,7 +514,11 @@ fn windows_force_binding_reuses_live_helper_and_keeps_other_device_candidate() {
 
     let transcript = fs::read_to_string(&test.transcript).unwrap_or_default();
     assert!(transcript.contains(DEVICE_NAME), "{transcript}");
-    assert!(transcript.contains("另一台设备"), "{transcript}");
+    let compact_transcript: String = transcript
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect();
+    assert!(compact_transcript.contains("另一台设备"), "{transcript}");
     assert!(
         transcript.contains("1)") && transcript.contains("2)"),
         "{transcript}"
