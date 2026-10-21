@@ -221,6 +221,7 @@ where
 
 const INPUT_POLL: Duration = Duration::from_millis(10);
 const CHILD_EXIT_DRAIN: Duration = Duration::from_millis(250);
+const BEGIN_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[cfg(any(windows, test))]
 #[derive(Default)]
@@ -321,6 +322,35 @@ fn run_prepared_job_with_child<W, O>(
     nonce: &str,
     console_decoder: bool,
     input: Option<&Receiver<JobInput>>,
+    child_has_exited: impl FnMut() -> io::Result<bool>,
+) -> Result<JobResult, JobRunError>
+where
+    W: Write,
+    O: Write + ?Sized,
+{
+    run_prepared_job_with_child_and_begin_timeout(
+        reader,
+        writer,
+        output,
+        wrapped,
+        nonce,
+        console_decoder,
+        input,
+        BEGIN_ACK_TIMEOUT,
+        child_has_exited,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_prepared_job_with_child_and_begin_timeout<W, O>(
+    reader: &mut ReadPump,
+    writer: &mut W,
+    output: &mut O,
+    wrapped: &str,
+    nonce: &str,
+    console_decoder: bool,
+    input: Option<&Receiver<JobInput>>,
+    begin_ack_timeout: Duration,
     mut child_has_exited: impl FnMut() -> io::Result<bool>,
 ) -> Result<JobResult, JobRunError>
 where
@@ -340,6 +370,9 @@ where
         .context("failed while sending the framed command")
         .map_err(JobRunError::Unknown)?;
 
+    // Bound only the acknowledgement that the wrapper began. Once BEGIN is
+    // observed, long-running remote jobs remain unbounded as before.
+    let mut begin_deadline = Some(Instant::now() + begin_ack_timeout);
     let mut stdin_eof = false;
     let mut input_disconnected = false;
     let mut child_exit_deadline = None;
@@ -356,6 +389,23 @@ where
             .map_err(JobRunError::Unknown)?
         {
             child_exit_deadline.get_or_insert_with(|| Instant::now() + CHILD_EXIT_DRAIN);
+        }
+
+        if decoder.started() {
+            begin_deadline = None;
+        }
+        if let Some(deadline) = begin_deadline {
+            if Instant::now() >= deadline {
+                flush_incomplete_job_output(
+                    &mut decoder,
+                    #[cfg(any(windows, test))]
+                    &mut conpty_dsr,
+                    output,
+                )?;
+                return Err(JobRunError::Unknown(anyhow!(
+                    "timed out waiting for the remote BEGIN marker within {begin_ack_timeout:?} after dispatch; the remote command may still be running"
+                )));
+            }
         }
 
         if let Some(deadline) = child_exit_deadline {
@@ -416,6 +466,9 @@ where
                     .min(INPUT_POLL)
             })
             .unwrap_or(INPUT_POLL);
+        let wait = begin_deadline
+            .map(|deadline| wait.min(deadline.saturating_duration_since(Instant::now())))
+            .unwrap_or(wait);
         match reader
             .read_event_timeout(wait)
             .context("terminal transport failed while waiting for completion")
@@ -1299,6 +1352,65 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn missing_begin_times_out_unknown_without_forwarding_queued_input_or_replaying() {
+        let (remote_tx, remote_rx) = mpsc::channel();
+        let (input_tx, input_rx) = mpsc::channel();
+        let (writes_tx, writes_rx) = mpsc::channel();
+        let all = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let all_for_job = all.clone();
+        let wrapped = wrap_job("/root", "read-input", "abc123").unwrap();
+        let (result_tx, result_rx) = mpsc::sync_channel(1);
+
+        let job = thread::spawn(move || {
+            let mut reader = ReadPump::spawn(ChannelReader {
+                chunks: remote_rx,
+                current: Cursor::new(Vec::new()),
+            });
+            let mut writer = ObservedWriter {
+                all: all_for_job,
+                writes: writes_tx,
+            };
+            let mut output = Vec::new();
+            let result = run_prepared_job_with_child_and_begin_timeout(
+                &mut reader,
+                &mut writer,
+                &mut output,
+                &wrapped,
+                "abc123",
+                true,
+                Some(&input_rx),
+                Duration::from_millis(40),
+                || Ok(false),
+            );
+            let _ = result_tx.send((result, output));
+            reader.shutdown_and_join();
+        });
+
+        let dispatch = writes_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("job wrapper was not dispatched");
+        assert!(String::from_utf8_lossy(&dispatch).contains("UUC' 'abc123' 'B"));
+        input_tx
+            .send(JobInput::Bytes(b"must stay gated".to_vec()))
+            .unwrap();
+
+        let (result, output) = result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("missing BEGIN did not time out");
+        let error = result.expect_err("missing BEGIN must produce an unknown result");
+        assert!(error.is_unknown());
+        assert!(error
+            .to_string()
+            .contains("remote command may still be running"));
+        assert!(output.is_empty());
+
+        drop(remote_tx);
+        job.join().unwrap();
+        assert_eq!(all.lock().unwrap().as_slice(), dispatch.as_slice());
+        assert!(writes_rx.try_recv().is_err());
     }
 
     #[test]
