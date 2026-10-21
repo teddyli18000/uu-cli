@@ -8,7 +8,7 @@
 
 当前分支提供 Windows 原生候选实现。2026-10-21 已用登录中的官方 UU 4.43.0.3607、用户授权的 disposable Ubuntu 18.04 WSL host 和 `uu-remote-linux` v0.2.12-aic.3 验证后台发现与授权、两个 worker 并发、跨 workspace 隔离、真实 `put/get`，以及 caller 崩溃后不重放已发送任务。这些开发机实测和 hosted CI 都不代表 v1 已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
 
-从 [Installer and transfer validation](https://github.com/teddyli18000/uu-cli/actions/workflows/installer.yml) 的成功运行下载 `uu-cli-windows-package` artifact，解压内层 ZIP 后，在 Windows 自带 PowerShell 中运行：
+从 [GitHub Release v0.1.0-preview.1](https://github.com/teddyli18000/uu-cli/releases/tag/v0.1.0-preview.1) 下载 `uu-cli-windows-package.zip`，解压后，在 Windows 自带 PowerShell 中运行：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1
@@ -16,7 +16,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1
 
 安装到当前用户的 `%LOCALAPPDATA%\Programs\uu-cli`，添加用户 PATH 和隐藏 watcher 的用户启动项。无需 Rust、Python、Node、WSL 或 PowerShell 7；新终端会收到更新后的 PATH。卸载运行同包中的 `installer\uninstall.ps1`。安装、升级和卸载不修改官方 UU；卸载保留用户绑定及 unknown worker 安全记录，避免重装后误复用可能仍忙的 Terminal。
 
-Agent 使用说明随包放在 `skills/uu-cli/SKILL.md`。
+Agent Skill 已写好，随包放在 `skills/uu-cli/SKILL.md`，Release 也提供独立的 `uu-cli-skill.zip`。将其中的 `uu-cli` 文件夹放入 Codex 的 `$CODEX_HOME/skills`（未设置时为 `%USERPROFILE%\.codex\skills`），在新会话中使用。CLI installer 不修改 Codex 配置或自动安装 Skill。
+
+本次预发布交付已实测的 shell、自动发现/授权、worker pool 与文件通道；按当前使用范围，断网等异常恢复不作为这次交付的阻塞项。后续完整验收仍按 `TESTING.md` 记录。
 
 ## 日常使用
 
