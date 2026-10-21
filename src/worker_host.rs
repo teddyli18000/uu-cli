@@ -18,7 +18,10 @@ use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc, Arc, Mutex,
+};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -292,7 +295,12 @@ impl WorkerClient {
         (|| -> Result<(i32, Option<String>), JobRunError> {
             write_frame(&mut self.pipe, request).map_err(unknown)?;
             let mut pending = Vec::new();
+            // Keep input writes independent of output reads. Otherwise a large
+            // duplex job can fill both pipe buffers and deadlock its caller.
+            let input_pump = InputPump::new(&self.pipe).map_err(unknown)?;
+            let mut pending_input = None;
             loop {
+                input_pump.check().map_err(unknown)?;
                 // Read available bytes incrementally; never block the input path
                 // waiting for the rest of a large response frame.
                 let available = available_bytes(&self.pipe).map_err(unknown)?;
@@ -327,25 +335,37 @@ impl WorkerClient {
                 }
                 if let Some(input) = input {
                     for _ in 0..8 {
-                        let request = match input.try_recv() {
-                            Ok(JobInput::Bytes(bytes)) => Request::Input {
-                                id: self.next_id,
-                                bytes: Some(bytes),
-                                interrupt: false,
+                        let request = match pending_input.take() {
+                            Some(request) => request,
+                            None => match input.try_recv() {
+                                Ok(JobInput::Bytes(bytes)) => Request::Input {
+                                    id: self.next_id,
+                                    bytes: Some(bytes),
+                                    interrupt: false,
+                                },
+                                Ok(JobInput::Interrupt) => Request::Input {
+                                    id: self.next_id,
+                                    bytes: None,
+                                    interrupt: true,
+                                },
+                                Ok(JobInput::Eof) => Request::Input {
+                                    id: self.next_id,
+                                    bytes: None,
+                                    interrupt: false,
+                                },
+                                Err(_) => break,
                             },
-                            Ok(JobInput::Interrupt) => Request::Input {
-                                id: self.next_id,
-                                bytes: None,
-                                interrupt: true,
-                            },
-                            Ok(JobInput::Eof) => Request::Input {
-                                id: self.next_id,
-                                bytes: None,
-                                interrupt: false,
-                            },
-                            Err(_) => break,
                         };
-                        write_frame(&mut self.pipe, &request).map_err(unknown)?;
+                        match input_pump.sender.as_ref().unwrap().try_send(request) {
+                            Ok(()) => {}
+                            Err(mpsc::TrySendError::Full(request)) => {
+                                pending_input = Some(request);
+                                break;
+                            }
+                            Err(mpsc::TrySendError::Disconnected(_)) => {
+                                return Err(unknown("worker input writer stopped"))
+                            }
+                        }
                     }
                 }
                 if available == 0 {
@@ -353,6 +373,72 @@ impl WorkerClient {
                 }
             }
         })()
+    }
+}
+
+struct InputPump {
+    sender: Option<mpsc::SyncSender<Request>>,
+    done: mpsc::Receiver<io::Result<()>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl InputPump {
+    fn new(pipe: &File) -> io::Result<Self> {
+        let mut writer = pipe.try_clone()?;
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let (done_tx, done) = mpsc::sync_channel(1);
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread_stop = stop.clone();
+        let thread = thread::spawn(move || {
+            let result = (|| {
+                while !thread_stop.load(Ordering::Acquire) {
+                    match receiver.recv_timeout(Duration::from_millis(10)) {
+                        Ok(request) => {
+                            if thread_stop.load(Ordering::Acquire) {
+                                break;
+                            }
+                            write_frame(&mut writer, &request)?;
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                Ok(())
+            })();
+            let _ = done_tx.send(result);
+        });
+        Ok(Self {
+            sender: Some(sender),
+            done,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    fn check(&self) -> io::Result<()> {
+        match self.done.try_recv() {
+            Ok(Err(error)) => Err(error),
+            Ok(Ok(())) | Err(mpsc::TryRecvError::Disconnected) => {
+                Err(io::Error::other("worker input writer stopped"))
+            }
+            Err(mpsc::TryRecvError::Empty) => Ok(()),
+        }
+    }
+}
+
+impl Drop for InputPump {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        self.sender.take();
+        if let Some(thread) = self.thread.take() {
+            unsafe {
+                CancelSynchronousIo(thread.as_raw_handle());
+            }
+            if thread.is_finished() || self.done.recv_timeout(Duration::from_millis(250)).is_ok() {
+                let _ = thread.join();
+            }
+        }
     }
 }
 
@@ -615,6 +701,7 @@ extern "system" {
     fn ConnectNamedPipe(pipe: Handle, overlapped: Handle) -> i32;
     fn DisconnectNamedPipe(pipe: Handle) -> i32;
     fn FlushFileBuffers(pipe: Handle) -> i32;
+    fn CancelSynchronousIo(thread: Handle) -> i32;
     fn SetNamedPipeHandleState(
         pipe: Handle,
         mode: *const u32,
