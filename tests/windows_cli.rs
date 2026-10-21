@@ -20,6 +20,7 @@ struct TestWorkspace {
     config_path: PathBuf,
     workspace: PathBuf,
     log_path: PathBuf,
+    events_path: PathBuf,
 }
 
 impl TestWorkspace {
@@ -28,6 +29,7 @@ impl TestWorkspace {
         let workspace = temp.path().join("workspace-项目");
         let config_path = temp.path().join("配置").join("config.json");
         let log_path = temp.path().join("日志").join("dispatch.jsonl");
+        let events_path = temp.path().join("日志").join("fixture-events.jsonl");
         fs::create_dir_all(&workspace).expect("create Unicode workspace");
         fs::create_dir_all(config_path.parent().unwrap()).expect("create Unicode config directory");
         fs::create_dir_all(log_path.parent().unwrap()).expect("create Unicode log directory");
@@ -55,6 +57,7 @@ impl TestWorkspace {
             config_path,
             workspace,
             log_path,
+            events_path,
         }
     }
 
@@ -69,6 +72,105 @@ impl TestWorkspace {
         )
         .expect("update test remote root");
     }
+
+    fn add_workspace(&self, workspace: &Path, remote_root: &str) {
+        fs::create_dir_all(workspace).expect("create second test workspace");
+        let mut config: Value =
+            serde_json::from_slice(&fs::read(&self.config_path).expect("read test config"))
+                .expect("parse test config");
+        config["bindings"]
+            .as_array_mut()
+            .expect("test bindings should be an array")
+            .push(json!({
+                "local_root": workspace.to_string_lossy(),
+                "device_identity": DEVICE_ID,
+                "device_name": DEVICE_NAME,
+                "remote_root": remote_root
+            }));
+        fs::write(
+            &self.config_path,
+            serde_json::to_vec_pretty(&config).expect("serialize test config"),
+        )
+        .expect("write second workspace binding");
+    }
+}
+
+impl Drop for TestWorkspace {
+    fn drop(&mut self) {
+        let Ok(contents) = fs::read_to_string(&self.events_path) else {
+            return;
+        };
+        for event in contents
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        {
+            if event.get("event").and_then(Value::as_str) != Some("worker_host_started") {
+                continue;
+            }
+            let Some(pid) = event
+                .get("pid")
+                .and_then(Value::as_u64)
+                .map(|pid| pid as u32)
+            else {
+                continue;
+            };
+            let Some(started_at_ms) = event.get("started_at_unix_ms").and_then(Value::as_u64)
+            else {
+                continue;
+            };
+            if process_created_at_unix_ms(pid)
+                .is_some_and(|created_at_ms| created_at_ms.abs_diff(started_at_ms) < 5_000)
+            {
+                kill_process_tree(pid);
+            }
+        }
+    }
+}
+
+fn process_created_at_unix_ms(pid: u32) -> Option<u64> {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct FileTime {
+        low: u32,
+        high: u32,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenProcess(access: u32, inherit_handle: i32, process_id: u32) -> *mut c_void;
+        fn GetProcessTimes(
+            process: *mut c_void,
+            creation: *mut FileTime,
+            exit: *mut FileTime,
+            kernel: *mut FileTime,
+            user: *mut FileTime,
+        ) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const WINDOWS_TO_UNIX_EPOCH_TICKS: u64 = 116_444_736_000_000_000;
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if process.is_null() {
+        return None;
+    }
+    let mut creation = FileTime { low: 0, high: 0 };
+    let mut exit = FileTime { low: 0, high: 0 };
+    let mut kernel = FileTime { low: 0, high: 0 };
+    let mut user = FileTime { low: 0, high: 0 };
+    let success =
+        unsafe { GetProcessTimes(process, &mut creation, &mut exit, &mut kernel, &mut user) } != 0;
+    unsafe {
+        CloseHandle(process);
+    }
+    if !success {
+        return None;
+    }
+    let ticks = (u64::from(creation.high) << 32) | u64::from(creation.low);
+    ticks
+        .checked_sub(WINDOWS_TO_UNIX_EPOCH_TICKS)
+        .map(|ticks| ticks / 10_000)
 }
 
 fn fake_cli_path() -> PathBuf {
@@ -82,6 +184,7 @@ fn uu_command(test: &TestWorkspace, fake_cli: &Path, mode: &str) -> Command {
         .env("UU_CLI_CONFIG", &test.config_path)
         .env("UUYC_CLI", fake_cli)
         .env("UU_TEST_LOG", &test.log_path)
+        .env("UU_TEST_FIXTURE_EVENTS", &test.events_path)
         .env("UU_TEST_MODE", mode)
         .env("UU_CLI_NO_BACKGROUND", "1");
     command
@@ -371,6 +474,24 @@ fn read_dispatches(path: &Path) -> Vec<Value> {
         .collect()
 }
 
+fn read_fixture_events(path: &Path) -> Vec<Value> {
+    match fs::read_to_string(path) {
+        Ok(contents) => contents
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("parse fixture event"))
+            .collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("read fixture events {}: {error}", path.display()),
+    }
+}
+
+fn count_events(events: &[Value], name: &str) -> usize {
+    events
+        .iter()
+        .filter(|event| event.get("event").and_then(Value::as_str) == Some(name))
+        .count()
+}
+
 #[test]
 fn windows_cli_streams_unicode_output_and_propagates_remote_exit_code() {
     let fake_cli = fake_cli_path();
@@ -416,6 +537,120 @@ fn windows_cli_streams_unicode_output_and_propagates_remote_exit_code() {
             .unwrap()
             .contains("你好 世界"),
         "Unicode command did not reach the fake terminal"
+    );
+}
+
+#[test]
+fn windows_cli_reuses_one_persistent_worker_across_workspace_jobs() {
+    let (bash, cygpath) = find_git_bash();
+    let fake_cli = fake_cli_path();
+    let test = TestWorkspace::new();
+    let first_remote_root = test._temp.path().join("远端 root one");
+    let second_workspace = test._temp.path().join("workspace-two");
+    let second_remote_root = test._temp.path().join("远端 root two");
+    fs::create_dir_all(&first_remote_root).expect("create first fake remote root");
+    fs::create_dir_all(&second_remote_root).expect("create second fake remote root");
+    let first_remote_root = cygpath_unix(&first_remote_root, &cygpath);
+    let second_remote_root = cygpath_unix(&second_remote_root, &cygpath);
+    test.set_remote_root(&first_remote_root);
+    test.add_workspace(&second_workspace, &second_remote_root);
+
+    let mut first = uu_command(&test, &fake_cli, "bash");
+    first
+        .env("UU_TEST_BASH", &bash)
+        .arg("pwd; export UU_CLI_PERSISTENCE_LEAK=present; cd /tmp");
+    let output = run_bounded(
+        &mut first,
+        Duration::from_secs(60),
+        "first job on persistent fake worker",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "first job failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(&first_remote_root),
+        "first job should start at its workspace remote root: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let first_events = read_fixture_events(&test.events_path);
+    let terminal_lists_after_first = count_events(&first_events, "terminal_list");
+    assert!(
+        terminal_lists_after_first > 0,
+        "first call should discover the worker"
+    );
+
+    let mut second = uu_command(&test, &fake_cli, "bash");
+    second
+        .current_dir(&second_workspace)
+        .env("UU_TEST_BASH", &bash)
+        .arg("pwd; test -z \"${UU_CLI_PERSISTENCE_LEAK+x}\" && sh -c 'exit 7'");
+    let output = run_bounded(
+        &mut second,
+        Duration::from_secs(60),
+        "second workspace job on persistent fake worker",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(7),
+        "second job should preserve the remote exit code after checking shell isolation; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains(&second_remote_root),
+        "second workspace should use its own remote root: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let second_events = read_fixture_events(&test.events_path);
+    assert_eq!(
+        count_events(&second_events, "terminal_list"),
+        terminal_lists_after_first,
+        "a live helper should avoid another official terminal inventory"
+    );
+
+    let mut third = uu_command(&test, &fake_cli, "bash");
+    third
+        .env("UU_TEST_BASH", &bash)
+        .arg("pwd; printf 'persistent-worker-你好\\n'");
+    let output = run_bounded(
+        &mut third,
+        Duration::from_secs(60),
+        "third job on persistent fake worker",
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "third job failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&first_remote_root) && stdout.contains("persistent-worker-你好"),
+        "third job should use the original remote root and preserve Unicode: {stdout:?}"
+    );
+
+    let events = read_fixture_events(&test.events_path);
+    assert_eq!(
+        count_events(&events, "attach_started"),
+        1,
+        "all three public calls should share one official terminal attach"
+    );
+    assert_eq!(
+        count_events(&events, "terminal_list"),
+        terminal_lists_after_first,
+        "later calls should not re-list official terminals"
+    );
+    assert_eq!(
+        count_events(&events, "worker_host_started"),
+        1,
+        "the test should start exactly one hidden worker helper"
+    );
+    assert_eq!(
+        read_dispatches(&test.log_path).len(),
+        3,
+        "each public command should be dispatched once through the persistent attach"
     );
 }
 

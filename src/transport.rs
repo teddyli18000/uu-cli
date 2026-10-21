@@ -2,7 +2,8 @@
 
 use crate::runner::{
     await_conpty_startup, run_framed_job_with_child, run_framed_job_with_input_and_child,
-    run_framed_pwd_probe_with_child, JobInput, JobResult, JobRunError, ReadPump,
+    run_framed_pwd_probe_with_child, ConPtyDsrHandshake, JobInput, JobResult, JobRunError,
+    PumpRead, ReadPump,
 };
 use anyhow::{anyhow, bail, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -17,6 +18,7 @@ struct TermPty {
     master: Option<Box<dyn MasterPty + Send>>,
     reader: ReadPump,
     writer: Box<dyn Write + Send>,
+    idle_dsr: ConPtyDsrHandshake,
 }
 
 impl TermPty {
@@ -115,6 +117,7 @@ impl TermPty {
             master: Some(master),
             reader,
             writer,
+            idle_dsr: ConPtyDsrHandshake::default(),
         })
     }
 
@@ -242,6 +245,21 @@ impl OfficialAttachPty {
 
     pub fn has_exited(&mut self) -> std::io::Result<bool> {
         self.inner.child.try_wait().map(|status| status.is_some())
+    }
+
+    /// Drain idle prompt/banner traffic without executing remote commands.
+    /// A connected worker must keep servicing ConPTY even between callers.
+    pub fn drain_idle(&mut self) -> std::io::Result<bool> {
+        for _ in 0..128 {
+            match self.inner.reader.read_event_timeout(Duration::ZERO)? {
+                PumpRead::Data(bytes) => {
+                    self.inner.idle_dsr.push(&mut self.inner.writer, &bytes)?;
+                }
+                PumpRead::Eof => return Ok(false),
+                PumpRead::Timeout => return Ok(!self.has_exited()?),
+            }
+        }
+        Ok(!self.has_exited()?)
     }
 
     pub fn run_job<O: Write + ?Sized>(

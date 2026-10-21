@@ -8,7 +8,7 @@ Extract the package, open Windows PowerShell in its root folder, and run:
 
 Installation places the executables and skill under %LOCALAPPDATA%\Programs\uu-cli, adds that directory to the current user's PATH, and registers a hidden watcher entry under HKCU\Software\Microsoft\Windows\CurrentVersion\Run. It also starts the watcher hidden for the current logon. It does not change UU or the uu-cli binding config.
 
-Run the same installer from a newer package to upgrade. Existing bindings remain under %LOCALAPPDATA%\uu-cli\config.json (or the configured UU_CLI_CONFIG path). The installer replaces each program file atomically. If an active uu-cli job is holding uu.exe open, the upgrade reports that it is busy; let the job finish and retry. The installer stops only this installation's watcher processes. It does not stop foreground uu-cli jobs or official UU processes.
+Run the same installer from a newer package to upgrade. Existing bindings remain under %LOCALAPPDATA%\uu-cli\config.json (or the configured UU_CLI_CONFIG path). The installer replaces each program file atomically. If a uu-cli job or persistent attachment is holding a program open, the upgrade reports that it is busy; let the job finish and the attachment's five-minute idle period expire, then retry. The installer stops only this installation's watcher processes. It does not stop foreground uu-cli jobs, worker attachments or official UU processes.
 
 To uninstall:
 

@@ -11,5 +11,7 @@ pub mod transfer;
 pub mod transport;
 pub mod uuyc;
 pub mod watcher;
+#[cfg(windows)]
+pub mod worker_host;
 pub mod worker_lease;
 pub mod workspace;

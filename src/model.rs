@@ -98,7 +98,7 @@ pub struct DeviceInfo {
     pub platform: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionInfo {
     pub device_identity: String,
     pub device_name: String,

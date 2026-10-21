@@ -522,14 +522,18 @@ const CONPTY_CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
 /// decoder. The reply uses the known origin of this newly opened pseudoconsole.
 #[cfg(any(windows, test))]
 #[derive(Default)]
-struct ConPtyDsrHandshake {
+pub(crate) struct ConPtyDsrHandshake {
     pending: Vec<u8>,
     cursor_queries: usize,
 }
 
 #[cfg(any(windows, test))]
 impl ConPtyDsrHandshake {
-    fn push<W: Write + ?Sized>(&mut self, writer: &mut W, chunk: &[u8]) -> io::Result<Vec<u8>> {
+    pub(crate) fn push<W: Write + ?Sized>(
+        &mut self,
+        writer: &mut W,
+        chunk: &[u8],
+    ) -> io::Result<Vec<u8>> {
         self.pending.extend_from_slice(chunk);
         let mut output = Vec::new();
 

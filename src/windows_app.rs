@@ -21,9 +21,9 @@ use uu_cli::inventory::{discover_inventory, is_eligible_session, InventorySnapsh
 use uu_cli::job::argv_to_shell;
 use uu_cli::model::{SessionInfo, WorkspaceBinding};
 use uu_cli::runner::{JobInput, JobRunError};
-use uu_cli::transport::OfficialAttachPty;
 use uu_cli::uuyc::OfficialCli;
 use uu_cli::watcher;
+use uu_cli::worker_host::{self, WorkerClient};
 use uu_cli::worker_lease::{AcquireResult, WorkerLease};
 use uu_cli::workspace::{resolve_binding, suggest_root};
 
@@ -437,10 +437,10 @@ fn capture_pwd(store: &ConfigStore, cli: &OfficialCli, device: &str) -> Result<S
                     continue;
                 }
             };
-            let mut transport =
-                OfficialAttachPty::attach(cli.path(), device, &session.session_name)?;
+            let mut transport = WorkerClient::connect_or_start(store, cli.path(), session)?;
             lease.mark_in_flight()?;
             let result = transport.capture_pwd();
+            drop(transport);
             match result {
                 Ok(root) => {
                     lease.complete()?;
@@ -469,9 +469,8 @@ fn with_worker<T>(
     store: &ConfigStore,
     binding: &WorkspaceBinding,
     cancelled: &AtomicBool,
-    operation: impl FnOnce(&mut OfficialAttachPty) -> std::result::Result<T, JobRunError>,
+    operation: impl FnOnce(&mut WorkerClient) -> std::result::Result<T, JobRunError>,
 ) -> Result<T> {
-    let cli = OfficialCli::locate()?;
     let mut wait_guard: Option<File> = None;
     let mut baseline = HashSet::new();
     let mut announced = false;
@@ -479,6 +478,24 @@ fn with_worker<T>(
         if cancelled.load(Ordering::SeqCst) {
             bail!("cancelled before dispatch");
         }
+        // Live helpers own the exact authorized attachment. Routing a new job
+        // through one does not need another remote list/connect/attach cycle.
+        // A stale cache entry never grants authority or triggers dispatch.
+        let config = store.load()?;
+        for session in worker_host::live_sessions(store)?.iter().filter(|session| {
+            session.device_identity == binding.device_identity
+                && config.is_session_authorized(session)
+        }) {
+            let lease = match WorkerLease::try_acquire(store.path(), session)? {
+                AcquireResult::Acquired(lease) => lease,
+                AcquireResult::Busy | AcquireResult::Quarantined => continue,
+            };
+            if let Some(transport) = WorkerClient::try_connect(store, session)? {
+                drop(wait_guard);
+                return dispatch(lease, transport, cancelled, operation);
+            }
+        }
+        let cli = OfficialCli::locate()?;
         let devices = cli.list_devices()?;
         let Some(device) = devices
             .iter()
@@ -501,7 +518,7 @@ fn with_worker<T>(
             .iter()
             .filter(|s| is_eligible_session(s) && config.is_session_authorized(s))
         {
-            let mut lease = match WorkerLease::try_acquire(store.path(), session)? {
+            let lease = match WorkerLease::try_acquire(store.path(), session)? {
                 AcquireResult::Acquired(lease) => lease,
                 AcquireResult::Busy | AcquireResult::Quarantined => continue,
             };
@@ -516,26 +533,9 @@ fn with_worker<T>(
             {
                 continue;
             }
-            let mut transport = OfficialAttachPty::attach(
-                cli.path(),
-                &binding.device_identity,
-                &session.session_name,
-            )?;
+            let transport = WorkerClient::connect_or_start(store, cli.path(), session)?;
             drop(wait_guard);
-            lease.mark_in_flight()?;
-            // This is the only execution site. No branch retries after calling it.
-            return match operation(&mut transport) {
-                Ok(value) => {
-                    lease.complete()?;
-                    Ok(value)
-                }
-                Err(error) => {
-                    if !error.is_unknown() {
-                        lease.complete()?;
-                    }
-                    Err(error.into())
-                }
-            };
+            return dispatch(lease, transport, cancelled, operation);
         }
         if wait_guard.is_none() {
             if let Some(lock) = watcher::try_interaction_lock(store.path())? {
@@ -580,6 +580,34 @@ fn with_worker<T>(
             }
         }
         thread::sleep(Duration::from_secs(2));
+    }
+}
+
+fn dispatch<T>(
+    mut lease: WorkerLease,
+    mut transport: WorkerClient,
+    cancelled: &AtomicBool,
+    operation: impl FnOnce(&mut WorkerClient) -> std::result::Result<T, JobRunError>,
+) -> Result<T> {
+    if cancelled.load(Ordering::SeqCst) {
+        bail!("cancelled before dispatch");
+    }
+    lease.mark_in_flight()?;
+    // The sole public job execution site: no retry or worker switch afterwards.
+    let result = operation(&mut transport);
+    // Close this IPC client before making the worker lease available again.
+    drop(transport);
+    match result {
+        Ok(value) => {
+            lease.complete()?;
+            Ok(value)
+        }
+        Err(error) => {
+            if !error.is_unknown() {
+                lease.complete()?;
+            }
+            Err(error.into())
+        }
     }
 }
 

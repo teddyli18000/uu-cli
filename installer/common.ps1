@@ -205,6 +205,11 @@ function Stop-UuCliWatchers {
             continue
         }
         $isBackground = $imagePath -ieq $backgroundExe
+        # A persistent attachment may own an active remote job. Leave it alive;
+        # the normal locked-file error safely defers an upgrade until it exits.
+        if ($isBackground -and ([string]$process.CommandLine -match '(?i)(?:^|\s)__worker(?:\s|$)')) {
+            continue
+        }
         $isWorkerWatcher = $imagePath -ieq $uuExe -and
             ([string]$process.CommandLine -match '(?i)(?:^|\s)__watch(?:\s|$)')
         if (-not ($isBackground -or $isWorkerWatcher)) {
