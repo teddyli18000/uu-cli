@@ -722,14 +722,21 @@ mod tests {
                         preparation(format!("fixture metadata output failed: {error}"))
                     })?;
             } else {
-                assert!(command.contains("bs=768 count=1"));
-                let sequence = command
+                assert_eq!(command.matches("bs=768 ").count(), 2);
+                assert_eq!(command.matches("count=1").count(), 2);
+                let expected_sequence = commands.len() - 2;
+                let skip_values: Vec<usize> = command
                     .split(" skip=")
-                    .nth(1)
-                    .and_then(|part| part.split_whitespace().next())
-                    .and_then(|text| text.parse::<usize>().ok())
-                    .expect("download command should include its chunk sequence");
-                assert_eq!(sequence, commands.len() - 2);
+                    .skip(1)
+                    .map(|part| {
+                        part.split_whitespace()
+                            .next()
+                            .and_then(|text| text.parse::<usize>().ok())
+                            .expect("download command should include its chunk sequence")
+                    })
+                    .collect();
+                assert_eq!(skip_values, vec![expected_sequence; 2]);
+                let sequence = skip_values[0];
                 let start = sequence * UPLOAD_CHUNK_SIZE;
                 let end = (start + UPLOAD_CHUNK_SIZE).min(bytes.len());
                 let chunk = &bytes[start..end];
