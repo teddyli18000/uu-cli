@@ -195,11 +195,19 @@ impl WorkerClient {
         verify_server(&pipe, info.pid)?;
         // Independent input/output pipe objects keep a blocking read from
         // serializing an unrelated write on the same synchronous file object.
-        let mut output = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(format!("{}-out", pipe_name(store, session)?))
-            .context("cannot open local worker output")?;
+        let output_name = format!("{}-out", pipe_name(store, session)?);
+        let output_deadline = Instant::now() + Duration::from_millis(750);
+        let mut output = loop {
+            match OpenOptions::new().read(true).write(true).open(&output_name) {
+                Ok(output) => break output,
+                Err(error)
+                    if error.raw_os_error() == Some(231) && Instant::now() < output_deadline =>
+                {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error).context("cannot open local worker output"),
+            }
+        };
         verify_server(&output, info.pid)?;
         let fingerprint = session
             .authorization_fingerprint()
