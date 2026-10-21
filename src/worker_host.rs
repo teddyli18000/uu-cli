@@ -12,7 +12,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle};
 use std::path::{Path, PathBuf};
@@ -676,9 +676,16 @@ fn record_start_event() {
     let Some(path) = std::env::var_os("UU_TEST_FIXTURE_EVENTS") else {
         return;
     };
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+    {
         use fs2::FileExt;
         if file.lock_exclusive().is_ok() {
+            let _ = file.seek(SeekFrom::End(0));
             let started = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()

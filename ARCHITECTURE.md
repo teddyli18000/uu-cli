@@ -344,6 +344,7 @@ Workers    3
 - `uuyc/discovery/inventory` 发现官方组件并查询设备、Terminal，不创建或关闭官方 Terminal。
 - `transport/runner/job` 附着已授权 Terminal，经一个本地 ConPTY reader 收发、识别完成边界，并流式返回合流输出；每条普通命令使用 subshell。
 - `worker_host` 为每个实际使用的 Terminal 保留一个隐藏附着进程。公共 CLI 通过仅当前用户可访问的本机 named pipe 路由 job；活连接不重新查询/附着，空闲五分钟退出。缓存不是授权，调度仍验证用户授权和实例 lease；断线后的已发送 job 不重试。
+- 专用 Bash worker 在父 shell 关闭作业控制并启用 `ignoreeof`：前台命令照常收到 Ctrl+C/EOF，命令完成后迟到的调用方 EOF 不得关闭 worker。业务命令仍在嵌套 subshell 中隔离自身状态。
 - `transfer` 复用同一 worker 的隔离 job，base64 分块上传 / 流式下载，size 与 SHA-256 校验后同目录发布。
 - `uu-background` 承载隐藏的发现或专用 worker 模式；watcher 以 OS 锁防重复，决策由同目录 `uu.exe` 在独立 console 中执行，job 不经 watcher。
 - 用户安装包只含两个原生可执行文件、PowerShell 5.1 安装/卸载脚本及 Agent Skill，不含官方 UU 二进制或开发运行时。

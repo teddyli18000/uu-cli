@@ -658,14 +658,7 @@ fn append_fixture_event(path: &std::path::Path, record: Value) -> Result<(), Box
         .open(path)?;
     FileExt::lock_exclusive(&log)?;
 
-    let mut contents = String::new();
-    log.read_to_string(&mut contents)?;
-    let previous = contents
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter_map(|event| event.get("sequence").and_then(Value::as_u64))
-        .max()
-        .unwrap_or(0);
+    let previous = last_fixture_sequence(&mut log)?;
     let sequence = previous
         .checked_add(1)
         .ok_or("fixture event sequence overflow")?;
@@ -681,4 +674,31 @@ fn append_fixture_event(path: &std::path::Path, record: Value) -> Result<(), Box
     log.flush()?;
     FileExt::unlock(&log)?;
     Ok(())
+}
+
+// Writers already hold the shared log lock. Read its tail rather than reparsing
+// every earlier RX/TX record for every chunk of a binary-transfer test.
+fn last_fixture_sequence(log: &mut std::fs::File) -> io::Result<u64> {
+    let end = log.metadata()?.len();
+    let mut start = end.saturating_sub(64 * 1024);
+    loop {
+        log.seek(SeekFrom::Start(start))?;
+        let mut tail = Vec::new();
+        log.read_to_end(&mut tail)?;
+        let mut lines = tail.split(|byte| *byte == b'\n');
+        if start != 0 {
+            lines.next(); // Possibly partial first record, including UTF-8.
+        }
+        if let Some(sequence) = lines
+            .rev()
+            .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            .find_map(|event| event.get("sequence").and_then(Value::as_u64))
+        {
+            return Ok(sequence);
+        }
+        if start == 0 {
+            return Ok(0);
+        }
+        start = start.saturating_sub(64 * 1024);
+    }
 }
