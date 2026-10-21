@@ -371,7 +371,27 @@ fn windows_first_binding_uses_isolated_console_and_preserves_job_stdin() {
         .expect("probe remote cwd");
     assert!(probe.status.success());
     let expected_root = String::from_utf8_lossy(&probe.stdout).trim().to_owned();
-    assert_eq!(config["bindings"][0]["remote_root"], expected_root);
+    let saved_root = config["bindings"][0]["remote_root"]
+        .as_str()
+        .expect("saved remote root");
+    // Git Bash can spell the Windows temp directory as /tmp or /c/Users/...
+    // depending on its process context. Require the same actual directory.
+    let same_directory = Command::new(&bash)
+        .args([
+            "--noprofile",
+            "--norc",
+            "-c",
+            "test \"$1\" -ef \"$2\"",
+            "root-check",
+            saved_root,
+            &expected_root,
+        ])
+        .output()
+        .expect("compare saved remote directory");
+    assert!(
+        same_directory.status.success(),
+        "wrong bound directory: {saved_root:?} != {expected_root:?}"
+    );
 
     let events = read_events(&test.events);
     let dispatches: Vec<_> = events
@@ -404,9 +424,9 @@ fn windows_first_binding_uses_isolated_console_and_preserves_job_stdin() {
 
     let mut nested = base_command(&test, &bash);
     let quoted_root = format!("'{}'", expected_root);
-    nested.current_dir(&test.nested).arg(format!(
-        "test \"$(pwd)\" = {quoted_root} && printf ROOT-REUSE-OK"
-    ));
+    nested
+        .current_dir(&test.nested)
+        .arg(format!("test . -ef {quoted_root} && printf ROOT-REUSE-OK"));
     let reused = Running::start(nested, b"").finish(Duration::from_secs(60), &test);
     assert_success(&reused, "nested-directory reuse");
     assert!(String::from_utf8_lossy(&reused.stdout).contains("ROOT-REUSE-OK"));
