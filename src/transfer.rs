@@ -1,6 +1,6 @@
 //! Binary-safe file transfer over the command executor used by the worker.
 //!
-//! The remote endpoint needs a POSIX shell plus base64, wc, cut, sha256sum, and mv.
+//! The remote endpoint needs a POSIX shell plus base64, dd, wc, cut, sha256sum, and mv.
 //! No shell state is retained between jobs: every command resolves its path from
 //! the current job's remote_root and uses a unique adjacent temporary file.
 
@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const UPLOAD_CHUNK_SIZE: usize = 768;
+const DOWNLOAD_CHUNK_OUTPUT_LIMIT: usize = 2048;
 static NEXT_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// A successful transfer, including the bytes and digest verified on both ends.
@@ -106,9 +107,11 @@ pub fn put(
 
 /// Downloads a remote file into a local path.
 ///
-/// The remote file is first described by size and SHA-256. Its base64 stream is
-/// decoded incrementally into a unique temporary file beside the destination. The
-/// local destination is atomically replaced only after the stream and digest verify.
+/// The remote file is first described by size and SHA-256. Its contents are then
+/// downloaded in bounded raw-byte chunks, each with an explicit frame and size
+/// acknowledgment, and decoded into a unique temporary file beside the destination.
+/// The local destination is atomically replaced only after the total size and digest
+/// verify.
 pub fn get(
     remote_path: &str,
     local_path: &Path,
@@ -135,23 +138,45 @@ pub fn get(
     let (expected_size, expected_hash) = parse_metadata(&metadata.bytes)?;
 
     let mut temporary = LocalTemp::create(local_path)?;
-    let stream_command = remote_command(remote_path, &nonce, r#"base64 "$uu_cli_dest""#);
-    let (actual_size, actual_hash) = {
-        let mut decoder = Base64Decoder::new(&mut temporary.file);
-        let result = executor(&stream_command, &mut decoder)?;
-        if result.exit_code != 0 {
+    let mut hasher = Sha256::new();
+    let mut actual_size = 0u64;
+    let mut sequence = 0u64;
+    while actual_size < expected_size {
+        let expected_chunk_size = (expected_size - actual_size).min(UPLOAD_CHUNK_SIZE as u64);
+        let command = download_chunk_command(remote_path, &nonce, sequence, expected_chunk_size);
+        let mut output = BoundedWriter::new(DOWNLOAD_CHUNK_OUTPUT_LIMIT);
+        run_remote(executor, &command, &mut output)?;
+        if output.exceeded {
+            return Err(completed("remote chunk output exceeded its limit"));
+        }
+
+        let encoded = parse_chunk_frame(&output.bytes, sequence, expected_chunk_size)?;
+        let chunk_size = {
+            let mut decoder =
+                Base64Decoder::new(&mut temporary.file, &mut hasher, expected_chunk_size);
+            decoder
+                .write_all(&encoded)
+                .map_err(|error| preparation(format!("cannot decode remote chunk: {error}")))?;
+            decoder.finish().map_err(|error| match error {
+                DecodeError::Invalid(message) => completed(message),
+                DecodeError::Local(error) => {
+                    preparation(format!("cannot write local temporary file: {error}"))
+                }
+            })?
+        };
+        if chunk_size != expected_chunk_size {
             return Err(completed(format!(
-                "remote download command exited with status {}",
-                result.exit_code
+                "remote chunk {sequence} had {chunk_size} decoded bytes, expected {expected_chunk_size}"
             )));
         }
-        decoder.finish().map_err(|error| match error {
-            DecodeError::Invalid(message) => completed(message),
-            DecodeError::Local(error) => {
-                preparation(format!("cannot write local temporary file: {error}"))
-            }
-        })?
-    };
+        actual_size = actual_size
+            .checked_add(chunk_size)
+            .ok_or_else(|| completed("download exceeded the maximum supported size"))?;
+        sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| completed("download has too many chunks"))?;
+    }
+    let actual_hash = hex_digest(hasher.finalize().as_slice());
     if actual_size != expected_size || actual_hash != expected_hash {
         return Err(completed(format!(
             "download integrity check failed (expected {expected_size} bytes / {expected_hash}, received {actual_size} bytes / {actual_hash})"
@@ -216,6 +241,18 @@ fn run_remote(
     Ok(())
 }
 
+fn download_chunk_command(
+    remote_path: &str,
+    nonce: &str,
+    sequence: u64,
+    expected_size: u64,
+) -> String {
+    let body = format!(
+        r#"uu_cli_chunk_size=$(dd if="$uu_cli_dest" bs={UPLOAD_CHUNK_SIZE} skip={sequence} count=1 2>/dev/null | wc -c | tr -d '[:space:]'); [ "$uu_cli_chunk_size" = "{expected_size}" ] || {{ echo "uu-cli: remote chunk size mismatch" >&2; exit 1; }}; printf 'UUCLI_CHUNK_BEGIN:{sequence}:{expected_size}\n'; dd if="$uu_cli_dest" bs={UPLOAD_CHUNK_SIZE} skip={sequence} count=1 2>/dev/null | base64 || exit $?; printf '\nUUCLI_CHUNK_END:{sequence}:%s\n' "$uu_cli_chunk_size""#
+    );
+    remote_command(remote_path, nonce, &body)
+}
+
 fn remote_command(remote_path: &str, nonce: &str, body: &str) -> String {
     let quoted_path = shell_quote(remote_path);
     format!(
@@ -224,7 +261,8 @@ fn remote_command(remote_path: &str, nonce: &str, body: &str) -> String {
 }
 
 fn parse_metadata(output: &[u8]) -> Result<(u64, String), JobRunError> {
-    let text = std::str::from_utf8(output)
+    let clean = strip_transfer_controls(output)?;
+    let text = std::str::from_utf8(&clean)
         .map_err(|_| completed("remote metadata was not valid UTF-8"))?;
     let fields: Vec<_> = text.split_whitespace().collect();
     if fields.len() != 2 {
@@ -238,6 +276,123 @@ fn parse_metadata(output: &[u8]) -> Result<(u64, String), JobRunError> {
         return Err(completed("remote SHA-256 digest was invalid"));
     }
     Ok((size, hash.to_ascii_lowercase()))
+}
+
+fn parse_chunk_frame(
+    output: &[u8],
+    sequence: u64,
+    expected_size: u64,
+) -> Result<Vec<u8>, JobRunError> {
+    let clean = strip_transfer_controls(output)?;
+    let (begin, remainder) = take_line(&clean)
+        .ok_or_else(|| completed("remote chunk frame had no begin acknowledgment"))?;
+    let expected_begin = format!("UUCLI_CHUNK_BEGIN:{sequence}:{expected_size}");
+    if begin != expected_begin.as_bytes() {
+        return Err(completed("remote chunk begin acknowledgment was invalid"));
+    }
+
+    let end_prefix = format!("UUCLI_CHUNK_END:{sequence}:");
+    let end_start = find_subslice(remainder, end_prefix.as_bytes())
+        .ok_or_else(|| completed("remote chunk frame had no end acknowledgment"))?;
+    if end_start == 0 || !matches!(remainder[end_start - 1], b'\n' | b'\r') {
+        return Err(completed(
+            "remote chunk end acknowledgment was not line-framed",
+        ));
+    }
+    let encoded = &remainder[..end_start];
+    let after_prefix = &remainder[end_start + end_prefix.len()..];
+    let (actual_line, trailing) = take_line(after_prefix).unwrap_or((after_prefix, &[]));
+    let actual_size = std::str::from_utf8(actual_line)
+        .ok()
+        .and_then(|text| text.parse::<u64>().ok())
+        .ok_or_else(|| completed("remote chunk size acknowledgment was invalid"))?;
+    if actual_size != expected_size {
+        return Err(completed(format!(
+            "remote chunk {sequence} acknowledged {actual_size} bytes, expected {expected_size}"
+        )));
+    }
+    if !trailing
+        .iter()
+        .all(|byte| matches!(byte, b'\r' | b'\n' | b'\t'))
+    {
+        return Err(completed("remote chunk frame had trailing data"));
+    }
+    Ok(encoded.to_vec())
+}
+
+fn take_line(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
+    let end = bytes.iter().position(|byte| *byte == b'\n')?;
+    let line = bytes[..end].strip_suffix(b"\r").unwrap_or(&bytes[..end]);
+    Some((line, &bytes[end + 1..]))
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// Removes only ConPTY cursor CSI sequences from file-transfer protocol output.
+/// The complete bounded job capture is passed here, so a sequence split across
+/// executor writes is recognized without retaining unbounded stream state.
+fn strip_transfer_controls(input: &[u8]) -> Result<Vec<u8>, JobRunError> {
+    const MAX_CSI_BYTES: usize = 32;
+    let mut clean = Vec::with_capacity(input.len());
+    let mut offset = 0;
+    while offset < input.len() {
+        let byte = input[offset];
+        if byte == 0x1b {
+            if input.get(offset + 1) != Some(&b'[') {
+                return Err(completed(
+                    "file-transfer output contained an unsupported escape",
+                ));
+            }
+            let sequence_start = offset;
+            let mut end = offset + 2;
+            while end < input.len() && !(0x40..=0x7e).contains(&input[end]) {
+                end += 1;
+                if end - sequence_start >= MAX_CSI_BYTES {
+                    return Err(completed(
+                        "file-transfer cursor sequence exceeded its limit",
+                    ));
+                }
+            }
+            let final_byte = *input
+                .get(end)
+                .ok_or_else(|| completed("file-transfer cursor sequence was incomplete"))?;
+            let parameters = &input[offset + 2..end];
+            let cursor_visibility = parameters == b"?25" && matches!(final_byte, b'h' | b'l');
+            let cursor_position = parameters
+                .iter()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b';'))
+                && matches!(final_byte, b'A'..=b'H' | b'd' | b'f');
+            if !cursor_visibility && !cursor_position {
+                return Err(completed(
+                    "file-transfer output contained an unsupported CSI sequence",
+                ));
+            }
+            if end - sequence_start + 1 > MAX_CSI_BYTES {
+                return Err(completed(
+                    "file-transfer cursor sequence exceeded its limit",
+                ));
+            }
+            offset = end + 1;
+            continue;
+        }
+        if byte == 0x7f || (0x80..=0x9f).contains(&byte) {
+            return Err(completed(
+                "file-transfer output contained an unsupported control byte",
+            ));
+        }
+        if byte.is_ascii_control() && !matches!(byte, b'\r' | b'\n' | b'\t') {
+            return Err(completed(
+                "file-transfer output contained an unsupported control byte",
+            ));
+        }
+        clean.push(byte);
+        offset += 1;
+    }
+    Ok(clean)
 }
 
 fn nonce() -> String {
@@ -386,28 +541,30 @@ enum DecodeError {
 
 struct Base64Decoder<'a> {
     file: &'a mut File,
+    hasher: &'a mut Sha256,
+    expected_size: u64,
     quartet: [u8; 4],
     quartet_len: usize,
     ended: bool,
     size: u64,
-    hasher: Sha256,
     error: Option<DecodeError>,
 }
 
 impl<'a> Base64Decoder<'a> {
-    fn new(file: &'a mut File) -> Self {
+    fn new(file: &'a mut File, hasher: &'a mut Sha256, expected_size: u64) -> Self {
         Self {
             file,
+            hasher,
+            expected_size,
             quartet: [0; 4],
             quartet_len: 0,
             ended: false,
             size: 0,
-            hasher: Sha256::new(),
             error: None,
         }
     }
 
-    fn finish(self) -> Result<(u64, String), DecodeError> {
+    fn finish(self) -> Result<u64, DecodeError> {
         if let Some(error) = self.error {
             return Err(error);
         }
@@ -416,7 +573,7 @@ impl<'a> Base64Decoder<'a> {
                 "remote base64 stream ended mid-quantum".to_owned(),
             ));
         }
-        Ok((self.size, hex_digest(self.hasher.finalize().as_slice())))
+        Ok(self.size)
     }
 
     fn accept(&mut self, byte: u8) {
@@ -478,6 +635,12 @@ impl<'a> Base64Decoder<'a> {
             ));
             return;
         }
+        if self.size.saturating_add(length as u64) > self.expected_size {
+            self.error = Some(DecodeError::Invalid(
+                "remote chunk exceeded its declared byte count".to_owned(),
+            ));
+            return;
+        }
         if let Err(error) = self.file.write_all(&decoded[..length]) {
             self.error = Some(DecodeError::Local(error));
             return;
@@ -507,5 +670,114 @@ impl Write for Base64Decoder<'_> {
 
     fn flush(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        fn new() -> Self {
+            let stamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "uu-cli-transfer-chunks-{}-{stamp:x}",
+                std::process::id()
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn download_uses_acknowledged_chunks_and_strips_split_cursor_csi() {
+        let temp = TempDir::new();
+        let destination = temp.0.join("download.bin");
+        let bytes: Vec<u8> = (0usize..16_385)
+            .map(|index| (index.wrapping_mul(37).wrapping_add(11) & 0xff) as u8)
+            .collect();
+        let expected_hash = hex_digest(Sha256::digest(&bytes).as_slice());
+        let expected_chunks = bytes.len().div_ceil(UPLOAD_CHUNK_SIZE);
+        let mut commands = Vec::new();
+        let mut executor = |command: &str, output: &mut dyn Write| {
+            commands.push(command.to_owned());
+            if command.contains("remote_size=$(wc -c") {
+                output
+                    .write_all(b"\x1b[?2")
+                    .and_then(|_| output.write_all(b"5l"))
+                    .and_then(|_| write!(output, "{} {}\r\n", bytes.len(), expected_hash))
+                    .map_err(|error| {
+                        preparation(format!("fixture metadata output failed: {error}"))
+                    })?;
+            } else {
+                assert!(command.contains("bs=768 count=1"));
+                let sequence = command
+                    .split(" skip=")
+                    .nth(1)
+                    .and_then(|part| part.split_whitespace().next())
+                    .and_then(|text| text.parse::<usize>().ok())
+                    .expect("download command should include its chunk sequence");
+                assert_eq!(sequence, commands.len() - 2);
+                let start = sequence * UPLOAD_CHUNK_SIZE;
+                let end = (start + UPLOAD_CHUNK_SIZE).min(bytes.len());
+                let chunk = &bytes[start..end];
+                let encoded = base64_encode(chunk);
+                let begin = format!("UUCLI_CHUNK_BEGIN:{sequence}:{}\r\n", chunk.len());
+                let acknowledgment = format!("\r\nUUCLI_CHUNK_END:{sequence}:{}\r\n", chunk.len());
+                let split = encoded.len() / 2;
+                output
+                    .write_all(begin.as_bytes())
+                    .and_then(|_| output.write_all(&encoded.as_bytes()[..split]))
+                    // Deliberately split this CSI between executor writes, as a
+                    // ConPTY read can split presentation controls arbitrarily.
+                    .and_then(|_| output.write_all(b"\x1b[17;"))
+                    .and_then(|_| output.write_all(b"1H"))
+                    .and_then(|_| output.write_all(&encoded.as_bytes()[split..]))
+                    .and_then(|_| output.write_all(acknowledgment.as_bytes()))
+                    .map_err(|error| {
+                        preparation(format!("fixture chunk output failed: {error}"))
+                    })?;
+            }
+            Ok(JobResult { exit_code: 0 })
+        };
+
+        let receipt = get("remote.bin", &destination, &mut executor).unwrap();
+        drop(executor);
+
+        assert_eq!(receipt.size, bytes.len() as u64);
+        assert_eq!(receipt.sha256, expected_hash);
+        assert_eq!(fs::read(destination).unwrap(), bytes);
+        assert_eq!(commands.len(), 1 + expected_chunks);
+        for (sequence, command) in commands.iter().skip(1).enumerate() {
+            assert!(
+                command.contains(&format!("bs=768 skip={sequence} count=1")),
+                "chunk {sequence} should use a bounded dd read"
+            );
+            assert!(
+                command.contains(&format!(
+                    "UUCLI_CHUNK_BEGIN:{sequence}:{}",
+                    (bytes.len() - sequence * UPLOAD_CHUNK_SIZE).min(UPLOAD_CHUNK_SIZE)
+                )),
+                "chunk {sequence} should frame its expected raw byte count"
+            );
+        }
+    }
+
+    #[test]
+    fn transfer_output_rejects_unsupported_controls() {
+        assert!(strip_transfer_controls(b"data\x1b[31m").is_err());
+        assert!(strip_transfer_controls(b"data\x07").is_err());
     }
 }
