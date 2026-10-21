@@ -57,7 +57,7 @@ fn default_online() -> bool {
 }
 
 fn default_terminal_state() -> String {
-    "running".to_owned()
+    "detached".to_owned()
 }
 
 fn default_attachable() -> bool {
@@ -131,7 +131,7 @@ fn load_fixture() -> Result<Fixture, Box<dyn Error>> {
                 terminals: vec![FixtureTerminal {
                     name: SESSION_NAME.to_owned(),
                     shell: Some("bash".to_owned()),
-                    state: "running".to_owned(),
+                    state: "detached".to_owned(),
                     created_at: Some(CREATED_AT.to_owned()),
                     attachable: true,
                 }],

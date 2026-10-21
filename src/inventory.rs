@@ -110,11 +110,13 @@ pub fn is_live_session(session: &SessionInfo) -> bool {
     session.state.eq_ignore_ascii_case("running") || session.state.eq_ignore_ascii_case("detached")
 }
 
-/// A worker is immediately schedulable only when it is live and the official CLI
-/// does not explicitly mark it non-attachable. A live non-attachable session is
-/// treated as busy capacity, not as a missing/replaced authorization.
+/// A worker is immediately schedulable when it is detached or the official CLI
+/// explicitly marks it attachable. A live session that is not yet attachable is
+/// busy capacity, not a missing/replaced authorization.
 pub fn is_eligible_session(session: &SessionInfo) -> bool {
-    is_live_session(session) && session.attachable != Some(false)
+    is_live_session(session)
+        && session.attachable != Some(false)
+        && (session.state.eq_ignore_ascii_case("detached") || session.attachable == Some(true))
 }
 
 #[cfg(test)]
@@ -216,14 +218,29 @@ mod tests {
         let mut exited = session("a", "exited");
         exited.state = "exited".into();
         assert!(is_live_session(&running));
+        assert!(is_eligible_session(&running));
         assert!(is_live_session(&detached));
         assert!(!is_live_session(&exited));
+        assert!(!is_eligible_session(&exited));
+    }
+
+    #[test]
+    fn running_without_attachability_is_live_but_busy() {
+        let mut running = session("a", "run");
+        running.attachable = None;
+
+        assert!(is_live_session(&running));
+        assert!(!is_eligible_session(&running));
     }
 
     #[test]
     fn live_non_attachable_session_is_busy_not_eligible() {
         let mut busy = session("a", "busy");
         busy.attachable = Some(false);
+        assert!(is_live_session(&busy));
+        assert!(!is_eligible_session(&busy));
+
+        busy.state = "detached".into();
         assert!(is_live_session(&busy));
         assert!(!is_eligible_session(&busy));
     }
