@@ -45,7 +45,7 @@ uu bind
 uu list
 ```
 
-Agent 不得替用户执行 `uu bind` 或 `uu list`。缺少 workspace binding 或没有已授权 Terminal 时，Agent 应提示用户在工作区运行 `uu bind`；需要诊断时提示用户运行 `uu list`。
+Agent 直接执行任务命令，不例行检查连接、绑定或状态。绑定和状态查看由用户自行处理；Agent 不代跑 `uu bind` / `uu list`，也不把正常任务变成配置流程。只有实际执行受阻时，简短报告具体错误一次，必要时请求最少的人类介入，避免反复要求检查或重绑。
 
 ## 核心模型
 

@@ -3,16 +3,12 @@ name: uu-cli
 description: Run commands and transfer files in the current workspace's UU Remote binding from Windows using uu.
 ---
 
-Use `uu <command...>` for remote execution, `uu put <local> <remote>` to upload, and `uu get <remote> <local>` to download.
+Run the requested work directly with `uu <command...>`, `uu put <local> <remote>`, or `uu get <remote> <local>`. Treat `uu` like a local command. Assume the workspace is prepared; do not perform routine connection, binding, or status checks before work.
 
-Different `uu` calls do not share shell-local state such as `cd/export/source/alias/virtualenv`. Put dependent operations in one call, for example `uu "cd src && source .venv/bin/activate && python main.py"`. Each ordinary job starts at the workspace's remote root.
+The user handles binding and Terminal preparation. Do not run `uu bind` or `uu list`, manage sessions, inspect internal configuration, or turn normal work into a setup/troubleshooting workflow. Only when an actual command is blocked, briefly report the concrete error once and request the minimum human intervention needed. Continue independent work where possible. Do not repeatedly ask the user to check status, rebind, or open Terminals. Do not describe this workflow as a requirement imposed by official UU.
 
-`uu bind` and `uu list` are human-only commands. **Never run either command on the user's behalf.** If this workspace is unbound or has no authorized Terminal, stop and tell the human to run `uu bind` in the workspace. If status needs inspection, tell the human to run `uu list`.
+Different calls do not share shell-local state (`cd/export/source/alias/virtualenv`). Each job starts at the workspace's remote root. Keep dependent steps in one call, for example `uu "cd src && source .venv/bin/activate && python main.py"`.
 
-The human opens a dedicated Terminal in official UU, closes that Terminal's official tab when needed to release its connection, changes to the exact directory that should be this workspace root, and runs `uu bind`. Usually there is exactly one newly available live detached Terminal, so the explicit `uu bind` call hands it to uu-cli without a device/session picker, popup, or second confirmation. If more than one candidate exists, bind reports ambiguity and exits; the human resolves it in official UU and runs bind again. Repeating `uu bind` adds one Terminal to the same device pool and preserves the existing remote root unless the human intentionally changes it. Discovery alone never authorizes a Terminal, and ordinary commands never auto-bind, authorize, or wait for a new Terminal. Long-running commands stream output to their original caller while holding one worker. If all authorized workers are busy, `uu` remains pending and reports the number of waiting commands ahead on stderr. Wait or poll the same local process; do not kill it or submit the command again merely because it is queued, and never cancel another job.
+Output streams to the caller. A long task holds one worker; `uu` handles pool routing and queuing internally. If queued, wait or poll the same local process. Do not kill it, resubmit it, or cancel another task to obtain capacity.
 
-Never choose device IDs, sessions, workers, or silently operate an unapproved Terminal. When uu reports unknown/may-still-be-running, do not replay a command with side effects; report the uncertainty and inspect before any retry.
-
-Use `uu -- <command...>` when the remote command starts with a reserved word (`put/get/bind/list`).
-
-Windows shares binding and worker state under `%USERPROFILE%\.uu-cli` across human terminals and Codex. Existing legacy state is imported automatically; do not create separate per-agent config overrides. If the human reports successful binding but execution cannot see it, ask for the `Config` path shown by their `uu list` instead of repeatedly asking them to open new Terminals.
+If the result is unknown/may-still-be-running, report the uncertainty and do not replay side-effecting work. Use `uu -- <command...>` for a remote command starting with a reserved word (`put/get/bind/list`).

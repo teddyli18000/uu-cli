@@ -271,7 +271,7 @@ Agent 只需要知道：
 
 > 不依赖不同 `uu` 调用之间的 shell-local 状态；需要连续 `cd/source/export` 时放进同一条命令。每个普通 job 从 workspace remote root 开始。
 
-Agent 不选择 deviceId、不选择 session、不管理 worker，也不管理后台组件。Agent 也不得代替用户执行 `uu bind` 或 `uu list`。如果缺少 binding/worker，告知用户在 workspace 调用终端运行 `uu bind`；如果需要诊断状态，告知用户运行 `uu list`。
+Agent 直接执行任务，不选择 deviceId/session，不管理 worker 或后台组件，不做绑定或状态预检，也不代跑 `uu bind` / `uu list`。只有实际执行受阻时简短报告具体错误一次，必要时请求最少的人类介入；不例行或反复要求用户检查、重绑或开 Terminal。排队时等待原进程。
 
 ## 15. 非目标
 

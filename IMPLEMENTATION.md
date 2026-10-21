@@ -74,7 +74,7 @@ Terminal 只是执行资源，不是 Agent 的长期上下文：
 - 自动发现/库存刷新永不构成授权。普通 `uu <command>`、`put`、`get` 不自动 setup、绑定、授权或弹窗。缺少 binding/已授权 worker 时返回清楚诊断，要求用户运行 `uu bind`；
 - 已授权 worker 全忙时 job 排队并报告队列位置，不取消或 kill 其他 job；unknown/quarantined worker 必须继续隔离，`uu bind` 也不能把它当成空闲 worker。
 
-`uu list` 是只读状态查看，必须由用户手动执行。Agent 如需配置或诊断，应请用户在 workspace 的调用终端运行 `uu bind` 或 `uu list`。
+`uu list` 是用户手动执行的只读状态查看。Agent 直接执行任务，不做配置或状态预检；仅实际执行受阻时简短报告具体错误一次，必要时请求最少的人类介入，不反复安排用户检查或重绑。
 
 ## 5. Shell context
 
@@ -244,7 +244,7 @@ Skill 要极短，只教三件事：
 
 > 不要依赖不同 `uu` 调用之间的 shell-local 状态；需要连续 `cd/source/export` 时放进同一条命令。普通 job 从 workspace 的 remote root 开始。
 
-Agent 不管理 deviceId、session、worker 或 uu-cli 后台生命周期。Agent 不运行 `uu bind`、`uu list`；缺少配置或诊断时请用户亲自在 workspace 运行。
+Agent 不管理 deviceId、session、worker 或 uu-cli 后台生命周期，不运行 `uu bind` / `uu list`，不把正常任务变成配置和诊断流程；真正受阻才简报一次，排队则等待原进程。
 
 ## 14. 完成标准
 
