@@ -295,7 +295,13 @@ try {
     [Environment]::SetEnvironmentVariable('LOCALAPPDATA', $localAppData, 'Process')
     [Environment]::SetEnvironmentVariable('UU_CLI_CONFIG', $null, 'Process')
 
-    & $installer -PackageRoot $package
+    # Exercise the documented powershell.exe -File entry point without an explicit
+    # PackageRoot: PS 5.1 does not expose PSScriptRoot in parameter default values.
+    $installResult = Invoke-CapturedProcess -Executable 'powershell.exe' -Arguments ('-NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $installer) -WorkingDirectory $localAppData
+    if ($installResult.ExitCode -ne 0) {
+        throw "Default package install failed: $($installResult.Output)"
+    }
+    $env:PATH = $installRoot + ';' + $env:PATH
     $uuExe = Join-Path $installRoot 'uu.exe'
     $backgroundExe = Join-Path $installRoot 'uu-background.exe'
     if (-not (Test-Path -LiteralPath $uuExe -PathType Leaf) -or

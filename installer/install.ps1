@@ -1,12 +1,16 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [string]$PackageRoot = (Split-Path -Parent $PSScriptRoot)
+    [string]$PackageRoot
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'common.ps1')
+
+if ([string]::IsNullOrWhiteSpace($PackageRoot)) {
+    $PackageRoot = Split-Path -Parent $PSScriptRoot
+}
 
 $package = [IO.Path]::GetFullPath($PackageRoot)
 $payloads = @(
