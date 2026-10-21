@@ -215,6 +215,13 @@ fn run_windows(config_path: &Path) -> Result<()> {
             }
 
             if let Some(cli) = official_cli.as_ref() {
+                // Foreground waiting/decision flows own this lock and perform
+                // their own discovery; skip a duplicate official CLI query.
+                let Some(interaction_lock) = try_interaction_lock(config_path)? else {
+                    thread::sleep(ACTIVE_POLL);
+                    continue;
+                };
+
                 let snapshot = match discover_inventory(cli) {
                     Ok(snapshot) => snapshot,
                     Err(_) => {
@@ -226,18 +233,15 @@ fn run_windows(config_path: &Path) -> Result<()> {
 
                 let config = config_store.load()?;
                 if has_promptable_sessions(&snapshot, &config) {
-                    // The child takes this lock again and rechecks the sessions.
-                    // This precheck prevents a console from racing a command
-                    // that is already handling a waiting-terminal request.
-                    if let Some(interaction_lock) = try_interaction_lock(config_path)? {
-                        drop(interaction_lock);
-                        authorization_console = Command::new(&authorization_executable)
-                            .arg("__authorize")
-                            .env("UU_CLI_CONFIG", config_path.as_os_str())
-                            .creation_flags(CREATE_NEW_CONSOLE)
-                            .spawn()
-                            .ok();
-                    }
+                    // Release before launch so the child can acquire the lock
+                    // and recheck the sessions before prompting.
+                    drop(interaction_lock);
+                    authorization_console = Command::new(&authorization_executable)
+                        .arg("__authorize")
+                        .env("UU_CLI_CONFIG", config_path.as_os_str())
+                        .creation_flags(CREATE_NEW_CONSOLE)
+                        .spawn()
+                        .ok();
                 }
             }
         }
