@@ -333,7 +333,7 @@ fn attach_args(device_identity: &str, session_name: &str) -> Vec<OsString> {
 mod tests {
     use super::*;
     use crate::job::CompletionDecoder;
-    use crate::runner::{initialize_conpty, PumpRead};
+    use crate::runner::PumpRead;
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::time::{Duration, Instant};
 
@@ -377,9 +377,10 @@ mod tests {
         drop(slave);
         let mut reader = ReadPump::spawn(reader);
 
-        let (startup_output, cursor_queries) =
-            initialize_conpty(&mut reader, &mut writer, Duration::from_millis(500)).unwrap();
-        eprintln!("ConPTY startup cursor queries answered: {cursor_queries}");
+        // Use the production handshake: a busy runner may issue its first DSR
+        // after a fixed fixture-only drain window has already expired.
+        let startup_output =
+            await_conpty_startup(&mut reader, &mut writer, Duration::from_secs(5)).unwrap();
 
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut observed = startup_output;

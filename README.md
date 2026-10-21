@@ -6,9 +6,9 @@
 
 ## 当前状态与安装
 
-当前分支提供 Windows 原生候选实现。2026-10-21 已用登录中的官方 UU 4.43.0.3607、用户授权的 disposable Ubuntu 18.04 WSL host 和 `uu-remote-linux` v0.2.12-aic.3 验证后台发现与授权、两个 worker 并发、跨 workspace 隔离、真实 `put/get`，以及 caller 崩溃后不重放已发送任务。这些开发机实测和 hosted CI 都不代表 v1 已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
+main 提供 Windows 原生实现；当前 Latest 为 `v0.1.0-preview.2`。2026-10-21 已用登录中的官方 UU 4.43.0.3607、用户授权的 disposable Ubuntu 18.04 WSL host 和 `uu-remote-linux` v0.2.12-aic.3 验证后台发现与授权、两个 worker 并发、跨 workspace 隔离、真实 `put/get`，以及 caller 崩溃后不重放已发送任务。随后已用真实小车 `abot-robot` 验证首次绑定、连续命令、中文、shell 隔离、文件往返、Ctrl+C 后复用与双 Terminal 并发。这些实测和 hosted CI 都不代表全部 v1 验收已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
 
-从 [GitHub Release v0.1.0-preview.2](https://github.com/teddyli18000/uu-cli/releases/tag/v0.1.0-preview.2) 下载 `uu-cli-windows-package.zip`，解压后，在 Windows 自带 PowerShell 中运行：
+从 [GitHub Latest Release](https://github.com/teddyli18000/uu-cli/releases/latest) 下载 `uu-cli-windows-package.zip`，解压后，在 Windows 自带 PowerShell 中运行：
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1
@@ -18,7 +18,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\installer\install.ps1
 
 Agent Skill 已写好，随包放在 `skills/uu-cli/SKILL.md`，Release 也提供独立的 `uu-cli-skill.zip`。将其中的 `uu-cli` 文件夹放入 Codex 的 `$CODEX_HOME/skills`（未设置时为 `%USERPROFILE%\.codex\skills`），在新会话中使用。CLI installer 不修改 Codex 配置或自动安装 Skill。
 
-本次预发布交付已实测的 shell、自动发现/授权、worker pool 与文件通道；按当前使用范围，断网等异常恢复不作为这次交付的阻塞项。后续完整验收仍按 `TESTING.md` 记录。
+当前版本交付已实测的 shell、自动发现/授权、worker pool 与文件通道；按当前使用范围，断网等异常恢复不作为这次交付的阻塞项。后续完整验收仍按 `TESTING.md` 记录。
 
 ## 日常使用
 
