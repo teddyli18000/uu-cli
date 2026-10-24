@@ -105,7 +105,7 @@ UU 已运行并登录
 
 - 用户逐个在官方 UU 打开专用 Terminal；按需关闭该 Terminal 自己的官方标签页以释放连接，再在目标 workspace 当前目录运行 `uu bind`；该当前目录就是 local workspace root，不按 Git root 改写；
 - 正常情况只有一个新出现、可用的 detached Terminal，`uu bind` 直接将其授权给当前 workspace；
-- 若设备/Terminal 候选不唯一，报明确歧义并结束，不弹选择器、不猜；用户自行整理到候选唯一后再次运行；
+- 多个设备/Terminal 候选时在当前调用终端列出编号、设备名、Terminal 名和创建时间（UTC），用户选一个，Enter 取消；不弹独立窗口、不猜、不操作未选项；
 - 首次绑定时在同一个调用终端确认 remote root，默认可取唯一 Terminal 的 `pwd`；
 - 没有可用 Terminal 时，`uu bind` 清楚提示用户先打开 Terminal，结束本次命令；用户准备好后自行再次运行 bind，不让远端命令等待。
 

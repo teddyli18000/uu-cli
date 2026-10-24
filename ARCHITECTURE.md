@@ -44,7 +44,7 @@ device B → workers B1 B2
 
 不同设备的 worker 绝不能混用。
 
-通常只处理一个新出现且可用的 detached Terminal；`uu bind` 用户调用即授权它。若有多个设备/Terminal 候选则报明确歧义并退出，不弹 picker、不猜，用户在官方 UU 中整理后重跑。Codex 不直接选择 deviceId，也不代替用户运行 bind。
+唯一新出现且可用的 Terminal 在用户运行 `uu bind` 时直接授权。多个设备/Terminal 候选时，在当前调用终端按设备名、创建时间、Terminal 名排序列出编号，用户选一个，Enter 取消，不弹独立窗口、不猜。Codex 不选择 deviceId，也不代替用户运行 bind。
 
 ## 4. Terminal worker pool
 
@@ -75,7 +75,7 @@ device A
 
 ### 5.1 首次绑定
 
-正常情况 `uu bind` 只找到一个新出现且可用的 detached Terminal，并直接授权。多个候选则给出歧义诊断并结束，不展示选择器或猜测；用户自行整理到唯一候选后重跑。首次绑定时在调用终端确认 remote root，默认值可来自该 Terminal 的 `pwd`。没有可用 Terminal 时命令清楚提示用户先打开 Terminal 并再次运行 `uu bind`，不让普通命令停在等待授权状态。
+正常情况 `uu bind` 只找到一个新出现且可用的 Terminal，并直接授权。多个候选时在调用终端输入编号选一个，Enter 取消；显示设备名、Terminal 名和创建时间（UTC）。保存授权前重新核对所选实例，未选择的 Terminal 不授权、不 attach。首次绑定时在调用终端确认 remote root，默认值来自所选 Terminal 的 `pwd`。没有可用 Terminal 时命令提示用户准备后重跑，不让普通命令等待授权。
 
 ### 5.2 同设备增加 worker
 

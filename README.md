@@ -6,7 +6,7 @@
 
 ## 当前状态与安装
 
-`v0.1.2` 修复 Windows 打包应用导致的配置隔离：人类终端与 Codex 统一使用用户目录下的状态，已有绑定和授权自动导入。手动绑定、无弹窗和按设备排队的用法不变。2026-10-21 的 WSL 和小车实测证明了 shell、文件通道、取消和并发等能力，但其中的弹窗/等待请求授权流程属于旧交互设计，不能作为新 UX 的验收证据。当前契约要求用户在调用终端手动运行 `uu bind` / `uu list`；新交互有独立的 Windows fixture 验收。实测证据见 `TESTING.md` 和 `REAL_UU_FINDINGS.md`。这些实测和 hosted CI 都不代表全部 v1 验收已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
+`v0.1.3` 支持多个待绑定 Terminal 在当前终端按编号选一个，唯一候选仍直接绑定。此前已修复 Windows 打包应用导致的配置隔离：人类终端与 Codex 统一使用用户目录下的状态，已有绑定和授权自动导入。手动绑定、无弹窗和按设备排队的用法不变。2026-10-21 的 WSL 和小车实测证明了 shell、文件通道、取消和并发等能力，但其中的弹窗/等待请求授权流程属于旧交互设计，不能作为新 UX 的验收证据。当前契约要求用户在调用终端手动运行 `uu bind` / `uu list`；新交互有独立的 Windows fixture 验收。实测证据见 `TESTING.md` 和 `REAL_UU_FINDINGS.md`。这些实测和 hosted CI 都不代表全部 v1 验收已完成；外部干净 Windows、真实多设备及网络/worker 恢复仍待验收。
 
 从 [GitHub Latest Release](https://github.com/teddyli18000/uu-cli/releases/latest) 下载 `uu-cli-windows-package.zip`，解压后，在 Windows 自带 PowerShell 中运行：
 
@@ -69,9 +69,9 @@ Terminal 本身不属于 Codex，也不作为长期 shell 上下文。具体某�
 uu bind
 ```
 
-`uu bind` 将调用时的当前目录精确保存为 workspace root，即使它位于 Git 仓库内。通常只有一个新出现且可用的 detached Terminal，运行 `uu bind` 就把它明确交给 uu-cli，不弹窗也不再问一次。若候选不唯一，命令直接报告歧义，用户在官方 UU 中整理候选后再运行。首次绑定时，用户也在当前 PowerShell 确认远端工作目录，默认值来自该 Terminal 的 `pwd`。没有可用 Terminal 时，命令说明下一步；用户准备好后再次运行 `uu bind`。
+`uu bind` 将调用时的当前目录精确保存为 workspace root，即使它位于 Git 仓库内。只有一个新出现且可用的 Terminal 时直接交给 uu-cli，不弹窗也不再问一次。多个候选时，在当前 PowerShell 列出编号、设备名、Terminal 名和创建时间（UTC），输入编号只授权所选的一个，Enter 取消；不需要关闭其他手动使用的 Terminal。首次绑定时在当前 PowerShell 确认远端工作目录，默认值来自所选 Terminal 的 `pwd`。没有可用 Terminal 时，命令说明下一步；用户准备好后再次运行 `uu bind`。
 
-要逐个增加并发 worker：在官方 UU 中再开一个专用 Terminal，按需关闭它自己的标签页，再由用户在同一 workspace 再运行一次 `uu bind`。新 Terminal 唯一可用时会加入同一设备的 pool，并保留 workspace 已记住的 remote root。多个候选时不会猜选；先在官方 UU 中整理为唯一候选。只有用户明确选择更改设备或 remote root 时才更改绑定。
+要增加并发 worker：在官方 UU 中再开一个专用 Terminal，按需关闭它自己的标签页，再由用户在同一 workspace 运行 `uu bind`。唯一候选直接加入同设备 pool，多个候选按编号选一个；保留 workspace 已记住的 remote root。未选择的 Terminal 不授权、不 attach。只有用户明确选择更改设备或 remote root 时才更改绑定。
 
 Agent 的正常 `uu <command>` 不会自动绑定、授权或等待新 Terminal。若 workspace 未绑定或没有已授权 worker，命令会提示用户手动运行 `uu bind`。已授权 worker 全忙时，命令排队并报告队列位置，不会取消或 kill 其他 job；状态未知的 worker 会保持隔离。
 

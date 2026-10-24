@@ -102,7 +102,7 @@ uu "cd src && source .venv/bin/activate && python main.py"
 必须遵守：
 
 - 用户在官方 UU 中逐个打开专用 Terminal；按需关闭该 Terminal 自己的官方标签页以释放连接，然后在目标 workspace 的调用终端运行 `uu bind`；
-- 用户运行 `uu bind` 的动作授权本次唯一新出现、可用的 detached Terminal；若候选设备或 Terminal 不唯一，明确报歧义并退出，让用户手动处理后重跑，不弹窗、不猜；
+- 用户运行 `uu bind` 时，唯一新出现且可用的 Terminal 直接授权；多个候选在当前调用终端列出设备名、Terminal 名和创建时间，由用户输入编号选择一个，Enter 取消，不弹窗、不猜；
 - 首次绑定时确认 remote root；重复 `uu bind` 为同一设备 worker pool 增加所选 Terminal，并保留现有 remote root；只有用户明确选择更改时才修改 remote root 或设备绑定；
 - Terminal 自动发现/库存刷新不构成授权；后台组件不得弹窗或自动授权；
 - 普通 `uu <command>`、`put`、`get` 不得自动绑定、授权或等待新 Terminal；若 workspace 未绑定或没有已授权 worker，清楚提示用户自行运行 `uu bind`；
@@ -117,7 +117,7 @@ uu "cd src && source .venv/bin/activate && python main.py"
 - binding 存在用户侧，不污染 repo；
 - Windows 默认状态使用 `%USERPROFILE%\.uu-cli`，避免打包应用的 AppData 虚拟化分裂授权、锁和队列；旧配置导入必须保留 unknown/quarantine，不得恢复已拒绝授权；
 - 从子目录运行时使用最近的 workspace binding；
-- 通常只允许一个新出现且可用的 detached Terminal；候选不唯一时给出明确错误，用户自行整理后再次运行 `uu bind`；
+- 多个待绑定 Terminal 由用户在 `uu bind` 当前终端按编号选一个；未选择的 Terminal 不授权、不 attach；
 - 不要求用户或 Codex 看到裸 deviceId；
 - 绝不能根据相似名字猜错设备；
 - 已绑定后日常 `uu` 不再要求设备选择；

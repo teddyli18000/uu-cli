@@ -335,6 +335,40 @@ fn fixture_terminal(name: &str, created_at: &str) -> Value {
     })
 }
 
+fn seed_existing_binding(test: &Workspace, remote_root: &str) -> String {
+    let old_fingerprint = fingerprint("bash-existing", "2026-10-20T12:30:00Z");
+    fs::create_dir_all(test.config.parent().unwrap()).unwrap();
+    fs::write(
+        &test.config,
+        serde_json::to_vec(&json!({
+            "version": 1,
+            "bindings": [{
+                "local_root": fs::canonicalize(&test.root).unwrap().to_string_lossy(),
+                "device_identity": DEVICE_ID,
+                "device_name": DEVICE_NAME,
+                "remote_root": remote_root,
+            }],
+            "authorized_workers": [old_fingerprint],
+            "declined_workers": [],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    old_fingerprint
+}
+
+fn two_new_terminals_fixture() -> Value {
+    json!({"devices": [{
+        "deviceId": DEVICE_ID,
+        "deviceName": DEVICE_NAME,
+        "isOnline": true,
+        "terminals": [
+            fixture_terminal("bash-new-a", "2026-10-21T12:00:00Z"),
+            fixture_terminal("bash-new-b", "2026-10-21T12:01:00Z")
+        ]
+    }]})
+}
+
 fn assert_success(output: &Output, label: &str) {
     assert!(
         output.status.success(),
@@ -578,60 +612,28 @@ fn windows_repeated_bind_adds_and_routes_new_terminal() {
 }
 
 #[test]
-fn windows_bind_rejects_multiple_new_terminals_without_authorizing_either() {
+fn windows_bind_selects_second_new_terminal_and_retains_existing_root() {
     let test = Workspace::new();
-    let old_fingerprint = fingerprint("bash-existing", "2026-10-20T12:30:00Z");
-    fs::create_dir_all(test.config.parent().unwrap()).unwrap();
-    fs::write(
-        &test.config,
-        serde_json::to_vec(&json!({
-            "version": 1,
-            "bindings": [{
-                "local_root": fs::canonicalize(&test.root).unwrap().to_string_lossy(),
-                "device_identity": DEVICE_ID,
-                "device_name": DEVICE_NAME,
-                "remote_root": "/home/kept-root",
-            }],
-            "authorized_workers": [old_fingerprint],
-            "declined_workers": [],
-        }))
-        .unwrap(),
-    )
-    .unwrap();
-    atomic_fixture(
-        &test.fixture,
-        &json!({"devices": [{
-            "deviceId": DEVICE_ID,
-            "deviceName": DEVICE_NAME,
-            "isOnline": true,
-            "terminals": [
-                fixture_terminal("bash-new-a", "2026-10-21T12:00:00Z"),
-                fixture_terminal("bash-new-b", "2026-10-21T12:01:00Z")
-            ]
-        }]}),
-    );
+    let kept_root = "/home/kept-root";
+    let old_fingerprint = seed_existing_binding(&test, kept_root);
+    atomic_fixture(&test.fixture, &two_new_terminals_fixture());
 
     let mut command = base_command(&test, &bash_path());
     command.arg("bind");
-    let started = Instant::now();
-    let output = Running::start(command, b"").finish(Duration::from_secs(10), &test);
-    assert!(
-        !output.status.success(),
-        "ambiguous Terminal set must not be guessed"
-    );
-    assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "ambiguity should fail fast"
-    );
+    let output = Running::start(command, b"2\n").finish(Duration::from_secs(20), &test);
+    assert_success(&output, "choose second Terminal during repeat bind");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        !stdout.contains("Terminal 编号"),
-        "bind must not silently offer pool-style routing: {stdout:?}"
+        stdout.contains("交给 CLI 的 Terminal 编号（Enter 取消）："),
+        "multiple new Terminals should prompt in the caller console: {stdout:?}"
     );
     assert!(
         !stdout.contains("Remote root ["),
-        "ambiguous bind must not capture or replace a root: {stdout:?}"
+        "same-device repeat bind should retain the existing root: {stdout:?}"
     );
+    let first = stdout.find("1. 测试设备 · bash-new-a").unwrap();
+    let second = stdout.find("2. 测试设备 · bash-new-b").unwrap();
+    assert!(first < second, "Terminal list must be sorted: {stdout:?}");
 
     let config: Value = serde_json::from_slice(&fs::read(&test.config).unwrap()).unwrap();
     assert_eq!(
@@ -639,14 +641,173 @@ fn windows_bind_rejects_multiple_new_terminals_without_authorizing_either() {
         1,
         "{config:#}"
     );
-    assert_eq!(config["bindings"][0]["remote_root"], "/home/kept-root");
-    assert_eq!(config["authorized_workers"].as_array().unwrap().len(), 1);
+    assert_eq!(config["bindings"][0]["remote_root"], kept_root);
+    let authorized = config["authorized_workers"].as_array().unwrap();
+    assert_eq!(authorized.len(), 2, "{config:#}");
+    assert!(authorized.contains(&json!(old_fingerprint)));
+    assert!(authorized.contains(&json!(fingerprint("bash-new-b", "2026-10-21T12:01:00Z"))));
+    assert!(!authorized.contains(&json!(fingerprint("bash-new-a", "2026-10-21T12:00:00Z"))));
     let events = read_events(&test.events);
     assert!(
         events_named(&events, "attach_started").is_empty(),
         "{events:#?}"
     );
     assert!(events_named(&events, "dispatch").is_empty(), "{events:#?}");
+}
+
+#[test]
+fn windows_bind_enter_escape_and_eof_cancel_without_state_changes() {
+    for (label, input, expected_success) in [
+        ("Enter", b"\n".as_slice(), true),
+        ("Escape", b"\x1b\n".as_slice(), true),
+        ("EOF", b"".as_slice(), false),
+    ] {
+        let test = Workspace::new();
+        seed_existing_binding(&test, "/home/kept-root");
+        atomic_fixture(&test.fixture, &two_new_terminals_fixture());
+        let original_config = fs::read(&test.config).unwrap();
+        let mut command = base_command(&test, &bash_path());
+        command.arg("bind");
+        let output = Running::start(command, input).finish(Duration::from_secs(15), &test);
+
+        assert_eq!(
+            output.status.success(),
+            expected_success,
+            "{label} cancellation status: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if label == "EOF" {
+            let diagnostic = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(
+                diagnostic.contains("binding input closed"),
+                "{diagnostic:?}"
+            );
+        } else {
+            assert!(
+                String::from_utf8_lossy(&output.stdout).contains("已取消绑定。"),
+                "{label} should report cancellation: {}",
+                String::from_utf8_lossy(&output.stdout)
+            );
+        }
+        assert_eq!(
+            fs::read(&test.config).unwrap(),
+            original_config,
+            "{label} must not change binding or authorization"
+        );
+        let events = read_events(&test.events);
+        assert!(
+            events_named(&events, "attach_started").is_empty(),
+            "{label} cancellation must not attach: {events:#?}"
+        );
+        assert!(
+            events_named(&events, "dispatch").is_empty(),
+            "{label} cancellation must not dispatch: {events:#?}"
+        );
+    }
+}
+
+#[test]
+fn windows_bind_reprompts_after_invalid_terminal_numbers() {
+    let test = Workspace::new();
+    let old_fingerprint = seed_existing_binding(&test, "/home/kept-root");
+    atomic_fixture(&test.fixture, &two_new_terminals_fixture());
+
+    let mut command = base_command(&test, &bash_path());
+    command.arg("bind");
+    let output =
+        Running::start(command, b"0\n99\ntext\n2\n").finish(Duration::from_secs(20), &test);
+    assert_success(&output, "reprompt after invalid Terminal choices");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        stdout
+            .matches("交给 CLI 的 Terminal 编号（Enter 取消）：")
+            .count(),
+        4,
+        "each invalid answer should be followed by a fresh prompt: {stdout:?}"
+    );
+    let config: Value = serde_json::from_slice(&fs::read(&test.config).unwrap()).unwrap();
+    assert_eq!(config["bindings"].as_array().unwrap().len(), 1);
+    assert_eq!(config["bindings"][0]["remote_root"], "/home/kept-root");
+    let authorized = config["authorized_workers"].as_array().unwrap();
+    assert_eq!(authorized.len(), 2, "{config:#}");
+    assert!(authorized.contains(&json!(old_fingerprint)));
+    assert!(authorized.contains(&json!(fingerprint("bash-new-b", "2026-10-21T12:01:00Z"))));
+    assert!(!authorized.contains(&json!(fingerprint("bash-new-a", "2026-10-21T12:00:00Z"))));
+    let events = read_events(&test.events);
+    assert!(
+        events_named(&events, "attach_started").is_empty(),
+        "{events:#?}"
+    );
+    assert!(events_named(&events, "dispatch").is_empty(), "{events:#?}");
+}
+
+#[test]
+fn windows_first_bind_selects_terminal_from_chosen_device() {
+    let test = Workspace::new();
+    let bash = bash_path();
+    let remote_directory = test._temp.path().join("remote-root");
+    fs::create_dir_all(&remote_directory).unwrap();
+    let expected_root = remote_pwd(&bash, &remote_directory);
+    atomic_fixture(
+        &test.fixture,
+        &json!({"devices": [
+            {
+                "deviceId": "device-z",
+                "deviceName": "Beta device",
+                "isOnline": true,
+                "terminals": [fixture_terminal("bash-beta", "2026-10-21T12:00:00Z")]
+            },
+            {
+                "deviceId": "device-a",
+                "deviceName": "Alpha device",
+                "isOnline": true,
+                "terminals": [fixture_terminal("bash-alpha", "2026-10-21T12:59:00Z")]
+            }
+        ]}),
+    );
+
+    let mut command = base_command(&test, &bash);
+    command.arg("bind");
+    let output = Running::start(command, b"2\n\n").finish(Duration::from_secs(30), &test);
+    assert_success(&output, "choose device during first bind");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let alpha = stdout.find("1. Alpha device · bash-alpha").unwrap();
+    let beta = stdout.find("2. Beta device · bash-beta").unwrap();
+    assert!(
+        alpha < beta,
+        "device candidates should be sorted: {stdout:?}"
+    );
+
+    let config: Value = serde_json::from_slice(&fs::read(&test.config).unwrap()).unwrap();
+    assert_eq!(config["bindings"].as_array().unwrap().len(), 1);
+    assert_eq!(config["bindings"][0]["device_identity"], "device-z");
+    assert_eq!(config["bindings"][0]["device_name"], "Beta device");
+    assert_eq!(config["bindings"][0]["remote_root"], expected_root);
+    assert_eq!(
+        config["authorized_workers"].as_array().unwrap(),
+        &[json!("device-z\u{1f}bash-beta\u{1f}2026-10-21T12:00:00Z")]
+    );
+    let events = read_events(&test.events);
+    let attaches = events_named(&events, "attach_started");
+    assert_eq!(attaches.len(), 1, "{events:#?}");
+    assert_eq!(attaches[0]["deviceId"], "device-z");
+    assert_eq!(attaches[0]["sessionName"], "bash-beta");
+    assert_eq!(attaches[0]["available"], true);
+    let dispatches = events_named(&events, "dispatch");
+    assert_eq!(
+        dispatches.len(),
+        1,
+        "first bind should only capture pwd: {events:#?}"
+    );
+    assert!(dispatches
+        .iter()
+        .all(|event| { event["deviceId"] == "device-z" && event["sessionName"] == "bash-beta" }));
 }
 
 #[test]

@@ -44,7 +44,7 @@ remote device + remote root
 - binding 放在用户侧，不污染项目仓库；
 - v1 一个 workspace 只绑定一台远端设备；
 - Codex 不选择、不看到裸 `deviceId`，也不替用户运行 `uu bind`/`uu list`；
-- 通常只有一个新出现且可用的 detached Terminal，用户运行 `uu bind` 即授权；候选不唯一则返回歧义诊断，不弹选择器、不猜；
+- 唯一新出现且可用的 Terminal 在用户运行 `uu bind` 时直接授权；多个候选在当前调用终端输入编号选一个，Enter 取消，不弹独立窗口、不猜；
 - 同一远端设备可以服务多个本地 workspace，这些 workspace 共享设备级 worker pool，但各自 remote root 必须严格独立。
 
 ## 3. Terminal 的产品语义
@@ -66,10 +66,10 @@ Terminal 只是执行资源，不是 Agent 的长期上下文：
 只有用户亲自运行 `uu bind` 才会绑定 workspace 或授权 Terminal。交互直接显示在该命令的调用终端，不创建弹窗/独立 console。Agent 永远不得代跑 `uu bind` 或 `uu list`。
 
 - 用户在官方 UU 中逐个打开专用 Terminal；按需关闭各自的官方标签页以释放连接，然后在目标 workspace 运行 `uu bind`；
-- `uu bind` 只接受唯一新出现且可用的 detached Terminal；用户运行命令即明确交给 uu-cli，不额外询问。候选不唯一则诊断并结束，由用户整理后重跑；
+- `uu bind` 唯一候选直接授权；多个候选显示设备名、Terminal 名和创建时间（UTC），在当前终端输入编号选择一个，Enter 取消；保存授权前核对实例仍可用，未选择的不授权、不 attach；
 - 当前目录精确保存为 local workspace root，不自动改成 Git root；
 - 首次 binding 在调用终端确认 remote root，默认值可以来自唯一 Terminal 的 `pwd`；
-- 对已绑定 workspace 重复运行 `uu bind`，为同一设备 pool 加入唯一候选 Terminal，并保留已记住的 remote root；只有用户明确选择更改 remote root 时才更新；
+- 对已绑定 workspace 重复运行 `uu bind`，为同一设备 pool 加入所选 Terminal，并保留已记住的 remote root；只有用户明确选择更改 remote root 时才更新；
 - 没有可用 Terminal 时，`uu bind` 返回明确提示，让用户打开专用 Terminal 后再次手动运行；不等待 Terminal 出现；
 - 自动发现/库存刷新永不构成授权。普通 `uu <command>`、`put`、`get` 不自动 setup、绑定、授权或弹窗。缺少 binding/已授权 worker 时返回清楚诊断，要求用户运行 `uu bind`；
 - 已授权 worker 全忙时 job 排队并报告队列位置，不取消或 kill 其他 job；unknown/quarantined worker 必须继续隔离，`uu bind` 也不能把它当成空闲 worker。
@@ -251,7 +251,7 @@ Agent 不管理 deviceId、session、worker 或 uu-cli 后台生命周期，不�
 实现者自行决定开发顺序和代码结构，但 v1 完成前必须证明：
 
 - 全新 workspace 由用户手动运行 `uu bind` 完成首次 binding；
-- 唯一新 Terminal 可被 `uu bind` 明确授权；候选不唯一时诊断退出，不弹窗、不猜、不绑定；
+- 唯一候选直接授权；多个候选编号选择且仅授权选中实例，Enter/输入关闭不修改授权，不弹窗、不猜；
 - `uu bind` 当前目录精确成为 workspace root，包括 Git 仓库内目录；
 - Terminal 授权只由用户运行 `uu bind` 完成，且在调用终端内无弹窗或二次确认；
 - 重复 `uu bind` 可为同设备 pool 增加 Terminal，保留 remote root；

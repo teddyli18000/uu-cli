@@ -4,11 +4,11 @@
 
 详细产品契约见 `DESIGN.md`，概念架构见 `ARCHITECTURE.md`，实现目标与验收见 `IMPLEMENTATION.md`，验证策略见 `TESTING.md`。
 
-## 当前进度（2026-10-21）
+## 当前进度（2026-10-24）
 
-`v0.1.2` 在手动绑定、无弹窗和按设备排队基础上，统一 Windows 用户状态目录，修复人类终端与 Codex 因 AppData 虚拟化读到不同授权的问题。2026-10-21 的 WSL/小车实测证明 shell、worker 并发、跨 workspace 隔离和文件通道等能力；当时的 watcher、弹窗授权及等待请求自动接收属于历史交互，不能作为新契约的验收证据。详细历史见 [TESTING.md](TESTING.md#历史实现与实测记录2026-10-21) 和 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
+`v0.1.3` 新增当前终端内的多候选编号选择，唯一候选仍直接授权。此前在手动绑定、无弹窗和按设备排队基础上，统一 Windows 用户状态目录，修复人类终端与 Codex 因 AppData 虚拟化读到不同授权的问题。2026-10-21 的 WSL/小车实测证明 shell、worker 并发、跨 workspace 隔离和文件通道等能力；当时的 watcher、弹窗授权及等待请求自动接收属于历史交互，不能作为新契约的验收证据。详细历史见 [TESTING.md](TESTING.md#历史实现与实测记录2026-10-21) 和 [REAL_UU_FINDINGS.md](REAL_UU_FINDINGS.md)。
 
-当前仍为验证候选，不是 v1 完成。真实 public caller 在已发送长任务期间崩溃后不重放任务的证据仍有效。新的 inline `uu bind`、当前目录作为 workspace root、候选歧义诊断和队列位置已实现并加入自动化验收；网络/UU/Terminal/worker-helper 故障恢复、真实多设备，以及外部干净 Windows 从安装到实际使用仍待 `requires-real-uu` 验收。
+当前仍为验证候选，不是 v1 完成。真实 public caller 在已发送长任务期间崩溃后不重放任务的证据仍有效。新的 inline `uu bind`、当前目录作为 workspace root、多候选编号选择和队列位置已实现并加入自动化验收；网络/UU/Terminal/worker-helper 故障恢复、真实多设备，以及外部干净 Windows 从安装到实际使用仍待 `requires-real-uu` 验收。
 
 ## 当前产品模型
 
@@ -20,7 +20,7 @@ Remote Binding = device + remote root
 Device-level Terminal Worker Pool
 ```
 
-用户在官方 UU 中手工逐个打开 Terminal，并在目标当前目录手动运行 `uu bind`。`uu-cli` 不自动授权；候选不唯一时诊断退出。Codex 不运行 `uu bind`/`uu list`，不选择 deviceId，不管理 session，也不依赖某个 Terminal 的长期 shell-local 状态。
+用户在官方 UU 中手工逐个打开 Terminal，并在目标当前目录手动运行 `uu bind`。`uu-cli` 不自动授权；候选不唯一时在当前终端按编号选择一个。Codex 不运行 `uu bind`/`uu list`，不选择 deviceId，不管理 session，也不依赖某个 Terminal 的长期 shell-local 状态。
 
 同一 remote device 可以服务多个 local workspace；worker pool 归 device，共享 worker，但每个 job 使用自己 workspace 的 remote root。
 
@@ -74,7 +74,7 @@ uu -- <remote command...>
 验收：
 
 - workspace root 识别正确；
-- 候选唯一时完成绑定；有歧义时明确失败，不弹 picker、不猜；
+- 候选唯一时完成绑定；多个候选时在当前终端按编号选一个，Enter 取消，不弹窗、不猜；
 - Codex 不需要 deviceId/session；
 - `uu bind` 将当前目录精确保存为 workspace root；
 - 用户运行 bind 即明确授权，无弹窗或第二次授权确认；
@@ -95,7 +95,7 @@ uu -- <remote command...>
 验收：
 
 - `uu bind` 只接受唯一新出现且可用的 detached Terminal；
-- 用户每次只绑定一个 Terminal，候选不唯一时诊断并退出；
+- 用户每次只绑定一个 Terminal，多个候选时在当前终端按编号选一个；
 - 授权交互只在调用终端内；没有弹窗、后台授权或普通命令 setup；
 - 重复 bind 为同设备 pool 添加 worker，并保留 remote root；
 - 一个 worker 同时只执行一个 job；
@@ -204,7 +204,7 @@ uu get remote/test.bin .\roundtrip.bin
 并满足：
 
 - 首次绑定在用户运行的 `uu bind` 中完成，current directory 原样作为 workspace root；
-- 唯一 Terminal 直接授权，候选歧义时报错且不弹窗、不猜；
+- 唯一 Terminal 直接授权，多个候选时在当前终端按编号选一个，不弹窗、不猜；
 - 无需重复确认，也不会由后台或普通命令自动授权；
 - 重复 bind 保留 root 并增加同设备 worker；
 - 已授权 worker 忙时队列位置明确；

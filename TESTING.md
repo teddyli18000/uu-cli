@@ -63,7 +63,7 @@ GitHub-hosted runner **不能被当作真实 UU 端到端环境的替代品**。
 - UU 重启、远端网络异常、真实 session 消失；
 - 原生文件通道的真实 round-trip；
 - 用户手动运行 `uu bind` 后，当前目录成为 workspace root，唯一候选 Terminal 获得授权，并在调用终端确认 remote root；
-- 多个设备/Terminal 候选时直接诊断退出，不弹 picker、不猜；
+- 多个设备/Terminal 候选在调用终端按编号选一个，Enter 取消，不弹独立窗口、不猜；
 - 普通命令遇到缺少 binding/授权 worker 时是否只给出清楚诊断，不弹窗、不等待授权。
 
 CI 做不到时要明确标记 `requires-real-uu`，不能通过 mock 以后声称端到端已经验证。
@@ -99,7 +99,7 @@ job: not-sent / running / finished / connection-unknown
 
 - `uu bind` 与 `uu list` 只能由用户手动执行，Agent 不代跑；`uu list` 只读；
 - `uu bind` 所有交互在调用终端内进行，不出现独立弹窗/console；
-- 用户运行 `uu bind` 即表示要绑定；唯一新出现且可用的 detached Terminal 直接授权，不追加二次确认；候选不唯一时诊断退出，不保存授权；
+- 用户运行 `uu bind` 即表示要绑定；唯一候选直接授权，不追加二次确认；多个候选输入编号只授权所选实例，输入非法重问，Enter/EOF 不修改配置；
 - `uu bind` 以调用时的当前目录精确作为 local workspace root，即使该目录在 Git 仓库内；
 - 用户逐个打开官方 UU Terminal 并逐个运行 `uu bind`；同设备重复绑定增加 worker 并保留当前 remote root；
 - 重复 bind 保留原 remote root，除非用户明确选择更改；
@@ -175,7 +175,7 @@ Windows workspace key 至少验证：
 3. 如果 CI 环境允许，当前官方 UU 客户端下载、签名与组件发现 smoke test 通过；如果环境不支持，清楚标记而不是伪造通过；
 4. 真实 Windows + 已登录官方 UU + 真实远端设备完成 shell、多 worker、长任务、异常恢复、`put/get` 验收；
 5. 非开发机或干净 Windows 环境完成从安装到首次 `uu bind`、普通命令执行的完整体验；
-6. 在真实 Windows 验证 inline `uu bind`、当前目录 workspace root、唯一候选直接授权、歧义时报错、重复绑定保留 remote root、无 popup、普通命令不自动绑定/授权；旧版弹窗和等待请求的结果不得作为此项通过证据。
+6. 在真实 Windows 验证 inline `uu bind`、当前目录 workspace root、唯一候选直接授权、多个候选编号选择及取消、重复绑定保留 remote root、无 popup、普通命令不自动绑定/授权；旧版弹窗和等待请求的结果不得作为此项通过证据。
 
 只有 mock 通过不等于 v1 完成。
 

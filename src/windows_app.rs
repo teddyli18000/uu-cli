@@ -184,6 +184,45 @@ fn prompt(label: &str) -> Result<String> {
     Ok(line.trim().to_owned())
 }
 
+fn choose_bind_session(mut candidates: Vec<SessionInfo>) -> Result<Option<SessionInfo>> {
+    candidates.sort_by(|a, b| {
+        (&a.device_name, &a.created_at, &a.session_name).cmp(&(
+            &b.device_name,
+            &b.created_at,
+            &b.session_name,
+        ))
+    });
+    if candidates.len() == 1 {
+        return Ok(candidates.pop());
+    }
+    println!("发现多个待绑定 Terminal：");
+    for (index, session) in candidates.iter().enumerate() {
+        println!(
+            "{}. {} · {} · 创建于 {} (UTC)",
+            index + 1,
+            session.device_name,
+            session.session_name,
+            session.created_at.as_deref().unwrap_or("unknown")
+        );
+    }
+    loop {
+        let answer = prompt("交给 CLI 的 Terminal 编号（Enter 取消）：")?;
+        if answer.is_empty() || answer.contains('\u{1b}') {
+            println!("已取消绑定。");
+            return Ok(None);
+        }
+        if let Some(index) = answer
+            .parse::<usize>()
+            .ok()
+            .and_then(|number| number.checked_sub(1))
+            .filter(|index| *index < candidates.len())
+        {
+            return Ok(Some(candidates.remove(index)));
+        }
+        println!("请输入 1 到 {} 的编号，或按 Enter 取消。", candidates.len());
+    }
+}
+
 fn setup(store: &ConfigStore) -> Result<()> {
     let _lock = interaction_lock(store)?;
     let cwd = env::current_dir()?;
@@ -213,10 +252,22 @@ fn setup(store: &ConfigStore) -> Result<()> {
     if new_sessions.is_empty() {
         bail!("no available new dedicated Terminal; open one in official UU, close its tab without typing exit, then run uu bind again; unknown workers remain quarantined");
     }
-    if new_sessions.len() != 1 {
-        bail!("ambiguous Terminal hand-off: expected exactly one new live detached Terminal; leave only the intended Terminal available, then run uu bind again");
+    let Some(selected) = choose_bind_session(new_sessions)? else {
+        return Ok(());
+    };
+    let session = &selected;
+    // A human may spend time choosing. Never authorize a replacement that has
+    // reused the displayed name while the prompt was open.
+    if !cli
+        .list_sessions(&session.device_identity)?
+        .iter()
+        .any(|now| {
+            is_eligible_session(now)
+                && now.authorization_fingerprint() == session.authorization_fingerprint()
+        })
+    {
+        bail!("selected Terminal is no longer available; no authorization was saved; run uu bind again");
     }
-    let session = &new_sessions[0];
     let device_id = session.device_identity.clone();
     let device_name = session.device_name.clone();
     // Running bind is the human's explicit hand-off; no redundant accept prompt.
